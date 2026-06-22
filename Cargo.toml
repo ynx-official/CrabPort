@@ -1,0 +1,19 @@
+[package]
+name = "crabport"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+crabport-ui = { path = "crabport-ui" }
+gpui = { version = "0.2", default-features = false, features = ["font-kit"] }
+gpui-component = "0.5"
+
+[workspace]
+members = [
+    "crabport-core",
+    "crabport-ssh",
+    "crabport-sftp",
+    "crabport-forward",
+    "crabport-editor",
+    "crabport-ui",
+]

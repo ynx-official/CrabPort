@@ -1,0 +1,13 @@
+sidebar:
+  hosts: "主机"
+  credentials: "凭证"
+  snippets: "代码片段"
+  history: "历史记录"
+tab_bar:
+  title: "Crabport"
+command:
+  placeholder: "输入命令或搜索..."
+new_connection:
+  ssh_new: "新建 SSH 连接"
+  sftp_new: "新建 SFTP 连接"
+  group_ssh: "SSH"

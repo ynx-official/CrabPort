@@ -1,0 +1,13 @@
+sidebar:
+  hosts: "Hosts"
+  credentials: "Credentials"
+  snippets: "Snippets"
+  history: "History"
+tab_bar:
+  title: "Crabport"
+command:
+  placeholder: "Type a command or search..."
+new_connection:
+  ssh_new: "New SSH Connection"
+  sftp_new: "New SFTP Connection"
+  group_ssh: "SSH"
