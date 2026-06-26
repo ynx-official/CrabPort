@@ -479,13 +479,32 @@ impl CrabportApp {
         let info = SshConnectionInfo::new(host, username, password).with_port(port);
         let cols: usize = 80;
         let rows: usize = 24;
-        let backend = Arc::new(SshBackend::new(info, cols as u16, rows as u16));
+
+        // Create the overlay state early so the SSH backend callback can write to it
+        let overlay: crate::views::terminal::connection_overlay::SharedOverlayState =
+            std::sync::Arc::new(parking_lot::Mutex::new(
+                crate::views::terminal::connection_overlay::ConnectionOverlayState::new(),
+            ));
+        let overlay_cb = overlay.clone();
+
+        let backend = Arc::new(SshBackend::new(
+            info,
+            cols as u16,
+            rows as u16,
+            Arc::new(move |msg: String| {
+                overlay_cb.lock().log(
+                    crate::views::terminal::connection_overlay::ConnectionLogLevel::Info,
+                    msg,
+                );
+            }),
+        ));
         let terminal_view = cx.new(|cx| {
-            TerminalView::with_backend_and_host(
+            TerminalView::with_backend_and_host_and_overlay(
                 backend,
                 cols,
                 rows,
                 format!("{}@{}", username, host),
+                overlay,
                 cx,
             )
         });

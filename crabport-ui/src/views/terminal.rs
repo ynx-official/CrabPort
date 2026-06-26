@@ -17,7 +17,7 @@ use parking_lot::Mutex;
 use crate::app::{CrabPortTab, TerminalShiftTab, TerminalTab};
 
 mod color;
-mod connection_overlay;
+pub mod connection_overlay;
 mod selection;
 
 use color::*;
@@ -73,6 +73,19 @@ impl TerminalView {
         host: String,
         cx: &mut Context<Self>,
     ) -> Self {
+        let overlay = Arc::new(Mutex::new(ConnectionOverlayState::new()));
+        Self::with_backend_and_host_and_overlay(backend, cols, rows, host, overlay, cx)
+    }
+
+    /// Create a TerminalView with a pre-built backend, host label, and shared overlay state.
+    pub fn with_backend_and_host_and_overlay(
+        backend: Arc<dyn crabport_terminal::terminal::CrabPortTerminal>,
+        cols: usize,
+        rows: usize,
+        host: String,
+        overlay: SharedOverlayState,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus_handle = cx.focus_handle();
         let font_size = px(13.0);
         let line_height = px(20.0);
@@ -86,19 +99,10 @@ impl TerminalView {
 
         // -- Connection overlay --
         let is_remote = !host.is_empty();
-        let overlay = Arc::new(Mutex::new(ConnectionOverlayState::new()));
 
-        if is_remote {
-            overlay.lock().log(
-                ConnectionLogLevel::Info,
-                format!("Connecting to {}...", host),
-            );
-        }
-
-        // Subscribe to backend events to collect connection logs.
+        // Subscribe to backend events for error/close notifications.
         let mut event_rx = session.subscribe_backend();
         let overlay_c = overlay.clone();
-        let _host_c = host.clone();
         let entity = cx.entity().downgrade();
         cx.spawn(async move |_this, cx| {
             while let Ok(event) = event_rx.recv().await {
@@ -123,8 +127,6 @@ impl TerminalView {
         let mut wakeup_rx = session.subscribe_wakeup();
         let entity = cx.entity().downgrade();
         let blink_entity = entity.clone();
-        let _overlay_wakeup = overlay.clone();
-        let _host_wakeup = host.clone();
         cx.spawn(async move |_this, cx| {
             #[cfg(debug_assertions)]
             tracing::info!("wakeup listener started");

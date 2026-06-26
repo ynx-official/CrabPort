@@ -82,10 +82,16 @@ pub struct SshBackend {
     event_tx: BroadcastSender<BackendEvent>,
     _event_rx: InactiveReceiver<BackendEvent>,
     monitor: Arc<RwLock<MonitorState>>,
+    _on_status: Arc<dyn Fn(String) + Send + Sync>,
 }
 
 impl SshBackend {
-    pub fn new(info: SshConnectionInfo, cols: u16, rows: u16) -> Self {
+    pub fn new(
+        info: SshConnectionInfo,
+        cols: u16,
+        rows: u16,
+        on_status: Arc<dyn Fn(String) + Send + Sync>,
+    ) -> Self {
         let (event_tx, event_rx) = broadcast(1024);
         let _event_rx = event_rx.deactivate();
         let (command_tx, command_rx) = unbounded::<Command>();
@@ -98,19 +104,17 @@ impl SshBackend {
         let event_tx2 = event_tx.clone();
         let monitor2 = monitor.clone();
         let info_for_monitor = info.clone();
+        let on_status2 = on_status.clone();
 
         TOKIO.spawn(async move {
             // ---- 1. Connect ----
-            #[cfg(debug_assertions)]
-            info!(
-                "SSH: connecting to {}@{}:{}",
-                info.username, info.host, info.port
-            );
-            let config = Arc::new(client::Config::default());
             let addr = format!("{}:{}", info.host, info.port);
+            on_status2(format!("Connecting to {}", addr));
+
+            let config = Arc::new(client::Config::default());
             let mut sh = match client::connect(config, &addr, SshHandler).await {
                 Ok(sh) => {
-                    debug!("SSH: TCP connected to {addr}");
+                    on_status2("TCP connection established".into());
                     sh
                 }
                 Err(e) => {
@@ -128,8 +132,7 @@ impl SshBackend {
 
             // ---- 2. Authenticate ----
             if info.uses_key_auth() {
-                #[cfg(debug_assertions)]
-                info!("SSH: authenticating with private key");
+                on_status2("Authenticating with public key...".into());
 
                 let key_str = info.private_key.as_deref().unwrap_or("");
                 let key_pair = match decode_private_key(key_str, info.passphrase.as_deref()) {
@@ -142,7 +145,7 @@ impl SshBackend {
                         }
                         let _ = event_tx2
                             .broadcast(BackendEvent::Error(format!(
-                                "private key decode failed: {e}"
+                                "Public key decode failed: {e}"
                             )))
                             .await;
                         return;
@@ -160,20 +163,15 @@ impl SshBackend {
                         m.status = RemoteStatus::Disconnected;
                     }
                     let _ = event_tx2
-                        .broadcast(BackendEvent::Error(format!("key auth failed: {e}")))
+                        .broadcast(BackendEvent::Error(format!(
+                            "Public key authentication failed: {e}"
+                        )))
                         .await;
                     return;
                 }
+                on_status2("Public key authentication succeeded".into());
             } else {
-                #[cfg(debug_assertions)]
-                info!(
-                    "SSH: authenticating with password '{}'",
-                    if info.password.is_empty() {
-                        "(empty)"
-                    } else {
-                        "***"
-                    }
-                );
+                on_status2("Authenticating with password...".into());
                 if let Err(e) = sh
                     .authenticate_password(&info.username, &info.password)
                     .await
@@ -184,18 +182,20 @@ impl SshBackend {
                         m.status = RemoteStatus::Disconnected;
                     }
                     let _ = event_tx2
-                        .broadcast(BackendEvent::Error(format!("auth failed: {e}")))
+                        .broadcast(BackendEvent::Error(format!(
+                            "Password authentication failed: {e}"
+                        )))
                         .await;
                     return;
                 }
+                on_status2("Password authentication succeeded".into());
             }
-            #[cfg(debug_assertions)]
-            debug!("SSH: authenticated as {}", info.username);
 
             // ---- 3. Open session channel ----
+            on_status2("Opening session channel...".into());
             let mut channel: Channel<Msg> = match sh.channel_open_session().await {
                 Ok(ch) => {
-                    debug!("SSH: session channel opened");
+                    on_status2("Session channel opened".into());
                     ch
                 }
                 Err(e) => {
@@ -205,13 +205,16 @@ impl SshBackend {
                         m.status = RemoteStatus::Disconnected;
                     }
                     let _ = event_tx2
-                        .broadcast(BackendEvent::Error(e.to_string()))
+                        .broadcast(BackendEvent::Error(format!(
+                            "Session channel open failed: {e}"
+                        )))
                         .await;
                     return;
                 }
             };
 
             // ---- 4. Request PTY ----
+            on_status2(format!("Requesting PTY ({}x{})...", cols, rows));
             let term = std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".into());
             if let Err(e) = channel
                 .request_pty(false, &term, cols as u32, rows as u32, 0, 0, &[])
@@ -223,13 +226,14 @@ impl SshBackend {
                     m.status = RemoteStatus::Disconnected;
                 }
                 let _ = event_tx2
-                    .broadcast(BackendEvent::Error(e.to_string()))
+                    .broadcast(BackendEvent::Error(format!("PTY request failed: {e}")))
                     .await;
                 return;
             }
-            debug!("SSH: PTY allocated {cols}x{rows}");
+            on_status2("PTY allocated".into());
 
             // ---- 5. Start shell ----
+            on_status2("Starting shell...".into());
             if let Err(e) = channel.request_shell(true).await {
                 error!("SSH: shell request failed: {e}");
                 {
@@ -237,11 +241,11 @@ impl SshBackend {
                     m.status = RemoteStatus::Disconnected;
                 }
                 let _ = event_tx2
-                    .broadcast(BackendEvent::Error(e.to_string()))
+                    .broadcast(BackendEvent::Error(format!("Shell request failed: {e}")))
                     .await;
                 return;
             }
-            debug!("SSH: shell started");
+            on_status2("Shell started".into());
 
             // Mark as connected
             {
@@ -317,6 +321,7 @@ impl SshBackend {
             event_tx,
             _event_rx,
             monitor,
+            _on_status: on_status,
         }
     }
 }
