@@ -18,7 +18,6 @@ use russh::{
     keys::key::KeyPair,
 };
 use tokio::{runtime::Runtime, select, sync::Mutex as TokioMutex};
-use tracing::{debug, error, info, warn};
 
 use crate::session::SshConnectionInfo;
 
@@ -118,7 +117,7 @@ impl SshBackend {
                     sh
                 }
                 Err(e) => {
-                    error!("SSH: connect failed: {e}");
+                    tracing::error!("SSH: connect failed: {e}");
                     {
                         let mut m = monitor2.write();
                         m.status = RemoteStatus::Disconnected;
@@ -138,7 +137,7 @@ impl SshBackend {
                 let key_pair = match decode_private_key(key_str, info.passphrase.as_deref()) {
                     Ok(kp) => kp,
                     Err(e) => {
-                        error!("SSH: failed to decode private key: {e}");
+                        tracing::error!("SSH: failed to decode private key: {e}");
                         {
                             let mut m = monitor2.write();
                             m.status = RemoteStatus::Disconnected;
@@ -157,7 +156,7 @@ impl SshBackend {
                     .await;
 
                 if let Err(e) = auth_result {
-                    error!("SSH: key auth failed: {e}");
+                    tracing::error!("SSH: key auth failed: {e}");
                     {
                         let mut m = monitor2.write();
                         m.status = RemoteStatus::Disconnected;
@@ -176,7 +175,7 @@ impl SshBackend {
                     .authenticate_password(&info.username, &info.password)
                     .await
                 {
-                    error!("SSH: auth failed: {e}");
+                    tracing::error!("SSH: auth failed: {e}");
                     {
                         let mut m = monitor2.write();
                         m.status = RemoteStatus::Disconnected;
@@ -199,7 +198,7 @@ impl SshBackend {
                     ch
                 }
                 Err(e) => {
-                    error!("SSH: open session failed: {e}");
+                    tracing::error!("SSH: open session failed: {e}");
                     {
                         let mut m = monitor2.write();
                         m.status = RemoteStatus::Disconnected;
@@ -220,7 +219,7 @@ impl SshBackend {
                 .request_pty(false, &term, cols as u32, rows as u32, 0, 0, &[])
                 .await
             {
-                error!("SSH: PTY request failed: {e}");
+                tracing::error!("SSH: PTY request failed: {e}");
                 {
                     let mut m = monitor2.write();
                     m.status = RemoteStatus::Disconnected;
@@ -235,7 +234,7 @@ impl SshBackend {
             // ---- 5. Start shell ----
             on_status2("Starting shell...".into());
             if let Err(e) = channel.request_shell(true).await {
-                error!("SSH: shell request failed: {e}");
+                tracing::error!("SSH: shell request failed: {e}");
                 {
                     let mut m = monitor2.write();
                     m.status = RemoteStatus::Disconnected;
@@ -275,7 +274,7 @@ impl SshBackend {
                             }
                             Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => {
                                 #[cfg(debug_assertions)]
-                                info!("SSH: channel closed by remote");
+                                tracing::info!("SSH: channel closed by remote");
                                 {
                                     let mut m = monitor2.write();
                                     m.status = RemoteStatus::Disconnected;
@@ -290,7 +289,8 @@ impl SshBackend {
                         match cmd {
                             Ok(Command::Write(data)) => {
                                 if let Err(e) = channel.data(Cursor::new(data)).await {
-                                    warn!("SSH: write error: {e}");
+                                    #[cfg(debug_assertions)]
+                                    tracing::warn!("SSH: write error: {e}");
                                 }
                             }
                             Ok(Command::Resize(cols, rows)) => {
@@ -298,7 +298,8 @@ impl SshBackend {
                                     .window_change(cols as u32, rows as u32, 0, 0)
                                     .await
                                 {
-                                    warn!("SSH: window change error: {e}");
+                                    #[cfg(debug_assertions)]
+                                    tracing::warn!("SSH: window change error: {e}");
                                 }
                             }
                             Ok(Command::Close) | Err(_) => {
