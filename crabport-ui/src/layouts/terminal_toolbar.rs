@@ -129,10 +129,17 @@ fn render_memory(memory: Option<MemoryStats>) -> Option<impl IntoElement> {
                     .bg(rgb(BORDER))
                     .child(
                         div()
+                            .id("memory-bar-fill")
                             .h_full()
-                            .w(px(filled_w))
                             .rounded(px(3.0))
-                            .bg(rgb(COLOR_ACCENT)),
+                            .bg(rgb(COLOR_ACCENT))
+                            .with_transition("memory-bar-fill")
+                            .transition_when(
+                                true,
+                                Duration::from_millis(300),
+                                EaseInOutCubic,
+                                move |el| el.w(px(filled_w)),
+                            ),
                     ),
             )
             .child(div().text_xs().child(format_memory(mem.used, mem.total))),
@@ -176,21 +183,14 @@ fn render_network(network: Option<NetworkStats>) -> Option<impl IntoElement> {
 // Formatting helpers
 // ---------------------------------------------------------------------------
 
-/// Format used/total as e.g. "2.1G / 16G" or "512M / 8G"
+/// Format used/total as e.g. "2.1G / 16.0G" or "512.0M / 8.0G"
 fn format_memory(used: u64, total: u64) -> String {
     let (used_val, used_unit) = human_bytes(used);
     let (total_val, total_unit) = human_bytes(total);
-    if used_unit == total_unit {
-        format!(
-            "{:.0}{} / {:.0}{}",
-            used_val, used_unit, total_val, total_unit
-        )
-    } else {
-        format!(
-            "{:.1}{} / {:.0}{}",
-            used_val, used_unit, total_val, total_unit
-        )
-    }
+    format!(
+        "{:.1}{} / {:.1}{}",
+        used_val, used_unit, total_val, total_unit
+    )
 }
 
 fn human_bytes(bytes: u64) -> (f64, &'static str) {

@@ -102,7 +102,7 @@ impl SidebarItem {
 
 impl CrabportApp {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        rust_i18n::set_locale("zh-CN");
+        rust_i18n::set_locale("en");
         let home_tab = Tab {
             id: 0,
             title: "Home".into(),
@@ -480,7 +480,15 @@ impl CrabportApp {
         let cols: usize = 80;
         let rows: usize = 24;
         let backend = Arc::new(SshBackend::new(info, cols as u16, rows as u16));
-        let terminal_view = cx.new(|cx| TerminalView::with_backend(backend, cols, rows, cx));
+        let terminal_view = cx.new(|cx| {
+            TerminalView::with_backend_and_host(
+                backend,
+                cols,
+                rows,
+                format!("{}@{}", username, host),
+                cx,
+            )
+        });
         self.terminal_views.insert(id, terminal_view);
 
         self.active_tab_id = id;

@@ -7,18 +7,21 @@ use alacritty_terminal::{
 };
 use crabport_core::keybind::{self, KeyAction, TerminalAction};
 use crabport_terminal::pty::PtyBackend;
-use crabport_terminal::terminal::CrabPortMonitor;
-use crabport_terminal::terminal::TerminalSession;
+use crabport_terminal::terminal::{CrabPortMonitor, RemoteStatus, TerminalSession};
 
+use gpui::prelude::FluentBuilder;
 use gpui::*;
+use gpui_animation::{animation::TransitionExt, transition::general::EaseInOutCubic};
 use parking_lot::Mutex;
 
 use crate::app::{CrabPortTab, TerminalShiftTab, TerminalTab};
 
 mod color;
+mod connection_overlay;
 mod selection;
 
 use color::*;
+use connection_overlay::*;
 use selection::*;
 
 // ---- TerminalView ----
@@ -36,6 +39,10 @@ pub struct TerminalView {
     pending_copy: bool,
     cursor_visible: bool,
     scroll_accumulator: f32,
+    /// Connection overlay state (only meaningful for remote sessions).
+    overlay: SharedOverlayState,
+    /// Host label for the remote session (empty for local).
+    remote_host: String,
 }
 
 impl TerminalView {
@@ -55,6 +62,17 @@ impl TerminalView {
         rows: usize,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::with_backend_and_host(backend, cols, rows, String::new(), cx)
+    }
+
+    /// Create a TerminalView with a pre-built backend and a remote host label.
+    pub fn with_backend_and_host(
+        backend: Arc<dyn crabport_terminal::terminal::CrabPortTerminal>,
+        cols: usize,
+        rows: usize,
+        host: String,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus_handle = cx.focus_handle();
         let font_size = px(13.0);
         let line_height = px(20.0);
@@ -66,14 +84,62 @@ impl TerminalView {
         // Set initial cursor to steady beam (|) via terminal parser
         session.feed_escape(b"\x1b[6 q");
 
+        // -- Connection overlay --
+        let is_remote = !host.is_empty();
+        let overlay = Arc::new(Mutex::new(ConnectionOverlayState::new()));
+
+        if is_remote {
+            overlay.lock().log(
+                ConnectionLogLevel::Info,
+                format!("Connecting to {}...", host),
+            );
+        }
+
+        // Subscribe to backend events to collect connection logs.
+        let mut event_rx = session.subscribe_backend();
+        let overlay_c = overlay.clone();
+        let _host_c = host.clone();
+        let entity = cx.entity().downgrade();
+        cx.spawn(async move |_this, cx| {
+            while let Ok(event) = event_rx.recv().await {
+                match event {
+                    crabport_terminal::terminal::BackendEvent::Error(err) => {
+                        overlay_c.lock().log(ConnectionLogLevel::Error, err);
+                        let _ = entity.update(cx, |_, cx| cx.notify());
+                    }
+                    crabport_terminal::terminal::BackendEvent::Closed => {
+                        overlay_c
+                            .lock()
+                            .log(ConnectionLogLevel::Warning, "Connection closed");
+                        let _ = entity.update(cx, |_, cx| cx.notify());
+                    }
+                    crabport_terminal::terminal::BackendEvent::Data(_) => {}
+                }
+            }
+        })
+        .detach();
+
+        // Periodically poll the monitor status and update the overlay.
         let mut wakeup_rx = session.subscribe_wakeup();
         let entity = cx.entity().downgrade();
         let blink_entity = entity.clone();
+        let _overlay_wakeup = overlay.clone();
+        let _host_wakeup = host.clone();
         cx.spawn(async move |_this, cx| {
             #[cfg(debug_assertions)]
             tracing::info!("wakeup listener started");
             while let Ok(()) = wakeup_rx.recv().await {
-                let _ = entity.update(cx, |_, cx| cx.notify());
+                let _ = entity.update(cx, |this, cx| {
+                    // Check monitor status changes
+                    if let Some(m) = this.session.monitor() {
+                        let new_status = m.status();
+                        let mut ov = this.overlay.lock();
+                        if new_status != ov.status {
+                            ov.update_status(new_status, &this.remote_host);
+                        }
+                    }
+                    cx.notify();
+                });
             }
             #[cfg(debug_assertions)]
             tracing::warn!("wakeup listener ended");
@@ -92,6 +158,27 @@ impl TerminalView {
         })
         .detach();
 
+        // Fade-out timer: once the overlay starts fading out, wait for the
+        // animation to complete, then mark the overlay as fully hidden.
+        if is_remote {
+            let overlay_fade = overlay.clone();
+            let fade_entity = cx.entity().downgrade();
+            cx.spawn(async move |_this, cx| {
+                // Wait until fade_out_started becomes true
+                loop {
+                    smol::Timer::after(std::time::Duration::from_millis(50)).await;
+                    if overlay_fade.lock().fade_out_started {
+                        break;
+                    }
+                }
+                // Wait for the fade-out animation to complete (500 ms + margin)
+                smol::Timer::after(std::time::Duration::from_millis(600)).await;
+                overlay_fade.lock().mark_hidden();
+                let _ = fade_entity.update(cx, |_, cx| cx.notify());
+            })
+            .detach();
+        }
+
         Self {
             session,
             focus_handle,
@@ -105,6 +192,8 @@ impl TerminalView {
             pending_copy: false,
             cursor_visible: true,
             scroll_accumulator: 0.0,
+            overlay,
+            remote_host: host,
         }
     }
 
@@ -269,6 +358,16 @@ impl Render for TerminalView {
         let selection_c = selection.clone();
         let entity = cx.entity().downgrade();
         let cursor_visible = self.cursor_visible;
+
+        // -- Overlay state snapshot --
+        let ov = self.overlay.lock();
+        let overlay_visible = ov.is_visible();
+        let is_fading_out = ov.is_fading_out();
+        let log_entries: Vec<ConnectionLogEntry> = ov.logs.clone();
+        let current_status = ov.status;
+        drop(ov);
+
+        let is_remote = !self.remote_host.is_empty();
 
         div()
             .id("terminal-view")
@@ -668,7 +767,130 @@ impl Render for TerminalView {
                         }
                     }),
             )
+            // ---- Connection overlay (only for remote sessions) ----
+            .when(is_remote, |el| {
+                el.child(render_connection_overlay(
+                    overlay_visible,
+                    is_fading_out,
+                    current_status,
+                    &log_entries,
+                ))
+            })
     }
+}
+
+// ---- Connection Overlay Rendering ----
+
+fn render_connection_overlay(
+    overlay_visible: bool,
+    is_fading_out: bool,
+    status: RemoteStatus,
+    logs: &[ConnectionLogEntry],
+) -> AnyElement {
+    if !overlay_visible {
+        return div().into_any_element();
+    }
+
+    div()
+        .id("connection-overlay")
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(rgb(TERM_BG))
+        .opacity(1.0)
+        .with_transition("connection-overlay-opacity")
+        .transition_when_else(
+            is_fading_out,
+            std::time::Duration::from_millis(500),
+            EaseInOutCubic,
+            |el| el.opacity(0.0),
+            |el| el.opacity(1.0),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_6()
+                .max_w(px(400.0))
+                .child(
+                    // Status indicator
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_3()
+                        .child(
+                            // Animated spinner / status dot
+                            match status {
+                                RemoteStatus::Connecting => render_spinner(),
+                                RemoteStatus::Disconnected => {
+                                    div().size(px(12.0)).rounded_full().bg(rgb(0xf38ba8))
+                                }
+                                _ => div().size(px(12.0)).rounded_full().bg(rgb(0xa6e3a1)),
+                            },
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(TERM_FG))
+                                .child(match status {
+                                    RemoteStatus::Connecting => "Connecting…",
+                                    RemoteStatus::Disconnected => "Connection failed",
+                                    _ => "Connected",
+                                }),
+                        ),
+                )
+                // Log entries
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .w_full()
+                        .children(logs.iter().map(|entry| {
+                            let prefix = entry.level.prefix();
+                            let color = entry.level.color();
+                            let text = format!("{}{}", prefix, entry.message);
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_start()
+                                .text_sm()
+                                .text_color(rgb(color))
+                                .child(text)
+                        })),
+                )
+                // Retry button on disconnect
+                .when(status == RemoteStatus::Disconnected, |el| {
+                    el.child(
+                        div()
+                            .mt_4()
+                            .px_4()
+                            .py_1p5()
+                            .rounded_md()
+                            .bg(rgb(0x313244))
+                            .text_sm()
+                            .text_color(rgb(TERM_FG))
+                            .cursor_pointer()
+                            .child("Reconnect"),
+                    )
+                }),
+        )
+        .into_any_element()
+}
+
+/// Simple spinner — a circle with a gap.
+fn render_spinner() -> Div {
+    div()
+        .size(px(12.0))
+        .rounded_full()
+        .border_2()
+        .border_color(rgb(TERM_FG))
 }
 
 impl Focusable for TerminalView {

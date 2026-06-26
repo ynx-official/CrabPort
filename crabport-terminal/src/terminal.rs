@@ -228,6 +228,11 @@ impl TerminalSession {
         self.wakeup_tx.new_receiver()
     }
 
+    /// Subscribe to backend events directly.
+    pub fn subscribe_backend(&self) -> BroadcastReceiver<BackendEvent> {
+        self.backend.subscribe()
+    }
+
     /// Try to obtain a reference to the `CrabPortMonitor` implementation.
     /// Returns `None` if the backend doesn't implement `CrabPortMonitor`.
     pub fn monitor(&self) -> Option<&dyn CrabPortMonitor> {
