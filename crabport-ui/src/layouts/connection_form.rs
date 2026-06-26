@@ -8,6 +8,7 @@ use std::time::Duration;
 use crate::color::*;
 use crate::components::button::Button;
 use crate::components::input::{StyledInput, StyledPasswordInput};
+use crate::components::segmented_control::{Segment, SegmentedControl};
 
 // ---------------------------------------------------------------------------
 // Connection type
@@ -291,28 +292,17 @@ fn render_dialog(
 }
 
 fn render_type_selector(kind: ConnectionKind) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_row()
-        .gap_1()
-        .bg(rgb(SURFACE_ACTIVE))
-        .rounded_md()
-        .p_0p5()
-        .child(type_tab(
-            ConnectionKind::SSH,
-            kind,
-            t!("new_connection.ssh"),
-        ))
-        .child(type_tab(
-            ConnectionKind::Telnet,
-            kind,
-            t!("new_connection.telnet"),
-        ))
-        .child(type_tab(
-            ConnectionKind::Serial,
-            kind,
-            t!("new_connection.serial"),
-        ))
+    let active_index = match kind {
+        ConnectionKind::SSH => 0,
+        ConnectionKind::Telnet => 1,
+        ConnectionKind::Serial => 2,
+    };
+
+    SegmentedControl::new("conn-type-selector")
+        .active(active_index)
+        .segment(Segment::new(t!("new_connection.ssh")))
+        .segment(Segment::new(t!("new_connection.telnet")))
+        .segment(Segment::new(t!("new_connection.serial")))
 }
 
 fn render_host_port_row(
@@ -374,28 +364,4 @@ fn render_buttons(
                     }
                 }),
         )
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-fn type_tab(
-    kind: ConnectionKind,
-    active: ConnectionKind,
-    label: impl Into<SharedString>,
-) -> impl IntoElement {
-    let is_active = kind == active;
-    div()
-        .flex_1()
-        .px_3()
-        .py_1()
-        .rounded_sm()
-        .text_sm()
-        .text_center()
-        .when(is_active, |el| {
-            el.bg(rgb(BG_BASE)).text_color(rgb(TEXT_PRIMARY))
-        })
-        .when(!is_active, |el| el.text_color(rgb(TEXT_MUTED)))
-        .child(label.into())
 }

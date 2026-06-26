@@ -9,6 +9,7 @@ use rust_i18n::t;
 use crate::color::*;
 use crate::layouts::command_palette::{CommandView, ConnectionType};
 use crate::layouts::connection_form::ConnectionFormView;
+use crate::layouts::credential_form::CredentialFormView;
 use crate::layouts::sidebar::render_sidebar;
 use crate::layouts::tabbar::render_tab_bar;
 use crate::views;
@@ -49,6 +50,7 @@ pub struct CrabportApp {
     pub terminal_views: HashMap<u64, Entity<TerminalView>>,
     pub hosts: Vec<ConnectionHost>,
     pub connection_form: Option<Entity<ConnectionFormView>>,
+    pub credential_form: Option<Entity<CredentialFormView>>,
     pub command_palette: Entity<CommandView>,
     wired: bool,
 }
@@ -92,7 +94,7 @@ impl SidebarItem {
 
 impl CrabportApp {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        rust_i18n::set_locale("en");
+        rust_i18n::set_locale("zh-CN");
         let home_tab = Tab {
             id: 0,
             title: "Home".into(),
@@ -110,6 +112,7 @@ impl CrabportApp {
             terminal_views: HashMap::new(),
             hosts: Vec::new(),
             connection_form: None,
+            credential_form: None,
             command_palette,
             wired: false,
         }
@@ -236,6 +239,73 @@ impl CrabportApp {
             smol::Timer::after(std::time::Duration::from_millis(200)).await;
             let _ = app.update(cx, |app, cx| {
                 app.connection_form = None;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Create a new CredentialFormView entity, wire its callbacks, and open it.
+    pub fn open_credential_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(ref form) = self.credential_form {
+            form.update(cx, |form, cx| form.open(window, cx));
+            cx.notify();
+            return;
+        }
+
+        let form = cx.new(|cx| CredentialFormView::new(window, cx));
+        let form_clone = form.clone();
+        let app = cx.entity().clone();
+
+        form.update(cx, |form, _cx| {
+            form.set_on_close({
+                let app = app.clone();
+                move |_w, cx| {
+                    app.update(cx, |app, cx| {
+                        app.close_credential_form(cx);
+                    });
+                }
+            });
+
+            form.set_on_kind_change({
+                let form = form_clone.clone();
+                move |kind, _w, cx| {
+                    form.update(cx, |f, cx| {
+                        f.kind = kind;
+                        cx.notify();
+                    });
+                }
+            });
+
+            form.set_on_save({
+                let app = app.clone();
+                move |_kind, _w, cx| {
+                    app.update(cx, |app, cx| {
+                        app.close_credential_form(cx);
+                        cx.notify();
+                    });
+                }
+            });
+        });
+
+        form.update(cx, |form, cx| form.open(window, cx));
+        self.credential_form = Some(form);
+        cx.notify();
+    }
+
+    /// Close the credential form. The entity stays alive for the exit animation,
+    /// then is destroyed by a timer.
+    pub fn close_credential_form(&mut self, cx: &mut Context<Self>) {
+        let form = match self.credential_form.as_ref() {
+            Some(f) => f.clone(),
+            None => return,
+        };
+        form.update(cx, |form, cx| form.close(cx));
+        let app = cx.entity().clone();
+        cx.spawn(async move |_this, cx| {
+            smol::Timer::after(std::time::Duration::from_millis(200)).await;
+            let _ = app.update(cx, |app, cx| {
+                app.credential_form = None;
                 cx.notify();
             });
         })
@@ -376,7 +446,19 @@ impl Render for CrabportApp {
                 )
                 .into_any_element(),
                 SidebarItem::Credentials => {
-                    views::credentials::render_credentials_view().into_any_element()
+                    let on_new_cred = {
+                        let app = cx.entity().clone();
+                        move |_w: &mut Window, cx: &mut App| {
+                            app.update(cx, |app, cx| {
+                                app.open_credential_form(_w, cx);
+                            });
+                        }
+                    };
+                    views::credentials::render_credentials_view(
+                        self.credential_form.as_ref(),
+                        on_new_cred,
+                    )
+                    .into_any_element()
                 }
                 SidebarItem::Snippets => views::snippets::render_snippets_view().into_any_element(),
                 SidebarItem::History => div()

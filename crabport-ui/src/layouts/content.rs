@@ -6,6 +6,7 @@ use gpui::*;
 use crate::app::{CrabportApp, SidebarItem, Tab, TabKind};
 use crate::color::*;
 use crate::layouts::connection_form::ConnectionFormView;
+use crate::layouts::credential_form::CredentialFormView;
 use crate::layouts::tabbar::render_tab_bar;
 use crate::views;
 use crate::views::hosts::ConnectionHost;
@@ -19,6 +20,7 @@ pub fn render_content(
     terminal_views: &HashMap<u64, Entity<TerminalView>>,
     hosts: &[ConnectionHost],
     form_entity: Option<&Entity<ConnectionFormView>>,
+    cred_form_entity: Option<&Entity<CredentialFormView>>,
     window: &mut Window,
     cx: &mut App,
 ) -> Div {
@@ -43,7 +45,14 @@ pub fn render_content(
                 views::hosts::render_hosts_view(hosts, form_entity, on_new).into_any_element()
             }
             SidebarItem::Credentials => {
-                views::credentials::render_credentials_view().into_any_element()
+                let app_handle = handle.clone();
+                let on_new_cred = move |w: &mut Window, cx: &mut App| {
+                    app_handle.update(cx, |app, cx| {
+                        app.open_credential_form(w, cx);
+                    });
+                };
+                views::credentials::render_credentials_view(cred_form_entity, on_new_cred)
+                    .into_any_element()
             }
             SidebarItem::Snippets => views::snippets::render_snippets_view().into_any_element(),
             SidebarItem::History => div()

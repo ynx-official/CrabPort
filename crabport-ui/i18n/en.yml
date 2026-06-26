@@ -35,3 +35,19 @@ connection_form:
 hosts:
   new_button: "New"
   empty: "No saved hosts. Click '+ New' to create one."
+credential_form:
+  title: "New Credential"
+  name: "Name"
+  type_password: "Password"
+  type_certificate: "Certificate"
+  username: "Username"
+  password: "Password"
+  passphrase: "Passphrase"
+  private_key: "Private Key"
+  public_key: "Public Key"
+  certificate: "Certificate"
+  cancel: "Cancel"
+  save: "Save"
+credentials:
+  new_button: "New"
+  empty: "No saved credentials. Click '+ New' to create one."

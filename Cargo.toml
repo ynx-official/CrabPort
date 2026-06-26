@@ -14,8 +14,6 @@ members = [
     "crabport-core",
     "crabport-ssh",
     "crabport-sftp",
-    "crabport-forward",
-    "crabport-editor",
     "crabport-ui",
     "crabport-terminal",
     "crabport-tunnel",

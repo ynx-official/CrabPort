@@ -35,3 +35,19 @@ connection_form:
 hosts:
   new_button: "新建"
   empty: "暂无保存的主机，点击「+ 新建」创建"
+credential_form:
+  title: "新建凭证"
+  name: "名称"
+  type_password: "凭证"
+  type_certificate: "证书"
+  username: "用户名"
+  password: "密码"
+  passphrase: "密码短语"
+  private_key: "私钥"
+  public_key: "公钥"
+  certificate: "证书"
+  cancel: "取消"
+  save: "保存"
+credentials:
+  new_button: "新建"
+  empty: "暂无保存的凭证，点击「+ 新建」创建"
