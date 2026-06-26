@@ -14,20 +14,41 @@ pub const SURFACE_ACTIVE: u32 = 0x313244;
 pub const TEXT_PRIMARY: u32 = 0xcdd6f4;
 pub const TEXT_MUTED: u32 = 0x585b70;
 
-// Button
-pub const BTN_BG: u32 = 0x181825;
-pub const BTN_BG_HOVER: u32 = 0x24273a;
-pub const BTN_BG_SELECTED: u32 = 0x313244;
-pub const BTN_BG_PRESSED: u32 = 0x45475a;
-pub const BTN_BG_DISABLED: u32 = 0x11111b;
-pub const BTN_BORDER: u32 = 0x313244;
-pub const BTN_TEXT_DISABLED: u32 = 0x45475a;
+// Tab Button (subtle, blends with sidebar/tabbar background)
+pub const TAB_BTN_BG: u32 = 0x181825;
+pub const TAB_BTN_BG_HOVER: u32 = 0x24273a;
+pub const TAB_BTN_BG_SELECTED: u32 = 0x313244;
+pub const TAB_BTN_BG_PRESSED: u32 = 0x45475a;
+pub const TAB_BTN_BG_DISABLED: u32 = 0x11111b;
+pub const TAB_BTN_BORDER: u32 = 0x313244;
+pub const TAB_BTN_TEXT_DISABLED: u32 = 0x45475a;
+
+// Button (prominent, stands out from background)
+pub const BTN_BG: u32 = 0x313244;
+pub const BTN_BG_HOVER: u32 = 0x45475a;
+pub const BTN_BG_SELECTED: u32 = 0x585b70;
+pub const BTN_BG_PRESSED: u32 = 0x6c7086;
+pub const BTN_BG_DISABLED: u32 = 0x1e1e2e;
+pub const BTN_BORDER: u32 = 0x45475a;
+pub const BTN_TEXT_DISABLED: u32 = 0x585b70;
+
+// Button — Primary (blue accent)
+pub const BTN_PRIMARY_BG: u32 = 0x3b82f6;
+pub const BTN_PRIMARY_BG_HOVER: u32 = 0x2563eb;
+pub const BTN_PRIMARY_BG_SELECTED: u32 = 0x1d4ed8;
+pub const BTN_PRIMARY_BG_DISABLED: u32 = 0x1e3a5f;
+pub const BTN_PRIMARY_BORDER: u32 = 0x3b82f6;
+pub const BTN_PRIMARY_TEXT_DISABLED: u32 = 0x93c5fd;
 
 // Input
 pub const INPUT_BG: u32 = 0x181825;
 pub const INPUT_BG_FOCUSED: u32 = 0x1e1e2e;
+pub const INPUT_BG_DISABLED: u32 = 0x11111b;
+pub const INPUT_TEXT_DISABLED: u32 = 0x45475a;
 pub const INPUT_BORDER: u32 = 0x313244;
+pub const INPUT_BORDER_HOVER: u32 = 0x45475a;
 pub const INPUT_BORDER_FOCUSED: u32 = 0x89b4fa;
+pub const INPUT_BORDER_ERROR: u32 = 0xef4444;
 pub const INPUT_PLACEHOLDER: u32 = 0x585b70;
 pub const INPUT_SELECTION: u32 = 0x89b4fa33;
 

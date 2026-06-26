@@ -23,26 +23,15 @@ pub fn render_sidebar(
             let is_selected = item == selected;
             let h = handle.clone();
             Button::new(ElementId::Name(format!("sidebar-{item:?}").into()))
+                .tab()
                 .selected(is_selected)
+                .icon(item.icon())
+                .child(item.label())
                 .on_click(move |_e, _w, cx| {
                     h.update(cx, |app, _| {
                         app.sidebar_item = item;
                     });
                 })
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            svg()
-                                .path(item.icon())
-                                .size_4()
-                                .text_color(rgb(TEXT_PRIMARY)),
-                        )
-                        .child(item.label()),
-                )
                 .h_9()
                 .border_0()
                 .px_2()

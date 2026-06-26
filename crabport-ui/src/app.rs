@@ -1,16 +1,17 @@
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::*;
 use gpui_animation::animation::TransitionExt;
-use gpui_component::input::InputState;
 use rust_i18n::t;
 
 use crate::color::*;
-use crate::layouts::command_palette::{Command, ConnectionType};
-use crate::layouts::connection_form::ConnectionFormState;
-use crate::layouts::content::render_content;
+use crate::layouts::command_palette::{CommandView, ConnectionType};
+use crate::layouts::connection_form::ConnectionFormView;
 use crate::layouts::sidebar::render_sidebar;
+use crate::layouts::tabbar::render_tab_bar;
+use crate::views;
 use crate::views::hosts::ConnectionHost;
 use crate::views::terminal::TerminalView;
 use crabport_ssh::SshBackend;
@@ -19,13 +20,12 @@ use crabport_ssh::session::SshConnectionInfo;
 // ---- CrabPortTab trait ----
 
 pub trait CrabPortTab: 'static {
-    /// Release resources before the tab entity is dropped.
     fn close(&mut self);
 }
 
 // ---- App ----
 
-actions!(app, [ToggleCommand]);
+actions!(app, [ToggleCommand, TerminalTab, TerminalShiftTab]);
 
 #[derive(Clone, Debug)]
 pub struct Tab {
@@ -47,14 +47,10 @@ pub struct CrabportApp {
     pub hovered_tab_id: Option<u64>,
     pub next_tab_id: u64,
     pub terminal_views: HashMap<u64, Entity<TerminalView>>,
-    pub show_command: bool,
     pub hosts: Vec<ConnectionHost>,
-    pub connection_form: ConnectionFormState,
-    command_search_state: Option<Entity<InputState>>,
-    pub form_host_input: Option<Entity<InputState>>,
-    pub form_port_input: Option<Entity<InputState>>,
-    pub form_user_input: Option<Entity<InputState>>,
-    pub form_pass_input: Option<Entity<InputState>>,
+    pub connection_form: Option<Entity<ConnectionFormView>>,
+    pub command_palette: Entity<CommandView>,
+    wired: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -95,13 +91,16 @@ impl SidebarItem {
 }
 
 impl CrabportApp {
-    pub fn new() -> Self {
-        rust_i18n::set_locale("zh-CN");
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        rust_i18n::set_locale("en");
         let home_tab = Tab {
             id: 0,
             title: "Home".into(),
             kind: TabKind::Home,
         };
+
+        let command_palette = cx.new(|cx| CommandView::new(window, cx));
+
         Self {
             sidebar_item: SidebarItem::Hosts,
             tabs: vec![home_tab],
@@ -109,16 +108,143 @@ impl CrabportApp {
             hovered_tab_id: None,
             next_tab_id: 1,
             terminal_views: HashMap::new(),
-            show_command: false,
             hosts: Vec::new(),
-            connection_form: ConnectionFormState::new(),
-            command_search_state: None,
-            form_host_input: None,
-            form_port_input: None,
-            form_user_input: None,
-            form_pass_input: None,
+            connection_form: None,
+            command_palette,
+            wired: false,
         }
     }
+
+    /// Wire cross-entity callbacks. Called once after construction.
+    pub fn wire(&mut self, cx: &mut Context<Self>) {
+        if self.wired {
+            return;
+        }
+        self.wired = true;
+
+        let cmd = self.command_palette.clone();
+        let app = cx.entity().clone();
+
+        // ---- Command palette callbacks ----
+        let cmd_for_close = cmd.clone();
+        let cmd_for_new = cmd.clone();
+        let app_for_cmd = app.clone();
+        self.command_palette.update(cx, move |cmd, _cx| {
+            cmd.set_on_close({
+                let c = cmd_for_close.clone();
+                move |_, cx| {
+                    c.update(cx, |cmd, cx| cmd.close(cx));
+                }
+            });
+            cmd.set_on_new_connection({
+                let c = cmd_for_new.clone();
+                let a = app_for_cmd.clone();
+                move |ct, w, cx| {
+                    match ct {
+                        ConnectionType::LocalTerminal => {
+                            a.update(cx, |app, cx| {
+                                app.add_tab(cx);
+                            });
+                        }
+                        _ => {
+                            a.update(cx, |app, _cx| {
+                                app.activate_tab(0);
+                                app.sidebar_item = SidebarItem::Hosts;
+                            });
+                            a.update(cx, |app, cx| {
+                                app.open_connection_form(w, cx);
+                            });
+                        }
+                    }
+                    c.update(cx, |cmd, cx| cmd.close(cx));
+                }
+            });
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // Connection form (ephemeral entity — created on open, destroyed after close animation)
+    // -----------------------------------------------------------------------
+
+    /// Create a new ConnectionFormView entity, wire its callbacks, and open it.
+    pub fn open_connection_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // If one is already open, just bring it to front
+        if let Some(ref form) = self.connection_form {
+            form.update(cx, |form, cx| form.open(window, cx));
+            cx.notify();
+            return;
+        }
+
+        let form = cx.new(|cx| ConnectionFormView::new(window, cx));
+        let form_for_connect = form.clone();
+        let app = cx.entity().clone();
+
+        form.update(cx, |form, _cx| {
+            form.set_on_close({
+                let a = app.clone();
+                move |_, cx| {
+                    a.update(cx, |app, cx| {
+                        app.close_connection_form(cx);
+                    });
+                }
+            });
+            form.set_on_connect({
+                let f = form_for_connect.clone();
+                let a = app.clone();
+                move |_kind, _, cx| {
+                    let (host, port_num, username, password) = {
+                        let ff = f.read(cx);
+                        let h = ff.host_text(cx);
+                        let p: u16 = ff.port_text(cx).parse().unwrap_or(22);
+                        let u = ff.user_text(cx);
+                        let pw = ff.pass_text(cx);
+                        (h, p, u, pw)
+                    };
+                    a.update(cx, |app, cx| {
+                        app.close_connection_form(cx);
+                        let name = format!("{}@{}", username, host);
+                        app.hosts.push(ConnectionHost {
+                            name,
+                            host: host.to_string(),
+                            port: port_num,
+                            username: username.to_string(),
+                        });
+                        app.add_ssh_tab(&host, port_num, &username, &password, cx);
+                        cx.notify();
+                    });
+                }
+            });
+        });
+
+        form.update(cx, |form, cx| form.open(window, cx));
+        self.connection_form = Some(form);
+        cx.notify();
+    }
+
+    /// Close the connection form. The entity stays alive for the exit animation,
+    /// then is destroyed by a timer.
+    pub fn close_connection_form(&mut self, cx: &mut Context<Self>) {
+        let form = match self.connection_form.as_ref() {
+            Some(f) => f.clone(),
+            None => return,
+        };
+        // Trigger the close animation inside the form
+        form.update(cx, |form, cx| form.close(cx));
+        // After animation finishes, destroy the entity
+        let app = cx.entity().clone();
+        cx.spawn(async move |_this, cx| {
+            smol::Timer::after(std::time::Duration::from_millis(200)).await;
+            let _ = app.update(cx, |app, cx| {
+                app.connection_form = None;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    // -----------------------------------------------------------------------
+    // Tabs
+    // -----------------------------------------------------------------------
 
     pub fn is_home_active(&self) -> bool {
         self.tabs
@@ -179,38 +305,44 @@ impl CrabportApp {
     }
 
     pub fn close_tab(&mut self, id: u64, cx: &mut Context<Self>) {
-        // Never close the Home tab
         if id == 0 {
             return;
         }
-
-        // Call close() on the view to release resources (e.g. kill PTY)
         if let Some(view) = self.terminal_views.remove(&id) {
             view.update(cx, |v, _cx| {
                 v.close();
             });
         }
-
         self.tabs.retain(|t| t.id != id);
-
-        // If the closed tab was active, switch to Home
         if self.active_tab_id == id {
             self.active_tab_id = 0;
         }
     }
 
-    /// Toggle the command palette open / closed.
     pub fn toggle_command(
         &mut self,
         _: &ToggleCommand,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.show_command = !self.show_command;
-        if !self.show_command {
-            self.command_search_state = None;
-        }
+        let cmd = self.command_palette.clone();
+        let was_open = cmd.read(cx).open;
+        cmd.update(cx, |cmd, cx| {
+            if was_open {
+                cmd.close(cx);
+            } else {
+                cmd.open(_window, cx);
+            }
+        });
         cx.notify();
+    }
+
+    // -- Helpers --
+
+    fn close_tab_fn(handle: Entity<Self>) -> Rc<dyn Fn(u64, &mut Window, &mut App)> {
+        Rc::new(move |id, _, cx| {
+            handle.update(cx, |app, cx| app.close_tab(id, cx));
+        })
     }
 }
 
@@ -218,53 +350,79 @@ impl Render for CrabportApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let handle = cx.entity().clone();
         let show_sidebar = self.is_home_active();
+        let active_tab = self.tabs.iter().find(|t| t.id == self.active_tab_id);
+        let is_home_tab = active_tab.map(|t| t.kind == TabKind::Home).unwrap_or(false);
 
-        // Lazy-init the search InputState entity when the command opens.
-        if self.show_command && self.command_search_state.is_none() {
-            self.command_search_state = Some(cx.new(|cx| InputState::new(_window, cx)));
-        }
+        // Host names for command palette
+        let host_names: Vec<String> = self.hosts.iter().map(|h| h.name.clone()).collect();
+        self.command_palette.update(cx, |cmd, _cx| {
+            cmd.set_hosts(host_names);
+        });
 
-        // Lazy-init form InputState entities when the form opens.
-        if self.connection_form.active {
-            if self.form_host_input.is_none() {
-                self.form_host_input = Some(cx.new(|cx| InputState::new(_window, cx)));
-                // Auto-focus host field when form opens
-                if let Some(ref host) = self.form_host_input {
-                    host.update(cx, |state, cx| {
-                        state.focus(_window, cx);
+        // ---- Content view (inlined from render_content) ----
+        let app_handle = cx.entity().clone();
+        let on_new = move |w: &mut Window, cx: &mut App| {
+            app_handle.update(cx, |app, cx| {
+                app.open_connection_form(w, cx);
+            });
+        };
+
+        let content_view: AnyElement = match active_tab.map(|t| t.kind) {
+            Some(TabKind::Home) => match self.sidebar_item {
+                SidebarItem::Hosts => views::hosts::render_hosts_view(
+                    &self.hosts,
+                    self.connection_form.as_ref(),
+                    on_new,
+                )
+                .into_any_element(),
+                SidebarItem::Credentials => {
+                    views::credentials::render_credentials_view().into_any_element()
+                }
+                SidebarItem::Snippets => views::snippets::render_snippets_view().into_any_element(),
+                SidebarItem::History => div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .text_color(rgb(TEXT_MUTED))
+                            .child(self.sidebar_item.label()),
+                    )
+                    .into_any_element(),
+            },
+            Some(TabKind::Terminal) => {
+                if let Some(terminal_entity) =
+                    active_tab.and_then(|tab| self.terminal_views.get(&tab.id))
+                {
+                    terminal_entity.read_with(cx, |view, cx| {
+                        _window.focus(&view.focus_handle(cx));
                     });
+                    div()
+                        .size_full()
+                        .m_2()
+                        .child(terminal_entity.clone())
+                        .into_any_element()
+                } else {
+                    div()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(div().text_color(rgb(TEXT_MUTED)).child("Terminal"))
+                        .into_any_element()
                 }
             }
-            if self.form_port_input.is_none() {
-                self.form_port_input = Some(cx.new(|cx| InputState::new(_window, cx)));
-                // Pre-fill default port
-                if let Some(ref port) = self.form_port_input {
-                    port.update(cx, |state, cx| {
-                        state.set_value("22", _window, cx);
-                    });
-                }
-            }
-            if self.form_user_input.is_none() {
-                self.form_user_input = Some(cx.new(|cx| InputState::new(_window, cx)));
-            }
-            if self.form_pass_input.is_none() {
-                self.form_pass_input = Some(cx.new(|cx| {
-                    let mut state = InputState::new(_window, cx);
-                    state.set_masked(true, _window, cx);
-                    state
-                }));
-            }
-        } else {
-            // Reset inputs when form closes
-            self.form_host_input = None;
-            self.form_port_input = None;
-            self.form_user_input = None;
-            self.form_pass_input = None;
-        }
+            None => div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(div().text_color(rgb(TEXT_MUTED)).child("No tab"))
+                .into_any_element(),
+        };
 
-        // Collect host names (placeholder – wire up real data later).
-        let host_names: Vec<String> = Vec::new();
-
+        // ---- Root ----
         div()
             .size_full()
             .bg(rgb(BG_BASE))
@@ -272,6 +430,7 @@ impl Render for CrabportApp {
             .flex_row()
             .key_context("App")
             .on_action(cx.listener(Self::toggle_command))
+            // -- Sidebar --
             .child(
                 div()
                     .id("sidebar-container")
@@ -293,65 +452,24 @@ impl Render for CrabportApp {
                     )
                     .child(render_sidebar(self.sidebar_item, &handle)),
             )
-            .child(render_content(
-                self.sidebar_item,
-                &handle,
-                &self.tabs,
-                self.active_tab_id,
-                &self.terminal_views,
-                &self.hosts,
-                &self.connection_form,
-                &self.form_host_input,
-                &self.form_port_input,
-                &self.form_user_input,
-                &self.form_pass_input,
-                _window,
-                &*cx,
-            ))
-            // ---- Command palette (always rendered; open drives transitions) ----
-            .child({
-                let mut cmd = Command::new()
-                    .open(self.show_command)
-                    .hosts(host_names)
-                    .on_close({
-                        let handle = handle.clone();
-                        move |_, cx| {
-                            handle.update(cx, |app, cx| {
-                                app.show_command = false;
-                                app.command_search_state = None;
-                                cx.notify();
-                            });
-                        }
-                    })
-                    .on_new_connection({
-                        let handle = handle.clone();
-                        move |ct, _, cx| {
-                            handle.update(cx, |app, cx| {
-                                match ct {
-                                    ConnectionType::LocalTerminal => {
-                                        // Directly open a local terminal
-                                        app.add_tab(cx);
-                                    }
-                                    ConnectionType::SSH
-                                    | ConnectionType::SFTP
-                                    | ConnectionType::Telnet
-                                    | ConnectionType::Serial => {
-                                        // Switch to Home tab and open the hosts form
-                                        app.activate_tab(0);
-                                        app.sidebar_item = SidebarItem::Hosts;
-                                        app.connection_form.active = true;
-                                    }
-                                }
-                                app.show_command = false;
-                                app.command_search_state = None;
-                                cx.notify();
-                            });
-                        }
-                    });
-                if let Some(ref search_state) = self.command_search_state {
-                    cmd = cmd.search_state(search_state.clone());
-                }
-                cmd
-            })
+            // -- Tab bar + content --
+            .child(
+                div()
+                    .flex_1()
+                    .h_full()
+                    .bg(rgb(BG_BASE))
+                    .flex()
+                    .flex_col()
+                    .child(render_tab_bar(
+                        &handle,
+                        &self.tabs,
+                        self.active_tab_id,
+                        is_home_tab,
+                        Self::close_tab_fn(handle.clone()),
+                    ))
+                    .child(content_view),
+            )
+            // -- Command palette --
+            .child(self.command_palette.clone())
     }
 }

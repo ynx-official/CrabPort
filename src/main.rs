@@ -1,4 +1,5 @@
 use crabport_ui::CrabportApp;
+use crabport_ui::app::{TerminalShiftTab, TerminalTab};
 use crabport_ui::assets::CrabportAssets;
 use gpui::*;
 
@@ -10,6 +11,11 @@ fn main() {
         .with_assets(CrabportAssets::new())
         .run(|cx| {
             gpui_component::init(cx);
+
+            cx.bind_keys([
+                KeyBinding::new("tab", TerminalTab, Some("CrabPortTerminal")),
+                KeyBinding::new("shift-tab", TerminalShiftTab, Some("CrabPortTerminal")),
+            ]);
 
             cx.open_window(
                 WindowOptions {
@@ -23,7 +29,8 @@ fn main() {
                 },
                 |_window, cx| {
                     cx.new(|cx| {
-                        let app = cx.new(|_cx| CrabportApp::new());
+                        let app = cx.new(|cx| CrabportApp::new(_window, cx));
+                        app.update(cx, |app, cx| app.wire(cx));
                         gpui_component::Root::new(app, _window, cx)
                     })
                 },

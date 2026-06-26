@@ -23,6 +23,7 @@ new_connection:
   serial_desc: "Serial port connection"
 connection_form:
   title: "New Connection"
+  name: "Name"
   host: "Host"
   port: "Port"
   username: "Username"
@@ -32,5 +33,5 @@ connection_form:
   currently_supported: "Currently supported"
   coming_soon: "Coming soon"
 hosts:
-  new_button: "+ New"
+  new_button: "New"
   empty: "No saved hosts. Click '+ New' to create one."

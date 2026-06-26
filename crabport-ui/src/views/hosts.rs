@@ -3,10 +3,8 @@ use gpui_component::scroll::ScrollableElement as _;
 use rust_i18n::t;
 
 use crate::color::*;
-use crate::layouts::connection_form::{
-    ConnectionFormState, ConnectionKind, render_connection_form,
-};
-use gpui_component::input::InputState;
+use crate::components::button::Button;
+use crate::layouts::connection_form::ConnectionFormView;
 
 /// A saved connection host entry.
 #[derive(Clone)]
@@ -23,13 +21,7 @@ pub struct ConnectionHost {
 /// the connection creation form.
 pub fn render_hosts_view(
     hosts: &[ConnectionHost],
-    form_state: &ConnectionFormState,
-    form_host: &Option<Entity<InputState>>,
-    form_port: &Option<Entity<InputState>>,
-    form_user: &Option<Entity<InputState>>,
-    form_pass: &Option<Entity<InputState>>,
-    on_close_form: impl Fn(&mut Window, &mut App) + 'static,
-    on_connect: impl Fn(ConnectionKind, &mut Window, &mut App) + 'static,
+    form_entity: Option<&Entity<ConnectionFormView>>,
     on_new: impl Fn(&mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     div()
@@ -55,15 +47,13 @@ pub fn render_hosts_view(
                         .child(t!("sidebar.hosts").to_string()),
                 )
                 .child(
-                    div()
-                        .px_3()
-                        .py_1()
-                        .rounded_md()
-                        .bg(rgb(0x3b82f6))
-                        .text_color(rgb(0xffffff))
-                        .text_sm()
+                    Button::new("hosts-new-btn")
+                        .primary()
+                        .icon("icons/plus.svg")
+                        .w_auto()
+                        .px_2()
                         .child(t!("hosts.new_button").to_string())
-                        .on_mouse_down(MouseButton::Left, move |_e, w, cx| {
+                        .on_click(move |_e, w, cx| {
                             on_new(w, cx);
                         }),
                 ),
@@ -93,15 +83,7 @@ pub fn render_hosts_view(
                 }),
         )
         // --- Connection form overlay ---
-        .child(render_connection_form(
-            form_state,
-            form_host,
-            form_port,
-            form_user,
-            form_pass,
-            on_close_form,
-            on_connect,
-        ))
+        .when_some(form_entity.cloned(), |el, form| el.child(form))
 }
 
 // ---------------------------------------------------------------------------

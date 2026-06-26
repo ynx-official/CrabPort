@@ -6,7 +6,6 @@ use gpui_animation::{animation::TransitionExt, transition::general::Linear};
 use crate::app::{CrabportApp, Tab, TabKind};
 use crate::color::*;
 use crate::components::button::Button;
-use crate::components::button_with_close::ButtonWithClose;
 
 pub fn render_tab_bar(
     handle: &Entity<CrabportApp>,
@@ -28,6 +27,11 @@ pub fn render_tab_bar(
         .py_1()
         .gap_1()
         .px_2()
+        .on_mouse_up(MouseButton::Left, |event: &MouseUpEvent, window, _| {
+            if event.click_count == 2 {
+                window.titlebar_double_click();
+            }
+        })
         .with_transition("tabbar")
         .transition_when(
             is_home,
@@ -66,20 +70,20 @@ pub fn render_tab_bar(
                     |el| el.w_24(),
                 )
                 .child({
-                    let mut btn =
-                        ButtonWithClose::new(ElementId::Name(format!("tab-{}", tab.id).into()))
-                            .selected(is_active)
-                            .child(tab.title.clone())
-                            .h_9()
-                            .w_full()
-                            .border_0()
-                            .px_3()
-                            .text_sm()
-                            .on_click(move |_e, _w, cx| {
-                                h2.update(cx, |app, _| {
-                                    app.activate_tab(tab_id);
-                                });
+                    let mut btn = Button::new(ElementId::Name(format!("tab-{}", tab.id).into()))
+                        .tab()
+                        .selected(is_active)
+                        .child(tab.title.clone())
+                        .h_9()
+                        .w_full()
+                        .border_0()
+                        .px_3()
+                        .text_sm()
+                        .on_click(move |_e, _w, cx| {
+                            h2.update(cx, |app, _| {
+                                app.activate_tab(tab_id);
                             });
+                        });
                     if !is_home_tab {
                         let tab_id = tab.id;
                         let on_close = on_close.clone();
@@ -92,6 +96,7 @@ pub fn render_tab_bar(
         }))
         .child(
             Button::new("tab-add")
+                .tab()
                 .centered(true)
                 .child(
                     svg()
@@ -104,9 +109,12 @@ pub fn render_tab_bar(
                 .border_0()
                 .px_0()
                 .text_sm()
-                .on_click(move |_e, _w, cx| {
+                .on_click(move |_e, w, cx| {
                     h.update(cx, |app, cx| {
-                        app.show_command = true;
+                        let cmd = app.command_palette.clone();
+                        cmd.update(cx, |cmd, cx| {
+                            cmd.open(w, cx);
+                        });
                         cx.notify();
                     });
                 }),

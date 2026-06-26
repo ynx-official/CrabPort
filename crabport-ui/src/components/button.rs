@@ -3,16 +3,29 @@ use gpui::{prelude::FluentBuilder, *};
 use gpui_animation::{animation::TransitionExt, transition::general::Linear};
 use std::{rc::Rc, time::Duration};
 
+// ---------------------------------------------------------------------------
+// Button
+// ---------------------------------------------------------------------------
+
 #[derive(IntoElement)]
 pub struct Button {
     id: ElementId,
     style: StyleRefinement,
     children: Vec<AnyElement>,
+    icon: Option<SharedString>,
     on_hover: Option<Rc<dyn Fn(&bool, &mut Window, &mut App) + 'static>>,
     on_click: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
+    on_close: Option<Rc<dyn Fn(&mut Window, &mut App) + 'static>>,
     selected: Option<bool>,
     disabled: Option<bool>,
     centered: bool,
+    // Colors
+    bg: u32,
+    bg_hover: u32,
+    bg_selected: u32,
+    bg_disabled: u32,
+    border: u32,
+    text_disabled: u32,
 }
 
 impl Styled for Button {
@@ -33,12 +46,85 @@ impl Button {
             id: id.into(),
             style: Default::default(),
             children: Default::default(),
+            icon: None,
             on_hover: None,
             on_click: None,
+            on_close: None,
             selected: None,
             disabled: None,
             centered: false,
+            bg: BTN_BG,
+            bg_hover: BTN_BG_HOVER,
+            bg_selected: BTN_BG_SELECTED,
+            bg_disabled: BTN_BG_DISABLED,
+            border: BTN_BORDER,
+            text_disabled: BTN_TEXT_DISABLED,
         }
+    }
+
+    // -- Color presets --
+
+    pub fn tab(self) -> Self {
+        Self {
+            bg: TAB_BTN_BG,
+            bg_hover: TAB_BTN_BG_HOVER,
+            bg_selected: TAB_BTN_BG_SELECTED,
+            bg_disabled: TAB_BTN_BG_DISABLED,
+            border: TAB_BTN_BORDER,
+            text_disabled: TAB_BTN_TEXT_DISABLED,
+            ..self
+        }
+    }
+
+    pub fn primary(self) -> Self {
+        Self {
+            bg: BTN_PRIMARY_BG,
+            bg_hover: BTN_PRIMARY_BG_HOVER,
+            bg_selected: BTN_PRIMARY_BG_SELECTED,
+            bg_disabled: BTN_PRIMARY_BG_DISABLED,
+            border: BTN_PRIMARY_BORDER,
+            text_disabled: BTN_PRIMARY_TEXT_DISABLED,
+            ..self
+        }
+    }
+
+    // -- Color overrides --
+
+    pub fn bg(mut self, color: u32) -> Self {
+        self.bg = color;
+        self
+    }
+
+    pub fn bg_hover(mut self, color: u32) -> Self {
+        self.bg_hover = color;
+        self
+    }
+
+    pub fn bg_selected(mut self, color: u32) -> Self {
+        self.bg_selected = color;
+        self
+    }
+
+    pub fn bg_disabled(mut self, color: u32) -> Self {
+        self.bg_disabled = color;
+        self
+    }
+
+    pub fn border_color(mut self, color: u32) -> Self {
+        self.border = color;
+        self
+    }
+
+    pub fn text_disabled_color(mut self, color: u32) -> Self {
+        self.text_disabled = color;
+        self
+    }
+
+    // -- Content & behavior --
+
+    pub fn icon(mut self, path: impl Into<SharedString>) -> Self {
+        self.icon = Some(path.into());
+        self
     }
 
     pub fn on_hover(mut self, f: impl Fn(&bool, &mut Window, &mut App) + 'static) -> Self {
@@ -48,6 +134,11 @@ impl Button {
 
     pub fn on_click(mut self, f: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
         self.on_click = Some(Rc::new(f));
+        self
+    }
+
+    pub fn on_close(mut self, f: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_close = Some(Rc::new(f));
         self
     }
 
@@ -69,6 +160,16 @@ impl Button {
 
 impl RenderOnce for Button {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let has_close = self.on_close.is_some();
+
+        // Move colors out of self so closures can capture by value
+        let bg = self.bg;
+        let bg_hover = self.bg_hover;
+        let bg_selected = self.bg_selected;
+        let bg_disabled = self.bg_disabled;
+        let border = self.border;
+        let text_disabled = self.text_disabled;
+
         let mut root = div()
             .id(self.id.clone())
             .flex()
@@ -80,55 +181,136 @@ impl RenderOnce for Button {
             )
             .w_full()
             .border_1()
-            .border_color(rgb(BTN_BORDER))
+            .border_color(rgb(border))
             .rounded_md()
             .h_8()
             .overflow_hidden()
-            .bg(rgb(BTN_BG));
+            .bg(rgb(bg));
         root.style().refine(&self.style);
 
-        let content = div()
+        // Icon
+        let icon_el = self.icon.map(|path| {
+            svg()
+                .path(path)
+                .size_4()
+                .flex_shrink_0()
+                .text_color(rgb(TEXT_PRIMARY))
+                .into_any_element()
+        });
+
+        // Content area
+        let mut content = div()
             .flex()
             .items_center()
+            .gap_2()
             .min_w_0()
             .overflow_hidden()
             .text_ellipsis()
-            .whitespace_nowrap()
-            .children(self.children);
+            .whitespace_nowrap();
 
-        root.child(content).with_transition(self.id).when_else(
+        if has_close {
+            content = content.flex_1();
+        }
+
+        if let Some(icon) = icon_el {
+            content = content.child(icon);
+        }
+
+        let content = content.children(self.children);
+
+        // Close area
+        let close_el = if has_close {
+            let close_bg_id = ElementId::Name(format!("{}-close-bg", self.id).into());
+            let close_opacity_id = ElementId::Name(format!("{}-close-opacity", self.id).into());
+
+            Some(
+                div()
+                    .id(close_opacity_id.clone())
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .mr_1()
+                    .opacity(0.)
+                    .child(
+                        div()
+                            .id(close_bg_id)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .h_4()
+                            .w_4()
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .child(
+                                svg()
+                                    .path("icons/close.svg")
+                                    .size_3()
+                                    .text_color(rgb(TEXT_PRIMARY)),
+                            )
+                            .on_click({
+                                let on_close = self.on_close.clone();
+                                move |_e, w, cx| {
+                                    if let Some(ref cb) = on_close {
+                                        cb(w, cx);
+                                    }
+                                }
+                            })
+                            .bg(rgb(SURFACE_ACTIVE)),
+                    )
+                    .with_transition(close_opacity_id)
+                    .transition_on_hover(Duration::from_millis(100), Linear, |hovered, el| {
+                        if *hovered {
+                            el.opacity(1.)
+                        } else {
+                            el.opacity(0.)
+                        }
+                    })
+                    .into_any_element(),
+            )
+        } else {
+            None
+        };
+
+        let mut root = root.child(content);
+        if let Some(close) = close_el {
+            root = root.child(close);
+        }
+
+        // State transitions — use `move` closures so u32 values are captured by value ('static)
+        root.with_transition(self.id).when_else(
             self.disabled.unwrap_or_default(),
-            |this| {
-                this.bg(rgb(BTN_BG_DISABLED))
-                    .text_color(rgb(BTN_TEXT_DISABLED))
+            move |this| {
+                this.bg(rgb(bg_disabled))
+                    .text_color(rgb(text_disabled))
                     .cursor_not_allowed()
             },
-            |this| {
+            move |this| {
                 this.text_color(rgb(TEXT_PRIMARY))
                     .when_some(self.on_hover, |this, on_hover| {
-                        this.on_hover(move |h, w, a| {
-                            (on_hover)(h, w, a);
-                        })
+                        this.on_hover(move |h, w, a| (on_hover)(h, w, a))
                     })
                     .when_some(self.on_click, |this, on_click| {
-                        this.on_click(move |e, w, a| {
-                            (on_click)(e, w, a);
-                        })
+                        this.on_click(move |e, w, a| (on_click)(e, w, a))
                     })
                     .transition_when_else(
                         self.selected.unwrap_or_default(),
                         Duration::from_millis(250),
                         Linear,
-                        |this| this.bg(rgb(BTN_BG_SELECTED)),
-                        |this| this.bg(rgb(BTN_BG)),
+                        move |this| this.bg(rgb(bg_selected)),
+                        move |this| this.bg(rgb(bg)),
                     )
-                    .transition_on_hover(Duration::from_millis(250), Linear, |hovered, this| {
-                        if *hovered {
-                            this.bg(rgb(BTN_BG_HOVER))
-                        } else {
-                            this
-                        }
-                    })
+                    .transition_on_hover(
+                        Duration::from_millis(250),
+                        Linear,
+                        move |hovered, this| {
+                            if *hovered {
+                                this.bg(rgb(bg_hover))
+                            } else {
+                                this
+                            }
+                        },
+                    )
             },
         )
     }

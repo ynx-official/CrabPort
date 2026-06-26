@@ -11,7 +11,7 @@ use crabport_terminal::terminal::TerminalSession;
 use gpui::*;
 use parking_lot::Mutex;
 
-use crate::app::CrabPortTab;
+use crate::app::{CrabPortTab, TerminalShiftTab, TerminalTab};
 
 mod color;
 mod selection;
@@ -270,6 +270,17 @@ impl Render for TerminalView {
             .overflow_hidden()
             .bg(rgb(TERM_BG))
             .track_focus(&focus_handle)
+            .key_context("CrabPortTerminal")
+            .on_action(cx.listener(|this, _: &TerminalTab, _window, cx| {
+                this.session.write(b"\t");
+                this.session.scroll_to_bottom();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &TerminalShiftTab, _window, cx| {
+                this.session.write(b"\x1b[Z");
+                this.session.scroll_to_bottom();
+                cx.notify();
+            }))
             // Keyboard
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 match Self::resolve_keystroke(&event.keystroke, &this.bindings) {

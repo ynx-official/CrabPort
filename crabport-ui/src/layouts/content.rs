@@ -2,11 +2,10 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use gpui::*;
-use gpui_component::input::InputState;
 
 use crate::app::{CrabportApp, SidebarItem, Tab, TabKind};
 use crate::color::*;
-use crate::layouts::connection_form::{ConnectionFormState, ConnectionKind};
+use crate::layouts::connection_form::ConnectionFormView;
 use crate::layouts::tabbar::render_tab_bar;
 use crate::views;
 use crate::views::hosts::ConnectionHost;
@@ -19,13 +18,9 @@ pub fn render_content(
     active_tab_id: u64,
     terminal_views: &HashMap<u64, Entity<TerminalView>>,
     hosts: &[ConnectionHost],
-    form_state: &ConnectionFormState,
-    form_host: &Option<Entity<InputState>>,
-    form_port: &Option<Entity<InputState>>,
-    form_user: &Option<Entity<InputState>>,
-    form_pass: &Option<Entity<InputState>>,
+    form_entity: Option<&Entity<ConnectionFormView>>,
     window: &mut Window,
-    cx: &App,
+    cx: &mut App,
 ) -> Div {
     let active_tab = tabs.iter().find(|t| t.id == active_tab_id);
     let handle_c = handle.clone();
@@ -35,73 +30,18 @@ pub fn render_content(
         });
     });
 
-    let handle_form = handle.clone();
-    let on_close_form = move |_: &mut Window, cx: &mut App| {
-        handle_form.update(cx, |app, cx| {
-            app.connection_form.active = false;
-            cx.notify();
-        });
-    };
-
-    let handle_connect = handle.clone();
-    let on_connect = move |_kind: ConnectionKind, _: &mut Window, cx: &mut App| {
-        handle_connect.update(cx, |app, cx| {
-            let host = app
-                .form_host_input
-                .as_ref()
-                .map(|s| s.read(cx).text().to_string())
-                .unwrap_or_default();
-            let port = app
-                .form_port_input
-                .as_ref()
-                .map(|s| s.read(cx).text().to_string())
-                .unwrap_or_else(|| "22".into());
-            let username = app
-                .form_user_input
-                .as_ref()
-                .map(|s| s.read(cx).text().to_string())
-                .unwrap_or_default();
-            let password = app
-                .form_pass_input
-                .as_ref()
-                .map(|s| s.read(cx).text().to_string())
-                .unwrap_or_default();
-            let port_num: u16 = port.parse().unwrap_or(22);
-            let name = format!("{}@{}", username, host);
-            app.hosts.push(ConnectionHost {
-                name,
-                host: host.to_string(),
-                port: port_num,
-                username: username.to_string(),
-            });
-            app.connection_form.active = false;
-            app.add_ssh_tab(&host, port_num, &username, &password, cx);
-            cx.notify();
-        });
-    };
-
-    let handle_new = handle.clone();
-    let on_new = move |_: &mut Window, cx: &mut App| {
-        handle_new.update(cx, |app, cx| {
-            app.connection_form.active = true;
-            cx.notify();
+    let app_handle = handle.clone();
+    let on_new = move |w: &mut Window, cx: &mut App| {
+        app_handle.update(cx, |app, cx| {
+            app.open_connection_form(w, cx);
         });
     };
 
     let view: AnyElement = match active_tab.map(|t| t.kind) {
         Some(TabKind::Home) => match selected {
-            SidebarItem::Hosts => views::hosts::render_hosts_view(
-                hosts,
-                form_state,
-                form_host,
-                form_port,
-                form_user,
-                form_pass,
-                on_close_form,
-                on_connect,
-                on_new,
-            )
-            .into_any_element(),
+            SidebarItem::Hosts => {
+                views::hosts::render_hosts_view(hosts, form_entity, on_new).into_any_element()
+            }
             SidebarItem::Credentials => {
                 views::credentials::render_credentials_view().into_any_element()
             }
@@ -127,6 +67,7 @@ pub fn render_content(
                 div()
                     .size_full()
                     .m_2()
+                    .key_context("Terminal")
                     .child(terminal_entity.clone())
                     .into_any_element()
             } else {
