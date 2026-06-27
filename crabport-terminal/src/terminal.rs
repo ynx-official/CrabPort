@@ -27,8 +27,6 @@ pub trait CrabPortTerminal: Send + Sync {
     fn close(&self);
     fn subscribe(&self) -> BroadcastReceiver<BackendEvent>;
 
-    /// Try to obtain a `CrabPortMonitor` implementation.
-    /// Backends that also implement `CrabPortMonitor` should return `Some(self)`.
     fn as_monitor(&self) -> Option<&dyn CrabPortMonitor> {
         None
     }
@@ -38,58 +36,35 @@ pub trait CrabPortTerminal: Send + Sync {
 // Remote performance monitoring
 // ---------------------------------------------------------------------------
 
-/// Connection state of a backend.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RemoteStatus {
-    /// Local session (no network connection).
     Local,
-    /// Actively connected and operational.
     Connected,
-    /// Connection is being established.
     Connecting,
-    /// Connection has been lost or closed.
     Disconnected,
 }
 
-/// Snapshot of network I/O counters (bytes).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NetworkStats {
-    /// Total bytes sent since connection start.
     pub bytes_sent: u64,
-    /// Total bytes received since connection start.
     pub bytes_recv: u64,
 }
 
-/// Snapshot of remote host memory usage.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MemoryStats {
-    /// Total physical memory in bytes.
     pub total: u64,
-    /// Used physical memory in bytes.
     pub used: u64,
 }
 
-/// A full performance snapshot from a remote backend.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RemoteMetrics {
-    /// Round-trip latency in milliseconds.
     pub latency_ms: Option<u32>,
-    /// Remote host memory usage.
     pub memory: Option<MemoryStats>,
-    /// Network I/O counters.
     pub network: Option<NetworkStats>,
 }
 
-/// Trait for backends that can report performance metrics.
-///
-/// Implement this on `CrabPortTerminal` for any backend (local or remote)
-/// to expose latency, memory, and network monitoring data to the UI.
-/// Local backends should return `latency_ms = None` and `RemoteStatus::Local`.
 pub trait CrabPortMonitor: Send + Sync {
-    /// Current connection status.
     fn status(&self) -> RemoteStatus;
-
-    /// Latest performance metrics snapshot.
     fn metrics(&self) -> RemoteMetrics;
 }
 
@@ -167,9 +142,29 @@ impl TerminalSession {
                         BackendEvent::Data(data) => {
                             #[cfg(debug_assertions)]
                             tracing::debug!("session: received {} bytes", data.len());
+                            // Batch-drain: hold the term lock once and advance all
+                            // currently-queued chunks. Cuts lock churn and wakeup
+                            // storms when the PTY floods (cat / top / build logs).
                             let mut terminal = term.lock();
                             parser.advance(&mut *terminal, &data);
-                            // Force wakeup after processing data
+                            loop {
+                                match rx.try_recv() {
+                                    Ok(BackendEvent::Data(more)) => {
+                                        parser.advance(&mut *terminal, &more);
+                                    }
+                                    Ok(BackendEvent::Closed) => {
+                                        drop(terminal);
+                                        let _ = wakeup_tx.try_broadcast(());
+                                        return;
+                                    }
+                                    Ok(BackendEvent::Error(err)) => {
+                                        #[cfg(debug_assertions)]
+                                        tracing::error!("terminal backend error: {}", err);
+                                    }
+                                    Err(_) => break, // queue drained
+                                }
+                            }
+                            drop(terminal);
                             let _ = wakeup_tx.try_broadcast(());
                         }
                         BackendEvent::Closed => {
@@ -201,7 +196,19 @@ impl TerminalSession {
         f(&*term)
     }
 
-    /// Feed an escape sequence directly into the terminal parser (bypasses PTY).
+    /// Mutable access — needed to read & reset alacritty damage.
+    pub fn with_term_mut<R>(&self, f: impl FnOnce(&mut Term<EventProxy>) -> R) -> R {
+        let mut term = self.term.lock();
+        f(&mut *term)
+    }
+
+    /// Non-blocking mutable access. Returns `None` if the reader thread currently
+    /// holds the lock — the caller should reuse the previous frame's snapshot
+    /// instead of stalling the render thread.
+    pub fn try_with_term_mut<R>(&self, f: impl FnOnce(&mut Term<EventProxy>) -> R) -> Option<R> {
+        self.term.try_lock_unfair().map(|mut t| f(&mut *t))
+    }
+
     pub fn feed_escape(&self, data: &[u8]) {
         let mut term = self.term.lock();
         let mut parser = Processor::<StdSyncHandler>::new();
@@ -228,32 +235,18 @@ impl TerminalSession {
         self.wakeup_tx.new_receiver()
     }
 
-    /// Subscribe to backend events directly.
     pub fn subscribe_backend(&self) -> BroadcastReceiver<BackendEvent> {
         self.backend.subscribe()
     }
 
-    /// Try to obtain a reference to the `CrabPortMonitor` implementation.
-    /// Returns `None` if the backend doesn't implement `CrabPortMonitor`.
     pub fn monitor(&self) -> Option<&dyn CrabPortMonitor> {
-        // Both CrabPortTerminal and CrabPortMonitor are object-safe,
-        // but we can't downcast `dyn CrabPortTerminal` to `dyn CrabPortMonitor`
-        // without a helper. Instead, we store both traits when available.
-        //
-        // For now, we use a simple approach: since the concrete types that
-        // implement CrabPortTerminal also implement CrabPortMonitor, we ask
-        // the backend for its monitor via a method on CrabPortTerminal.
         self.backend.as_monitor()
     }
 
     pub fn scroll(&self, delta: i32) {
         let mut term = self.term.lock();
         use alacritty_terminal::grid::Scroll;
-        if delta > 0 {
-            term.scroll_display(Scroll::Delta(delta));
-        } else {
-            term.scroll_display(Scroll::Delta(delta));
-        }
+        term.scroll_display(Scroll::Delta(delta));
         let _ = self.wakeup_tx.try_broadcast(());
     }
 

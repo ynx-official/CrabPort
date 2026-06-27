@@ -1,8 +1,13 @@
+use std::num::NonZeroUsize;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{
+    Arc, OnceLock,
+    atomic::{AtomicBool, Ordering},
+};
 
 use alacritty_terminal::{
     grid::Dimensions,
+    term::TermDamage,
     term::cell::Flags,
     vte::ansi::{Color, CursorShape, NamedColor},
 };
@@ -14,6 +19,7 @@ use crabport_terminal::terminal::{CrabPortMonitor, RemoteStatus, TerminalSession
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_animation::{animation::TransitionExt, transition::general::EaseInOutCubic};
+use lru::LruCache;
 use parking_lot::Mutex;
 use rust_i18n::t;
 
@@ -29,6 +35,131 @@ use color::*;
 use connection_overlay::*;
 use selection::*;
 
+// ---------------------------------------------------------------------------
+// Shared, build-once resources.
+// ---------------------------------------------------------------------------
+
+/// Palette built once and reused for every cell of every frame.
+fn palette() -> &'static alacritty_terminal::term::color::Colors {
+    static P: OnceLock<alacritty_terminal::term::color::Colors> = OnceLock::new();
+    P.get_or_init(alacritty_terminal::term::color::Colors::default)
+}
+
+/// Pre-built font variants, cloned cheaply per run.
+struct Fonts {
+    regular: Font,
+    bold: Font,
+    italic: Font,
+    bold_italic: Font,
+}
+
+fn fonts() -> &'static Fonts {
+    static F: OnceLock<Fonts> = OnceLock::new();
+    F.get_or_init(|| {
+        let base = font("Menlo");
+        let mut italic = base.clone();
+        italic.style = FontStyle::Italic;
+        let mut bold_italic = base.clone().bold();
+        bold_italic.style = FontStyle::Italic;
+        Fonts {
+            regular: base.clone(),
+            bold: base.bold(),
+            italic,
+            bold_italic,
+        }
+    })
+}
+
+fn pick_font(bold: bool, italic: bool) -> Font {
+    let f = fonts();
+    match (bold, italic) {
+        (false, false) => f.regular.clone(),
+        (true, false) => f.bold.clone(),
+        (false, true) => f.italic.clone(),
+        (true, true) => f.bold_italic.clone(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Render snapshot / shaped-line cache.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+struct CellSnap {
+    c: char,
+    fg: u32,
+    bg: u32,
+    flags: Flags,
+    custom_bg: bool,
+}
+
+#[derive(Clone)]
+struct RowSnapshot {
+    cells: Vec<CellSnap>,
+    hash: u64,
+    /// True if any cell needs a background quad (custom bg or inverse).
+    has_bg: bool,
+}
+
+impl Default for RowSnapshot {
+    fn default() -> Self {
+        Self {
+            cells: Vec::new(),
+            hash: u64::MAX,
+            has_bg: false,
+        }
+    }
+}
+
+struct RenderCache {
+    rows: Vec<RowSnapshot>,
+    /// Keyed by row content hash so scrolled-back lines reuse their shaping.
+    shaped: LruCache<u64, ShapedLine>,
+    cols: usize,
+    rows_count: usize,
+}
+
+impl Default for RenderCache {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            shaped: LruCache::new(NonZeroUsize::new(1024).unwrap()),
+            cols: 0,
+            rows_count: 0,
+        }
+    }
+}
+
+impl RenderCache {
+    fn resize(&mut self, cols: usize, rows: usize) {
+        self.cols = cols;
+        self.rows_count = rows;
+        self.rows = vec![RowSnapshot::default(); rows];
+        // Keep the shaped LRU — identical lines after resize still hit.
+    }
+
+    fn clear_all(&mut self) {
+        self.rows.clear();
+        self.shaped.clear();
+        self.cols = 0;
+        self.rows_count = 0;
+    }
+}
+
+fn hash_row(cells: &[CellSnap]) -> u64 {
+    use std::hash::Hasher;
+    let mut h = rustc_hash::FxHasher::default();
+    for c in cells {
+        h.write_u32(c.c as u32);
+        h.write_u32(c.fg);
+        h.write_u32(c.bg);
+        h.write_u16(c.flags.bits() as u16);
+    }
+    h.finish()
+}
+
+type SharedRenderCache = Arc<Mutex<RenderCache>>;
+
 // ---- TerminalView ----
 
 pub struct TerminalView {
@@ -39,21 +170,18 @@ pub struct TerminalView {
     cell_width: Pixels,
     last_bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
     selection: Arc<Mutex<Option<Selection>>>,
+    render_cache: SharedRenderCache,
+    /// Set by data/blink/status; consumed by the ~120Hz frame pump.
+    needs_repaint: Arc<AtomicBool>,
     bindings: Vec<keybind::Binding>,
     pending_paste: bool,
     pending_copy: bool,
     cursor_visible: bool,
     scroll_accumulator: f32,
-    /// Connection overlay state (only meaningful for remote sessions).
     overlay: SharedOverlayState,
-    /// Host label for the remote session (empty for local).
     remote_host: String,
-    /// Unique count for this terminal, used to generate unique element ids.
     count: u64,
-    /// SSH connection info, saved for reconnect (only for remote sessions).
     ssh_info: Option<SshConnectionInfo>,
-    /// Callback invoked when the backend closes (e.g. local PTY child exits).
-    /// For remote sessions this is `None` — they show a disconnect overlay instead.
     on_backend_closed: Option<Rc<dyn Fn(&mut App)>>,
 }
 
@@ -110,13 +238,12 @@ impl TerminalView {
 
         let session = Arc::new(TerminalSession::new(backend, cols, rows));
         session.start();
-
-        // Set initial cursor to steady beam (|) via terminal escape
         session.feed_escape(b"\x1b[6 q");
 
+        let needs_repaint = Arc::new(AtomicBool::new(true));
         let is_remote = !host.is_empty();
 
-        // Subscribe to backend events for error/close notifications
+        // Backend error/close events.
         let mut event_rx = session.subscribe_backend();
         let overlay_c = overlay.clone();
         let entity = cx.entity().downgrade();
@@ -129,11 +256,7 @@ impl TerminalView {
                     }
                     crabport_terminal::terminal::BackendEvent::Closed => {
                         let _ = entity.update(cx, |this, cx| {
-                            // For local PTY: invoke on_backend_closed to remove the tab.
-                            // For remote sessions: just update overlay, the user can reconnect.
                             if let Some(ref cb) = this.on_backend_closed {
-                                // Defer the close to avoid mutating the entity
-                                // graph during an active update.
                                 let cb = cb.clone();
                                 cx.defer(move |cx| cb(cx));
                             } else {
@@ -150,15 +273,13 @@ impl TerminalView {
         })
         .detach();
 
-        // Poll monitor status and repaint on wakeup signals
+        // Wakeup listener: only mark dirty (+ reflect status into overlay).
         let mut wakeup_rx = session.subscribe_wakeup();
-        let entity = cx.entity().downgrade();
-        let blink_entity = entity.clone();
+        let dirty_wk = needs_repaint.clone();
+        let status_entity = cx.entity().downgrade();
         cx.spawn(async move |_this, cx| {
-            #[cfg(debug_assertions)]
-            tracing::info!("wakeup listener started");
             while let Ok(()) = wakeup_rx.recv().await {
-                let _ = entity.update(cx, |this, cx| {
+                let _ = status_entity.update(cx, |this, _cx| {
                     if let Some(m) = this.session.monitor() {
                         let new_status = m.status();
                         let mut ov = this.overlay.lock();
@@ -166,30 +287,49 @@ impl TerminalView {
                             ov.update_status(new_status, &this.remote_host);
                         }
                     }
-                    cx.notify();
                 });
+                dirty_wk.store(true, Ordering::Release);
             }
-            #[cfg(debug_assertions)]
-            tracing::warn!("wakeup listener ended");
         })
         .detach();
 
-        // Cursor blink timer
+        // Frame pump: at most ~120Hz, notify only when dirty.
+        let dirty_pump = needs_repaint.clone();
+        let pump_entity = cx.entity().downgrade();
+        cx.spawn(async move |_this, cx| {
+            loop {
+                smol::Timer::after(std::time::Duration::from_micros(8333)).await;
+                if dirty_pump.swap(false, Ordering::AcqRel) {
+                    if pump_entity.update(cx, |_, cx| cx.notify()).is_err() {
+                        break;
+                    }
+                }
+            }
+        })
+        .detach();
+
+        // Cursor blink: flips state then marks dirty (no direct notify).
+        let dirty_blink = needs_repaint.clone();
+        let blink_entity = cx.entity().downgrade();
         cx.spawn(async move |_this, cx| {
             loop {
                 smol::Timer::after(std::time::Duration::from_millis(530)).await;
-                let _ = blink_entity.update(cx, |this, cx| {
-                    this.cursor_visible = !this.cursor_visible;
-                    cx.notify();
-                });
+                let ok = blink_entity
+                    .update(cx, |this, _cx| {
+                        this.cursor_visible = !this.cursor_visible;
+                    })
+                    .is_ok();
+                if !ok {
+                    break;
+                }
+                dirty_blink.store(true, Ordering::Release);
             }
         })
         .detach();
 
-        // Once the overlay starts fading out, wait for the animation to finish
-        // then mark it as fully hidden
         if is_remote {
             let overlay_fade = overlay.clone();
+            let dirty_fade = needs_repaint.clone();
             let fade_entity = cx.entity().downgrade();
             cx.spawn(async move |_this, cx| {
                 loop {
@@ -200,6 +340,7 @@ impl TerminalView {
                 }
                 smol::Timer::after(std::time::Duration::from_millis(600)).await;
                 overlay_fade.lock().mark_hidden();
+                dirty_fade.store(true, Ordering::Release);
                 let _ = fade_entity.update(cx, |_, cx| cx.notify());
             })
             .detach();
@@ -213,6 +354,8 @@ impl TerminalView {
             cell_width,
             last_bounds: Arc::new(Mutex::new(None)),
             selection: Arc::new(Mutex::new(None)),
+            render_cache: Arc::new(Mutex::new(RenderCache::default())),
+            needs_repaint,
             bindings: keybind::default_bindings(),
             pending_paste: false,
             pending_copy: false,
@@ -230,28 +373,22 @@ impl TerminalView {
         self.session.monitor()
     }
 
-    /// Set a callback to be invoked when the backend closes.
-    /// Used by the app to remove the tab when a local PTY child exits.
     pub fn set_on_backend_closed(&mut self, f: impl Fn(&mut App) + 'static) {
         self.on_backend_closed = Some(Rc::new(f));
     }
 
-    /// Reconnect a disconnected SSH session by creating a new backend and session.
     pub fn reconnect(&mut self, cx: &mut Context<Self>) {
         let info = match self.ssh_info.clone() {
             Some(i) => i,
             None => return,
         };
 
-        // Close the old session
         self.session.close();
 
-        // Reset transition state so the overlay starts fresh
         gpui_animation::reset_transition(&ElementId::Name(
             format!("connection-overlay-{}", self.count).into(),
         ));
 
-        // Reset overlay state for the new connection attempt
         {
             let mut ov = self.overlay.lock();
             ov.update_status(RemoteStatus::Connecting, &self.remote_host);
@@ -274,7 +411,9 @@ impl TerminalView {
         session.start();
         session.feed_escape(b"\x1b[6 q");
 
-        // Re-subscribe to backend events
+        self.render_cache.lock().clear_all();
+
+        // Backend events.
         let mut event_rx = session.subscribe_backend();
         let overlay_c = self.overlay.clone();
         let entity = cx.entity().downgrade();
@@ -304,12 +443,13 @@ impl TerminalView {
         })
         .detach();
 
-        // Re-subscribe to wakeup signals
+        // Wakeup → dirty.
         let mut wakeup_rx = session.subscribe_wakeup();
-        let entity = cx.entity().downgrade();
+        let dirty_wk = self.needs_repaint.clone();
+        let status_entity = cx.entity().downgrade();
         cx.spawn(async move |_this, cx| {
             while let Ok(()) = wakeup_rx.recv().await {
-                let _ = entity.update(cx, |this, cx| {
+                let _ = status_entity.update(cx, |this, _cx| {
                     if let Some(m) = this.session.monitor() {
                         let new_status = m.status();
                         let mut ov = this.overlay.lock();
@@ -317,14 +457,15 @@ impl TerminalView {
                             ov.update_status(new_status, &this.remote_host);
                         }
                     }
-                    cx.notify();
                 });
+                dirty_wk.store(true, Ordering::Release);
             }
         })
         .detach();
 
-        // Restart fade-out watcher for the new connection
+        // Fade watcher.
         let overlay_fade = self.overlay.clone();
+        let dirty_fade = self.needs_repaint.clone();
         let fade_entity = cx.entity().downgrade();
         cx.spawn(async move |_this, cx| {
             loop {
@@ -335,6 +476,7 @@ impl TerminalView {
             }
             smol::Timer::after(std::time::Duration::from_millis(600)).await;
             overlay_fade.lock().mark_hidden();
+            dirty_fade.store(true, Ordering::Release);
             let _ = fade_entity.update(cx, |_, cx| cx.notify());
         })
         .detach();
@@ -394,7 +536,6 @@ impl TerminalView {
         })
     }
 
-    // background_color is always None — backgrounds are painted separately via paint_quad
     fn make_run(
         len: usize,
         bold: bool,
@@ -404,13 +545,7 @@ impl TerminalView {
         inverse_bg: u32,
         underline: bool,
     ) -> TextRun {
-        let mut run_font = font("Menlo");
-        if bold {
-            run_font = run_font.bold();
-        }
-        if italic {
-            run_font.style = FontStyle::Italic;
-        }
+        let run_font = pick_font(bold, italic);
         let fg_color = if inverse { rgb(inverse_bg) } else { rgb(fg) };
         TextRun {
             len,
@@ -429,13 +564,101 @@ impl TerminalView {
             strikethrough: None,
         }
     }
-}
 
+    fn build_runs(cells: &[CellSnap], num_cols: usize) -> (String, Vec<TextRun>) {
+        let mut line_text = String::new();
+        let mut runs: Vec<TextRun> = Vec::new();
+        let mut run_start = 0usize;
+        let mut cur_fg = TERM_FG;
+        let mut cur_inv_bg = TERM_BG;
+        let mut cur_bold = false;
+        let mut cur_italic = false;
+        let mut cur_underline = false;
+        let mut cur_inverse = false;
+
+        for (ci, cell) in cells.iter().enumerate() {
+            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                continue;
+            }
+            let ef = cell.fg;
+            let eb = cell.bg;
+            let is_b = cell.flags.contains(Flags::BOLD);
+            let is_i = cell.flags.contains(Flags::ITALIC);
+            let is_u = cell.flags.contains(Flags::UNDERLINE);
+            let is_inv = cell.flags.contains(Flags::INVERSE);
+
+            let new_run = ef != cur_fg
+                || eb != cur_inv_bg
+                || is_b != cur_bold
+                || is_i != cur_italic
+                || is_u != cur_underline
+                || is_inv != cur_inverse;
+
+            if new_run {
+                let rl = line_text.len() - run_start;
+                if rl > 0 {
+                    runs.push(Self::make_run(
+                        rl,
+                        cur_bold,
+                        cur_italic,
+                        cur_fg,
+                        cur_inverse,
+                        cur_inv_bg,
+                        cur_underline,
+                    ));
+                }
+                run_start = line_text.len();
+                cur_fg = ef;
+                cur_inv_bg = eb;
+                cur_bold = is_b;
+                cur_italic = is_i;
+                cur_underline = is_u;
+                cur_inverse = is_inv;
+            }
+
+            if cell.c == '\t' {
+                let ns = ((ci / 8) + 1) * 8 - ci;
+                for _ in 0..ns {
+                    line_text.push(' ');
+                }
+            } else {
+                line_text.push(cell.c);
+            }
+        }
+
+        let rl = line_text.len() - run_start;
+        if rl > 0 {
+            runs.push(Self::make_run(
+                rl,
+                cur_bold,
+                cur_italic,
+                cur_fg,
+                cur_inverse,
+                cur_inv_bg,
+                cur_underline,
+            ));
+        }
+
+        if line_text.len() < num_cols {
+            let pad = num_cols - line_text.len();
+            line_text.extend(std::iter::repeat(' ').take(pad));
+            runs.push(TextRun {
+                len: pad,
+                font: pick_font(false, false),
+                color: rgb(TERM_FG).into(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            });
+        }
+
+        (line_text, runs)
+    }
+}
 // ---- GPUI Render ----
 
 impl Render for TerminalView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Handle deferred clipboard operations from keybinds
         if self.pending_paste {
             self.pending_paste = false;
             if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
@@ -485,6 +708,9 @@ impl Render for TerminalView {
         let last_bounds = last_bounds_c.clone();
         let selection = self.selection.clone();
         let selection_c = selection.clone();
+        let render_cache = self.render_cache.clone();
+        let render_cache_paint = render_cache.clone();
+        let needs_repaint = self.needs_repaint.clone();
         let entity = cx.entity().downgrade();
         let cursor_visible = self.cursor_visible;
 
@@ -509,7 +735,7 @@ impl Render for TerminalView {
             .track_focus(&focus_handle)
             .key_context("CrabPortTerminal")
             .on_action(cx.listener(|this, _: &TerminalTab, _window, cx| {
-                this.session.write(b"\t");
+                this.session.write(b"	");
                 this.session.scroll_to_bottom();
                 cx.notify();
             }))
@@ -536,10 +762,9 @@ impl Render for TerminalView {
                     None => {}
                 }
             }))
-            // Canvas layer: grid snapshot in prepaint, rendering in paint
             .child(
                 canvas(
-                    // prepaint: resize terminal and snapshot the grid
+                    // ---- prepaint: resize + try_lock incremental snapshot ----
                     move |bounds, _window, _cx| {
                         let mut last = last_bounds.lock();
                         let (cols, rows) = {
@@ -547,6 +772,8 @@ impl Render for TerminalView {
                             let r = (bounds.size.height / line_height).floor() as usize;
                             (c.max(2), r.max(1))
                         };
+
+                        let mut resized = false;
                         if let Some(ref lb) = *last {
                             let (lc, lr) = {
                                 let c = (lb.size.width / cell_width).floor() as usize;
@@ -555,57 +782,125 @@ impl Render for TerminalView {
                             };
                             if lc != cols || lr != rows {
                                 session.resize(cols as u16, rows as u16);
+                                resized = true;
                             }
                         } else {
                             session.resize(cols as u16, rows as u16);
+                            resized = true;
                         }
                         *last = Some(bounds);
 
-                        session.with_term(|term| {
-                            let grid = term.grid();
-                            let display_offset = grid.display_offset();
-                            let num_cols = grid.columns();
-                            let num_lines = grid.screen_lines();
-                            let mut data = Vec::with_capacity(num_lines);
-                            for row in 0..num_lines {
-                                let li = alacritty_terminal::index::Line(
-                                    row as i32 - display_offset as i32,
-                                );
-                                let mut cells = Vec::with_capacity(num_cols);
-                                for col in 0..num_cols {
-                                    let cell = &grid[li][alacritty_terminal::index::Column(col)];
-                                    cells.push((cell.c, cell.fg, cell.bg, cell.flags));
-                                }
-                                data.push(cells);
+                        let pal = palette();
+
+                        // Try to update the snapshot without stalling. If the
+                        // reader holds the lock, reuse last frame's snapshot.
+                        let got = session.try_with_term_mut(|term| {
+                            let mut cache = render_cache.lock();
+
+                            let grid_cols = term.grid().columns();
+                            let grid_lines = term.grid().screen_lines();
+                            let offset = term.grid().display_offset();
+
+                            if resized || cache.cols != grid_cols || cache.rows_count != grid_lines
+                            {
+                                cache.resize(grid_cols, grid_lines);
                             }
+
+                            // Collect dirty rows from alacritty damage.
+                            let mut full = false;
+                            let mut dirty_rows: Vec<usize> = Vec::new();
+                            match term.damage() {
+                                TermDamage::Full => full = true,
+                                TermDamage::Partial(iter) => {
+                                    for ld in iter {
+                                        if ld.line < grid_lines {
+                                            dirty_rows.push(ld.line);
+                                        }
+                                    }
+                                }
+                            }
+                            term.reset_damage();
+
+                            let grid = term.grid();
+                            let update_row = |row: usize, cache: &mut RenderCache| {
+                                let li =
+                                    alacritty_terminal::index::Line(row as i32 - offset as i32);
+                                let mut cells = Vec::with_capacity(grid_cols);
+                                let mut has_bg = false;
+                                for col in 0..grid_cols {
+                                    let cell = &grid[li][alacritty_terminal::index::Column(col)];
+                                    let custom_bg = cell.bg != Color::Named(NamedColor::Background);
+                                    if custom_bg || cell.flags.contains(Flags::INVERSE) {
+                                        has_bg = true;
+                                    }
+                                    cells.push(CellSnap {
+                                        c: cell.c,
+                                        fg: ansi_color_to_rgb(&cell.fg, pal),
+                                        bg: ansi_color_to_rgb(&cell.bg, pal),
+                                        flags: cell.flags,
+                                        custom_bg,
+                                    });
+                                }
+                                let h = hash_row(&cells);
+                                cache.rows[row] = RowSnapshot {
+                                    cells,
+                                    hash: h,
+                                    has_bg,
+                                };
+                            };
+
+                            if full {
+                                for row in 0..grid_lines {
+                                    update_row(row, &mut cache);
+                                }
+                            } else {
+                                for &row in &dirty_rows {
+                                    update_row(row, &mut cache);
+                                }
+                            }
+
                             let cursor = term.renderable_content().cursor;
-                            (data, cursor, num_cols, num_lines)
-                        })
+                            (Some(cursor), grid_cols, grid_lines)
+                        });
+
+                        match got {
+                            Some(v) => v,
+                            None => {
+                                let cache = render_cache.lock();
+                                (None, cache.cols, cache.rows_count)
+                            }
+                        }
                     },
-                    // paint: three layers per row — base bg, cell backgrounds, text
+                    // ---- paint: hash-keyed LRU shaped lines ----
                     move |bounds, lines, window, cx| {
-                        let (grid_data, cursor, num_cols, _num_lines) = lines;
+                        let (cursor, num_cols, _num_lines) = lines;
                         let text_system = window.text_system().clone();
 
                         let sel_guard = selection.lock();
                         let sel: Option<Selection> = sel_guard.clone();
                         drop(sel_guard);
 
-                        for (row_idx, row) in grid_data.iter().enumerate() {
+                        let mut cache = render_cache_paint.lock();
+
+                        // Single viewport-wide background fill.
+                        window.paint_quad(fill(
+                            Bounds::new(bounds.origin, bounds.size),
+                            rgb(TERM_BG),
+                        ));
+
+                        let row_count = cache.rows_count;
+                        for row_idx in 0..row_count {
                             let y = bounds.origin.y + line_height * row_idx as f32;
 
-                            // Compute selection column range for this row
                             let (sel_start, sel_end) = if let Some(ref s) = sel {
                                 let (sr, er, sc, ec) = s.range();
                                 if row_idx < sr || row_idx > er {
                                     (None, None)
                                 } else if sr == er {
-                                    // Single-row selection: precise column range
                                     let lo = sc.min(num_cols);
                                     let hi = (ec + 1).min(num_cols).max(lo + 1);
                                     (Some(lo), Some(hi))
                                 } else if row_idx == sr {
-                                    // First row of multi-row selection: start_col to end of line
                                     let col = if s.start_row <= s.end_row {
                                         s.start_col
                                     } else {
@@ -613,7 +908,6 @@ impl Render for TerminalView {
                                     };
                                     (Some(col.min(num_cols)), Some(num_cols))
                                 } else if row_idx == er {
-                                    // Last row of multi-row selection: start of line to end_col
                                     let col = if s.start_row <= s.end_row {
                                         s.end_col
                                     } else {
@@ -621,184 +915,76 @@ impl Render for TerminalView {
                                     };
                                     (Some(0), Some(col.saturating_add(1).min(num_cols)))
                                 } else {
-                                    // Middle rows: entire line selected
                                     (Some(0), Some(num_cols))
                                 }
                             } else {
                                 (None, None)
                             };
 
-                            // Layer 1: solid row background
-                            window.paint_quad(fill(
-                                Bounds::new(
-                                    point(bounds.origin.x, y),
-                                    size(bounds.size.width, line_height),
-                                ),
-                                rgb(TERM_BG),
-                            ));
+                            let row_selected = sel_start.is_some();
+                            let row = &cache.rows[row_idx];
 
-                            // Layer 2: batched cell backgrounds (selection, custom bg, inverse)
-                            // Collect rects then merge adjacent same-color ones to minimise paint_quad calls.
-                            {
-                                let mut rects: Vec<(usize, usize, Hsla)> = Vec::new(); // (col, cells, color)
-                                for (ci, (_c, fg, bg, flags)) in row.iter().enumerate() {
-                                    if flags.contains(Flags::WIDE_CHAR_SPACER) {
+                            // Background layer: only if the row needs it.
+                            if row.has_bg || row_selected {
+                                let mut rects: Vec<(usize, usize, Hsla)> = Vec::new();
+                                for (ci, cell) in row.cells.iter().enumerate() {
+                                    if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                                         continue;
                                     }
-
                                     let is_sel = sel_start
                                         .is_some_and(|ss| ci >= ss && ci < sel_end.unwrap_or(0));
-                                    let has_custom_bg = *bg != Color::Named(NamedColor::Background);
-                                    let is_inv = flags.contains(Flags::INVERSE);
-                                    let wide = flags.contains(Flags::WIDE_CHAR);
+                                    let is_inv = cell.flags.contains(Flags::INVERSE);
+                                    let wide = cell.flags.contains(Flags::WIDE_CHAR);
 
                                     let bg_color: Option<Hsla> = if is_sel {
                                         Some(rgb(SELECTION_BG).into())
                                     } else if is_inv {
-                                        let fg_raw = ansi_color_to_rgb(
-                                            fg,
-                                            &alacritty_terminal::term::color::Colors::default(),
-                                        );
-                                        Some(rgb(fg_raw).into())
-                                    } else if has_custom_bg {
-                                        let bg_raw = ansi_color_to_rgb(
-                                            bg,
-                                            &alacritty_terminal::term::color::Colors::default(),
-                                        );
-                                        Some(rgb(bg_raw).into())
+                                        Some(rgb(cell.fg).into())
+                                    } else if cell.custom_bg {
+                                        Some(rgb(cell.bg).into())
                                     } else {
                                         None
                                     };
 
                                     if let Some(color) = bg_color {
-                                        let cells = if wide { 2 } else { 1 };
-                                        // Try to merge with the previous rect
+                                        let n = if wide { 2 } else { 1 };
                                         if let Some(last) = rects.last_mut() {
                                             if last.0 + last.1 == ci && last.2 == color {
-                                                last.1 += cells;
+                                                last.1 += n;
                                                 continue;
                                             }
                                         }
-                                        rects.push((ci, cells, color));
+                                        rects.push((ci, n, color));
                                     }
                                 }
-
-                                for (col, cells, color) in rects {
+                                for (col, n, color) in rects {
                                     let cell_x = bounds.origin.x + col as f32 * cell_width;
                                     window.paint_quad(fill(
                                         Bounds::new(
                                             point(cell_x, y),
-                                            size(cell_width * cells as f32, line_height),
+                                            size(cell_width * n as f32, line_height),
                                         ),
                                         color,
                                     ));
                                 }
                             }
 
-                            // Layer 3: text runs — background_color always None,
-                            // runs split only by fg/style changes (not selection state)
-                            let mut line_text = String::new();
-                            let mut runs: Vec<TextRun> = Vec::new();
-                            let mut run_start = 0usize;
-                            let mut cur_fg = TERM_FG;
-                            let mut cur_inv_bg = TERM_BG;
-                            let mut cur_bold = false;
-                            let mut cur_italic = false;
-                            let mut cur_underline = false;
-                            let mut cur_inverse = false;
-
-                            for (ci, (c, fg, bg, flags)) in row.iter().enumerate() {
-                                if flags.contains(Flags::WIDE_CHAR_SPACER) {
-                                    continue;
-                                }
-
-                                let ef = ansi_color_to_rgb(
-                                    fg,
-                                    &alacritty_terminal::term::color::Colors::default(),
-                                );
-                                let eb = ansi_color_to_rgb(
-                                    bg,
-                                    &alacritty_terminal::term::color::Colors::default(),
-                                );
-                                let is_b = flags.contains(Flags::BOLD);
-                                let is_i = flags.contains(Flags::ITALIC);
-                                let is_u = flags.contains(Flags::UNDERLINE);
-                                let is_inv = flags.contains(Flags::INVERSE);
-
-                                let new_run = ef != cur_fg
-                                    || eb != cur_inv_bg
-                                    || is_b != cur_bold
-                                    || is_i != cur_italic
-                                    || is_u != cur_underline
-                                    || is_inv != cur_inverse;
-
-                                if new_run {
-                                    let rl = line_text.len() - run_start;
-                                    if rl > 0 {
-                                        runs.push(Self::make_run(
-                                            rl,
-                                            cur_bold,
-                                            cur_italic,
-                                            cur_fg,
-                                            cur_inverse,
-                                            cur_inv_bg,
-                                            cur_underline,
-                                        ));
-                                    }
-                                    run_start = line_text.len();
-                                    cur_fg = ef;
-                                    cur_inv_bg = eb;
-                                    cur_bold = is_b;
-                                    cur_italic = is_i;
-                                    cur_underline = is_u;
-                                    cur_inverse = is_inv;
-                                }
-
-                                if *c == '\t' {
-                                    let ns = ((ci / 8) + 1) * 8 - ci;
-                                    for _ in 0..ns {
-                                        line_text.push(' ');
-                                    }
-                                } else {
-                                    line_text.push(*c);
+                            // Text layer: hash-keyed LRU; reshape only on miss.
+                            let hash = row.hash;
+                            if cache.shaped.peek(&hash).is_none() {
+                                let (line_text, runs) =
+                                    Self::build_runs(&cache.rows[row_idx].cells, num_cols);
+                                if !line_text.is_empty() && !runs.is_empty() {
+                                    let shaped = text_system.shape_line(
+                                        line_text.into(),
+                                        font_size,
+                                        &runs,
+                                        None,
+                                    );
+                                    cache.shaped.put(hash, shaped);
                                 }
                             }
-
-                            // Flush the last run
-                            let rl = line_text.len() - run_start;
-                            if rl > 0 {
-                                runs.push(Self::make_run(
-                                    rl,
-                                    cur_bold,
-                                    cur_italic,
-                                    cur_fg,
-                                    cur_inverse,
-                                    cur_inv_bg,
-                                    cur_underline,
-                                ));
-                            }
-
-                            // Pad to full column width so shape_line covers the whole row
-                            if line_text.len() < num_cols {
-                                let pad = num_cols - line_text.len();
-                                line_text.extend(std::iter::repeat(' ').take(pad));
-                                runs.push(TextRun {
-                                    len: pad,
-                                    font: font("Menlo"),
-                                    color: rgb(TERM_FG).into(),
-                                    background_color: None,
-                                    underline: None,
-                                    strikethrough: None,
-                                });
-                            }
-
-                            if !line_text.is_empty() && !runs.is_empty() {
-                                let shaped = text_system.shape_line(
-                                    line_text.into(),
-                                    font_size,
-                                    &runs,
-                                    None,
-                                );
+                            if let Some(shaped) = cache.shaped.get(&hash) {
                                 let _ = shaped.paint(
                                     point(bounds.origin.x, y),
                                     line_height,
@@ -808,10 +994,13 @@ impl Render for TerminalView {
                             }
                         }
 
-                        // Cursor rendering
-                        if cursor.shape != CursorShape::Hidden
+                        drop(cache);
+
+                        // Cursor (no reshape involved).
+                        if let Some(cursor) = cursor
+                            && cursor.shape != CursorShape::Hidden
                             && cursor.point.line.0 >= 0
-                            && cursor.point.line.0 < _num_lines as i32
+                            && cursor.point.line.0 < row_count as i32
                         {
                             let cx_x = bounds.origin.x + cursor.point.column.0 as f32 * cell_width;
                             let cx_y = bounds.origin.y + cursor.point.line.0 as f32 * line_height;
@@ -853,7 +1042,7 @@ impl Render for TerminalView {
                 )
                 .size_full(),
             )
-            // Transparent overlay div for mouse events (selection + scroll)
+            // Transparent overlay div for mouse events (selection + scroll).
             .child(
                 div()
                     .absolute()
@@ -862,6 +1051,7 @@ impl Render for TerminalView {
                     .size_full()
                     .on_scroll_wheel({
                         let session = session_c.clone();
+                        let needs_repaint = needs_repaint.clone();
                         let entity = entity.clone();
                         let line_height = line_height;
                         move |event, _window, cx| {
@@ -870,37 +1060,31 @@ impl Render for TerminalView {
                             if dy.abs() < 0.001 {
                                 return;
                             }
-                            let _ = entity.update(cx, |this, cx| {
+                            let _ = entity.update(cx, |this, _cx| {
                                 this.scroll_accumulator += dy;
                                 let lines = this.scroll_accumulator.trunc() as i32;
                                 if lines != 0 {
                                     this.scroll_accumulator -= lines as f32;
                                     session.scroll(lines);
-                                    cx.notify();
                                 }
                             });
+                            // Scroll marks dirty; the frame pump coalesces repaints.
+                            needs_repaint.store(true, Ordering::Release);
                         }
                     })
                     .on_mouse_down(MouseButton::Left, {
                         let selection = selection_c.clone();
                         let last_bounds = last_bounds_c.clone();
+                        let needs_repaint = needs_repaint.clone();
                         let cell_width = cell_width;
                         let line_height = line_height;
-                        let entity = entity.clone();
-                        move |event, _window, cx| {
-                            #[cfg(debug_assertions)]
-                            tracing::debug!("mouse-down at {:?}", event.position);
+                        move |event, _window, _cx| {
                             if let Some(bounds) = *last_bounds.lock() {
                                 if let Some((col, row)) =
                                     mouse_to_grid(event.position, bounds, cell_width, line_height)
                                 {
-                                    #[cfg(debug_assertions)]
-                                    tracing::debug!("sel start col={} row={}", col, row);
-                                    // Start a new selection; drag will extend it.
-                                    // If the mouse is released without moving we
-                                    // clear it in on_mouse_up.
                                     *selection.lock() = Some(Selection::new(col, row));
-                                    let _ = entity.update(cx, |_, cx| cx.notify());
+                                    needs_repaint.store(true, Ordering::Release);
                                 }
                             }
                         }
@@ -908,10 +1092,10 @@ impl Render for TerminalView {
                     .on_mouse_move({
                         let selection = selection_c.clone();
                         let last_bounds = last_bounds_c.clone();
+                        let needs_repaint = needs_repaint.clone();
                         let cell_width = cell_width;
                         let line_height = line_height;
-                        let entity = entity.clone();
-                        move |event, _window, cx| {
+                        move |event, _window, _cx| {
                             if event.dragging() {
                                 if let Some(bounds) = *last_bounds.lock() {
                                     if let Some((col, row)) = mouse_to_grid(
@@ -923,7 +1107,7 @@ impl Render for TerminalView {
                                         if let Some(ref mut sel) = *selection.lock() {
                                             sel.end_col = col;
                                             sel.end_row = row;
-                                            let _ = entity.update(cx, |_, cx| cx.notify());
+                                            needs_repaint.store(true, Ordering::Release);
                                         }
                                     }
                                 }
@@ -933,21 +1117,16 @@ impl Render for TerminalView {
                     .on_mouse_up(MouseButton::Left, {
                         let selection = selection_c.clone();
                         let last_bounds = last_bounds_c.clone();
+                        let needs_repaint = needs_repaint.clone();
                         let cell_width = cell_width;
                         let line_height = line_height;
-                        let entity = entity.clone();
-                        move |event, _window, cx| {
-                            #[cfg(debug_assertions)]
-                            tracing::debug!("mouse-up");
+                        move |event, _window, _cx| {
                             let clear = if let Some(bounds) = *last_bounds.lock() {
-                                // Determine whether the mouse moved at least one cell
-                                // from where the selection started
                                 if let Some((up_col, up_row)) =
                                     mouse_to_grid(event.position, bounds, cell_width, line_height)
                                 {
                                     let sel_guard = selection.lock();
                                     if let Some(ref sel) = *sel_guard {
-                                        // A pure click: start == end position
                                         sel.start_col == up_col && sel.start_row == up_row
                                     } else {
                                         false
@@ -960,19 +1139,15 @@ impl Render for TerminalView {
                             };
 
                             if clear {
-                                // Single click with no drag — clear the selection
                                 *selection.lock() = None;
-                            } else {
-                                // Drag release — keep the selection but mark it inactive
-                                if let Some(ref mut sel) = *selection.lock() {
-                                    sel.active = false;
-                                }
+                            } else if let Some(ref mut sel) = *selection.lock() {
+                                sel.active = false;
                             }
-                            let _ = entity.update(cx, |_, cx| cx.notify());
+                            needs_repaint.store(true, Ordering::Release);
                         }
                     }),
             )
-            // Connection overlay (remote sessions only)
+            // Connection overlay (remote sessions only).
             .when(is_remote, |el| {
                 let on_reconnect: Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)> =
                     Rc::new(cx.listener(|this, _event: &ClickEvent, _window, cx| {

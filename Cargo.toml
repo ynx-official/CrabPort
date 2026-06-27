@@ -9,6 +9,13 @@ crabport-core = {path = "crabport-core"}
 gpui = { version = "0.2", default-features = false, features = ["font-kit"] }
 gpui-component = "0.5"
 
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
 [workspace]
 members = [
     "crabport-core",
