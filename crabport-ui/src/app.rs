@@ -526,6 +526,16 @@ impl CrabportApp {
                 cx,
             )
         });
+        // When the SSH session closes, automatically close the tab
+        let app_handle = cx.entity().clone();
+        terminal_view.update(cx, |view, _cx| {
+            view.set_on_backend_closed(move |cx| {
+                app_handle.update(cx, |app, cx| {
+                    app.close_tab(id, cx);
+                });
+            });
+        });
+
         self.terminal_views.insert(id, terminal_view);
 
         self.active_tab_id = id;

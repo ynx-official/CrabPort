@@ -12,7 +12,6 @@ use std::time::Duration;
 //     }))
 //     .pane(TabPane::new("Overview", my_overview_component()))
 //     .pane(TabPane::new("Settings", my_settings_component()))
-//     .pane(TabPane::new("History",  my_history_component()))
 
 // ---------------------------------------------------------------------------
 // TabPane
@@ -37,6 +36,8 @@ impl TabPane {
 #[derive(IntoElement)]
 pub struct Tabs {
     id: ElementId,
+    /// Pre-built base string for deriving child ids once, not per frame.
+    id_str: String,
     style: StyleRefinement,
     panes: Vec<TabPane>,
     active: usize,
@@ -51,8 +52,11 @@ impl Styled for Tabs {
 
 impl Tabs {
     pub fn new(id: impl Into<ElementId>) -> Self {
+        let id: ElementId = id.into();
+        let id_str = format!("{id:?}");
         Self {
-            id: id.into(),
+            id,
+            id_str,
             style: Default::default(),
             panes: Vec::new(),
             active: 0,
@@ -80,16 +84,15 @@ impl RenderOnce for Tabs {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
         let count = self.panes.len().max(1);
         let active = self.active.min(count - 1);
-        let id_str = format!("{:?}", self.id);
+        let id_str = self.id_str;
 
-        // -----------------------------------------------------------------------
-        // SegmentedControl
-        // -----------------------------------------------------------------------
-        let on_change_rc: Option<std::rc::Rc<dyn Fn(usize, &mut Window, &mut App)>> =
-            self.on_change;
+        // -------------------------------------------------------------------
+        // Header: SegmentedControl
+        // -------------------------------------------------------------------
+        let on_change_rc = self.on_change;
 
-        let mut ctrl = SegmentedControl::new(ElementId::Name(format!("{}-ctrl", id_str).into()))
-            .active(active);
+        let mut ctrl =
+            SegmentedControl::new(ElementId::Name(format!("{id_str}-ctrl").into())).active(active);
 
         for (i, pane) in self.panes.iter().enumerate() {
             let cb = on_change_rc.clone();
@@ -101,71 +104,52 @@ impl RenderOnce for Tabs {
             ctrl = ctrl.segment(seg);
         }
 
-        let track_id = ElementId::Name(format!("{}-slide-track", id_str).into());
-
-        let panel_w = DefiniteLength::Fraction(1.0_f32 / count as f32);
-
+        // -------------------------------------------------------------------
+        // Panels: ONLY the active pane builds its (expensive) content.
+        // Inactive panes are empty placeholders, so heavyweight children like
+        // `Input` are never laid out while hidden. A short opacity fade keeps
+        // switching smooth without the old full-width sliding track.
+        // -------------------------------------------------------------------
         let panels: Vec<AnyElement> = self
             .panes
             .into_iter()
             .enumerate()
             .map(|(i, pane)| {
                 let is_active = i == active;
-                let panel_id = ElementId::Name(format!("{}-panel-{}", id_str, i).into());
+                let panel_id = ElementId::Name(format!("{id_str}-panel-{i}").into());
 
-                div()
+                let mut panel = div()
                     .id(panel_id.clone())
-                    .flex_none()
-                    .w(panel_w)
-                    .h_full()
+                    .absolute()
+                    .inset_0()
                     .overflow_hidden()
                     .opacity(0.)
                     .with_transition(panel_id)
                     .transition_when_else(
                         is_active,
-                        Duration::from_millis(280),
+                        Duration::from_millis(200),
                         EaseInOutQuad,
                         |state| state.opacity(1.),
                         |state| state.opacity(0.),
-                    )
-                    .child(pane.content)
-                    .into_any_element()
+                    );
+
+                if is_active {
+                    panel = panel.child(pane.content);
+                }
+                panel.into_any_element()
             })
             .collect();
-
-        let mut track = div()
-            .id(track_id.clone())
-            .absolute()
-            .flex()
-            .flex_row()
-            .h_full()
-            .w(DefiniteLength::Fraction(count as f32))
-            .with_transition(track_id)
-            .children(panels);
-
-        for i in 0..count {
-            // left 是相对于 clip（containing block）的 Fraction
-            // active=i 时 left = -(i as f32) × 100% of clip
-            let target = DefiniteLength::Fraction(-(i as f32));
-            track = track.transition_when_else(
-                active == i,
-                Duration::from_millis(320),
-                EaseInOutQuad,
-                move |state| state.left(target),
-                |state| state,
-            );
-        }
 
         let content_area = div()
             .relative()
             .w_full()
             .flex_1()
             .overflow_hidden()
-            .child(track);
+            .children(panels);
 
-        // -----------------------------------------------------------------------
+        // -------------------------------------------------------------------
         // Root
-        // -----------------------------------------------------------------------
+        // -------------------------------------------------------------------
         let mut root = div()
             .id(self.id)
             .flex()
