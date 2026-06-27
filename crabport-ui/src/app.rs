@@ -103,7 +103,7 @@ impl SidebarItem {
 
 impl CrabportApp {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        rust_i18n::set_locale("en");
+        rust_i18n::set_locale("zh-CN");
         let home_tab = Tab {
             id: 0,
             title: "Home".into(),

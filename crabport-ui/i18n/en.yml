@@ -33,6 +33,11 @@ connection_form:
   connect: "Connect"
   currently_supported: "Currently supported"
   coming_soon: "Coming soon"
+  auth_temporary: "Temporary"
+  auth_saved: "Saved"
+  auth_certificate: "Certificate"
+  auth_password: "Password"
+  select_credential: "Select Credential"
 hosts:
   new_button: "New"
   empty: "No saved hosts. Click '+ New' to create one."

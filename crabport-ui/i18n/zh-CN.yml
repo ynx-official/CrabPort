@@ -33,6 +33,11 @@ connection_form:
   connect: "连接"
   currently_supported: "当前可用"
   coming_soon: "即将推出"
+  auth_temporary: "临时"
+  auth_saved: "已保存"
+  auth_certificate: "证书"
+  auth_password: "密码"
+  select_credential: "选择凭证"
 hosts:
   new_button: "新建"
   empty: "暂无保存的主机，点击「+ 新建」创建"

@@ -1,5 +1,4 @@
 use gpui::{prelude::FluentBuilder, *};
-use gpui_animation::transition::general;
 use gpui_animation::{animation::TransitionExt, transition::general::Linear};
 use gpui_component::input::InputState;
 use rust_i18n::t;
@@ -9,7 +8,7 @@ use std::time::Duration;
 use crate::color::*;
 use crate::components::button::Button;
 use crate::components::input::{StyledInput, StyledPasswordInput};
-use crate::components::segmented_control::{Segment, SegmentedControl};
+use crate::components::tabs::{TabPane, Tabs};
 
 // ---------------------------------------------------------------------------
 // Credential type
@@ -33,12 +32,16 @@ pub struct CredentialFormState {
     pub name_input: Entity<InputState>,
     pub username_input: Entity<InputState>,
     pub password_input: Entity<InputState>,
+    pub cert_username_input: Entity<InputState>,
+    pub cert_passphrase_input: Entity<InputState>,
     pub private_key_input: Entity<InputState>,
     pub public_key_input: Entity<InputState>,
     pub certificate_input: Entity<InputState>,
     pub name_focused: bool,
     pub username_focused: bool,
     pub password_focused: bool,
+    pub cert_username_focused: bool,
+    pub cert_passphrase_focused: bool,
     pub private_key_focused: bool,
     pub public_key_focused: bool,
     pub certificate_focused: bool,
@@ -57,6 +60,12 @@ impl CredentialFormState {
             state
         });
         let private_key_input = cx.new(|cx| InputState::new(window, cx));
+        let cert_username_input = cx.new(|cx| InputState::new(window, cx));
+        let cert_passphrase_input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx);
+            state.set_masked(true, window, cx);
+            state
+        });
         let public_key_input = cx.new(|cx| InputState::new(window, cx));
         let certificate_input = cx.new(|cx| InputState::new(window, cx));
 
@@ -66,12 +75,16 @@ impl CredentialFormState {
             name_input,
             username_input,
             password_input,
+            cert_username_input,
+            cert_passphrase_input,
             private_key_input,
             public_key_input,
             certificate_input,
             name_focused: false,
             username_focused: false,
             password_focused: false,
+            cert_username_focused: false,
+            cert_passphrase_focused: false,
             private_key_focused: false,
             public_key_focused: false,
             certificate_focused: false,
@@ -97,12 +110,18 @@ impl CredentialFormState {
     }
 
     pub fn username_text(&self, cx: &App) -> String {
-        self.username_input.read(cx).text().to_string()
+        match self.kind {
+            CredentialKind::Password => self.username_input.read(cx).text().to_string(),
+            CredentialKind::Certificate => self.cert_username_input.read(cx).text().to_string(),
+        }
     }
 
     /// Returns the secret text (password in Password mode, passphrase in Certificate mode)
     pub fn secret_text(&self, cx: &App) -> String {
-        self.password_input.read(cx).text().to_string()
+        match self.kind {
+            CredentialKind::Password => self.password_input.read(cx).text().to_string(),
+            CredentialKind::Certificate => self.cert_passphrase_input.read(cx).text().to_string(),
+        }
     }
 
     pub fn private_key_text(&self, cx: &App) -> String {
@@ -129,12 +148,16 @@ pub struct CredentialFormView {
     name_input: Entity<InputState>,
     username_input: Entity<InputState>,
     password_input: Entity<InputState>,
+    cert_username_input: Entity<InputState>,
+    cert_passphrase_input: Entity<InputState>,
     private_key_input: Entity<InputState>,
     public_key_input: Entity<InputState>,
     certificate_input: Entity<InputState>,
     name_focused: bool,
     username_focused: bool,
     password_focused: bool,
+    cert_username_focused: bool,
+    cert_passphrase_focused: bool,
     private_key_focused: bool,
     public_key_focused: bool,
     certificate_focused: bool,
@@ -151,12 +174,16 @@ impl CredentialFormView {
             name_input: state.name_input.clone(),
             username_input: state.username_input.clone(),
             password_input: state.password_input.clone(),
+            cert_username_input: state.cert_username_input.clone(),
+            cert_passphrase_input: state.cert_passphrase_input.clone(),
             private_key_input: state.private_key_input.clone(),
             public_key_input: state.public_key_input.clone(),
             certificate_input: state.certificate_input.clone(),
             name_focused: state.name_focused,
             username_focused: state.username_focused,
             password_focused: state.password_focused,
+            cert_username_focused: state.cert_username_focused,
+            cert_passphrase_focused: state.cert_passphrase_focused,
             private_key_focused: state.private_key_focused,
             public_key_focused: state.public_key_focused,
             certificate_focused: state.certificate_focused,
@@ -179,12 +206,16 @@ impl RenderOnce for CredentialFormView {
                 self.name_input,
                 self.username_input,
                 self.password_input,
+                self.cert_username_input,
+                self.cert_passphrase_input,
                 self.private_key_input,
                 self.public_key_input,
                 self.certificate_input,
                 self.name_focused,
                 self.username_focused,
                 self.password_focused,
+                self.cert_username_focused,
+                self.cert_passphrase_focused,
                 self.private_key_focused,
                 self.public_key_focused,
                 self.certificate_focused,
@@ -242,12 +273,16 @@ fn render_dialog(
     name_input: Entity<InputState>,
     username_input: Entity<InputState>,
     password_input: Entity<InputState>,
+    cert_username_input: Entity<InputState>,
+    cert_passphrase_input: Entity<InputState>,
     private_key_input: Entity<InputState>,
     public_key_input: Entity<InputState>,
     certificate_input: Entity<InputState>,
     name_focused: bool,
     username_focused: bool,
     password_focused: bool,
+    cert_username_focused: bool,
+    cert_passphrase_focused: bool,
     private_key_focused: bool,
     public_key_focused: bool,
     certificate_focused: bool,
@@ -256,6 +291,11 @@ fn render_dialog(
     on_kind_change: Option<Rc<dyn Fn(CredentialKind, &mut Window, &mut App) + 'static>>,
 ) -> impl IntoElement {
     let dialog_id = ElementId::Name("cred-form-dialog".into());
+    let active_index = if kind == CredentialKind::Password {
+        0
+    } else {
+        1
+    };
 
     div()
         .id(dialog_id.clone())
@@ -300,22 +340,90 @@ fn render_dialog(
                     .focused(name_focused),
             ),
         )
-        // Type selector
-        .child(render_type_selector(kind, on_kind_change))
-        // Fields
-        .child(render_fields(
-            kind,
-            username_input,
-            password_input,
-            private_key_input,
-            public_key_input,
-            certificate_input,
-            username_focused,
-            password_focused,
-            private_key_focused,
-            public_key_focused,
-            certificate_focused,
-        ))
+        // Type tabs (Password / Certificate)
+        .child(
+            Tabs::new("cred-type-tabs")
+                .h(px(300.0))
+                .active(active_index)
+                .pane(TabPane::new(
+                    t!("credential_form.type_password").to_string(),
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_4()
+                        .child(
+                            div().child(
+                                StyledInput::new("cred-username", username_input)
+                                    .label(t!("credential_form.username").to_string())
+                                    .focused(username_focused),
+                            ),
+                        )
+                        .child(
+                            div().child(
+                                StyledPasswordInput::new("cred-secret", password_input)
+                                    .label(t!("credential_form.password").to_string())
+                                    .focused(password_focused),
+                            ),
+                        ),
+                ))
+                .pane(TabPane::new(
+                    t!("credential_form.type_certificate").to_string(),
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_4()
+                        .child(
+                            div().child(
+                                StyledInput::new("cert-username", cert_username_input)
+                                    .label(t!("credential_form.username").to_string())
+                                    .focused(cert_username_focused),
+                            ),
+                        )
+                        .child(
+                            div().child(
+                                StyledPasswordInput::new("cert-passphrase", cert_passphrase_input)
+                                    .label(t!("credential_form.passphrase").to_string())
+                                    .focused(cert_passphrase_focused),
+                            ),
+                        )
+                        .child(
+                            div().child(
+                                StyledInput::new("cred-private-key", private_key_input)
+                                    .label(t!("credential_form.private_key").to_string())
+                                    .focused(private_key_focused),
+                            ),
+                        )
+                        .child(
+                            div().child(
+                                StyledInput::new("cred-public-key", public_key_input)
+                                    .label(t!("credential_form.public_key").to_string())
+                                    .focused(public_key_focused),
+                            ),
+                        )
+                        .child(
+                            div().child(
+                                StyledInput::new("cred-certificate", certificate_input)
+                                    .label(t!("credential_form.certificate").to_string())
+                                    .focused(certificate_focused),
+                            ),
+                        ),
+                ))
+                .on_change({
+                    let on_kind_change = on_kind_change.clone();
+                    move |index, w, cx| {
+                        if let Some(ref cb) = on_kind_change {
+                            cb(
+                                match index {
+                                    0 => CredentialKind::Password,
+                                    _ => CredentialKind::Certificate,
+                                },
+                                w,
+                                cx,
+                            );
+                        }
+                    }
+                }),
+        )
         // Buttons
         .child(render_buttons(kind, on_close, on_save))
 }
@@ -323,130 +431,6 @@ fn render_dialog(
 // ---------------------------------------------------------------------------
 // Type selector with sliding indicator
 // ---------------------------------------------------------------------------
-
-fn render_type_selector(
-    kind: CredentialKind,
-    on_kind_change: Option<Rc<dyn Fn(CredentialKind, &mut Window, &mut App) + 'static>>,
-) -> impl IntoElement {
-    let on_change_pw = on_kind_change.clone();
-    let on_change_cert = on_kind_change.clone();
-
-    let active_index = if kind == CredentialKind::Password {
-        0
-    } else {
-        1
-    };
-
-    SegmentedControl::new("cred-type-selector")
-        .active(active_index)
-        .segment(
-            Segment::new(t!("credential_form.type_password").to_string()).on_select(
-                move |w, cx| {
-                    if let Some(ref cb) = on_change_pw {
-                        cb(CredentialKind::Password, w, cx);
-                    }
-                },
-            ),
-        )
-        .segment(
-            Segment::new(t!("credential_form.type_certificate").to_string()).on_select(
-                move |w, cx| {
-                    if let Some(ref cb) = on_change_cert {
-                        cb(CredentialKind::Certificate, w, cx);
-                    }
-                },
-            ),
-        )
-}
-
-// ---------------------------------------------------------------------------
-// Fields — shared username/secret + animated certificate extras
-// ---------------------------------------------------------------------------
-
-#[allow(clippy::too_many_arguments)]
-fn render_fields(
-    kind: CredentialKind,
-    username_input: Entity<InputState>,
-    password_input: Entity<InputState>,
-    private_key_input: Entity<InputState>,
-    public_key_input: Entity<InputState>,
-    certificate_input: Entity<InputState>,
-    username_focused: bool,
-    password_focused: bool,
-    private_key_focused: bool,
-    public_key_focused: bool,
-    certificate_focused: bool,
-) -> impl IntoElement {
-    let is_password = kind == CredentialKind::Password;
-
-    // Shared: password / passphrase — always visible, label changes by kind
-    let secret_label = if is_password {
-        t!("credential_form.password").to_string()
-    } else {
-        t!("credential_form.passphrase").to_string()
-    };
-
-    // Certificate-only extras (expand/collapse)
-    let cert_extras_id = ElementId::Name("cred-cert-extras".into());
-    let cert_extras = div()
-        .id(cert_extras_id.clone())
-        .flex()
-        .flex_col()
-        .gap_4()
-        .overflow_hidden()
-        .with_transition(cert_extras_id)
-        .transition_when_else(
-            !is_password,
-            Duration::from_millis(200),
-            general::EaseInQuad,
-            |s| s.max_h(px(200.0)).opacity(1.0),
-            |s| s.max_h(px(0.0)).opacity(0.0),
-        )
-        .child(
-            div().child(
-                StyledInput::new("cred-private-key", private_key_input)
-                    .label(t!("credential_form.private_key").to_string())
-                    .focused(private_key_focused),
-            ),
-        )
-        .child(
-            div().child(
-                StyledInput::new("cred-public-key", public_key_input)
-                    .label(t!("credential_form.public_key").to_string())
-                    .focused(public_key_focused),
-            ),
-        )
-        .child(
-            div().child(
-                StyledInput::new("cred-certificate", certificate_input)
-                    .label(t!("credential_form.certificate").to_string())
-                    .focused(certificate_focused),
-            ),
-        );
-
-    div()
-        .flex()
-        .flex_col()
-        .gap_4()
-        // Username — shared
-        .child(
-            div().child(
-                StyledInput::new("cred-username", username_input)
-                    .label(t!("credential_form.username").to_string())
-                    .focused(username_focused),
-            ),
-        )
-        // Password / Passphrase — shared
-        .child(
-            div().child(
-                StyledPasswordInput::new("cred-secret", password_input)
-                    .label(secret_label)
-                    .focused(password_focused),
-            ),
-        )
-        // Certificate extras — animated
-        .child(cert_extras)
-}
 
 // ---------------------------------------------------------------------------
 // Buttons

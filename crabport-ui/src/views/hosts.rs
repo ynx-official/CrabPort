@@ -5,9 +5,11 @@ use rust_i18n::t;
 use std::rc::Rc;
 use std::time::Duration;
 
+use crate::app::CrabportApp;
 use crate::color::*;
 use crate::components::button::Button;
 use crate::layouts::connection_form::{ConnectionFormState, ConnectionFormView};
+use crabport_core::credential::CredentialEntry;
 
 /// A saved connection host entry.
 #[derive(Clone)]
@@ -30,6 +32,8 @@ pub struct ConnectionHost {
 pub fn render_hosts_view(
     hosts: &[ConnectionHost],
     form_state: Option<&ConnectionFormState>,
+    credentials: Vec<CredentialEntry>,
+    app: Entity<CrabportApp>,
     on_new: impl Fn(&mut Window, &mut App) + 'static,
     on_connect: impl Fn(i64, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
@@ -98,7 +102,7 @@ pub fn render_hosts_view(
         )
         // --- Connection form overlay ---
         .when_some(form_state, |el, state| {
-            el.child(ConnectionFormView::new(state))
+            el.child(ConnectionFormView::new(state, app).with_credentials(credentials))
         })
 }
 

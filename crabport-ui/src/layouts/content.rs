@@ -52,8 +52,15 @@ pub fn render_content(
                         app.connect_to_host(host_id, cx);
                     });
                 };
-                views::hosts::render_hosts_view(hosts, form_entity, on_new, on_connect)
-                    .into_any_element()
+                views::hosts::render_hosts_view(
+                    hosts,
+                    form_entity,
+                    credentials.to_vec(),
+                    handle.clone(),
+                    on_new,
+                    on_connect,
+                )
+                .into_any_element()
             }
             SidebarItem::Tunnels => views::tunnels::render_tunnels_view(on_new).into_any_element(),
             SidebarItem::Credentials => {

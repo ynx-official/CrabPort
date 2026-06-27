@@ -2592,9 +2592,9 @@ dependencies = [
 
 [[package]]
 name = "gpui-animation"
-version = "0.2.51"
+version = "0.2.52"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69e94813debcf359e0c65561de690e6ac28341f32ad9ce8d5c08c0aa9fa9ee6f"
+checksum = "f9aab64018f40fbeff15001d2b67d1455ae7343aacda87aebab2851d8a8d75c2"
 dependencies = [
  "dashmap",
  "gpui",

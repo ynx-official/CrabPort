@@ -143,6 +143,7 @@ impl RenderOnce for SegmentedControl {
                     .py_1()
                     .rounded_sm()
                     .text_sm()
+                    .text_color(rgb(TEXT_MUTED))
                     .text_center()
                     .with_transition(tab_id)
                     // Active state: animate between primary and muted text color.
