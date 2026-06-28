@@ -7,6 +7,7 @@ use async_broadcast::{
     InactiveReceiver, Receiver as BroadcastReceiver, Sender as BroadcastSender, broadcast,
 };
 use async_channel::{Sender as MpscSender, unbounded};
+use crabport_sftp::CrabPortSftp;
 use crabport_terminal::terminal::{
     BackendEvent, CrabPortMonitor, CrabPortTerminal, MemoryStats, NetworkStats, RemoteMetrics,
     RemoteStatus,
@@ -52,7 +53,7 @@ struct MonitorState {
 // SSH client handler
 // ---------------------------------------------------------------------------
 
-pub struct SshHandler;
+struct SshHandler;
 
 #[async_trait::async_trait]
 impl client::Handler for SshHandler {
@@ -82,6 +83,8 @@ pub struct SshBackend {
     _event_rx: InactiveReceiver<BackendEvent>,
     monitor: Arc<RwLock<MonitorState>>,
     _on_status: Arc<dyn Fn(String) + Send + Sync>,
+    handle: Arc<TokioMutex<Option<Arc<TokioMutex<client::Handle<SshHandler>>>>>>,
+    sftp_entries: Arc<RwLock<Option<Vec<(String, bool)>>>>,
 }
 
 impl SshBackend {
@@ -99,14 +102,20 @@ impl SshBackend {
             status: RemoteStatus::Connecting,
             metrics: RemoteMetrics::default(),
         }));
+        let handle: Arc<TokioMutex<Option<Arc<TokioMutex<client::Handle<SshHandler>>>>>> =
+            Arc::new(TokioMutex::new(None));
+
+        let sftp_entries: Arc<RwLock<Option<Vec<(String, bool)>>>> = Arc::new(RwLock::new(None));
+        let sftp_entries2 = sftp_entries.clone();
 
         let event_tx2 = event_tx.clone();
         let monitor2 = monitor.clone();
         let info_for_monitor = info.clone();
         let on_status2 = on_status.clone();
+        let handle_for_spawn = handle.clone();
 
         TOKIO.spawn(async move {
-            // ---- 1. Connect ----
+            // ---- Connect ----
             let addr = format!("{}:{}", info.host, info.port);
             #[cfg(debug_assertions)]
             tracing::info!("SSH: connecting to {}", addr);
@@ -239,7 +248,7 @@ impl SshBackend {
                 }
             }
 
-            // ---- 3. Open session channel ----
+            // ---- Open session channel ----
             on_status2("Opening session channel...".into());
             let mut channel: Channel<Msg> = match sh.channel_open_session().await {
                 Ok(ch) => {
@@ -261,7 +270,7 @@ impl SshBackend {
                 }
             };
 
-            // ---- 4. Request PTY ----
+            // ---- Request PTY ----
             on_status2(format!("Requesting PTY ({}x{})...", cols, rows));
             let term = std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".into());
             if let Err(e) = channel
@@ -280,7 +289,7 @@ impl SshBackend {
             }
             on_status2("PTY allocated".into());
 
-            // ---- 5. Start shell ----
+            // ---- Start shell ----
             on_status2("Starting shell...".into());
             if let Err(e) = channel.request_shell(true).await {
                 tracing::error!("SSH: shell request failed: {e}");
@@ -301,17 +310,35 @@ impl SshBackend {
                 m.status = RemoteStatus::Connected;
             }
 
-            // ---- 6. Spawn monitor task ----
+            // ---- Try SFTP ----
+            match crabport_sftp::SftpBackend::connect(&sh).await {
+                Ok(sftp) => {
+                    tracing::info!("SSH: SFTP subsystem available");
+                    match sftp.read_dir(".").await {
+                        Ok(entries) => {
+                            *sftp_entries2.write() = Some(entries);
+                        }
+                        Err(e) => tracing::warn!("SSH: SFTP read_dir failed ({e})"),
+                    }
+                }
+                Err(e) => tracing::warn!("SSH: SFTP subsystem not available ({e})"),
+            }
+
+            // ---- Spawn monitor task ----
             // Wrap the Handle in Arc<TokioMutex> so the monitor task can use it.
             // Handle is not Clone, so we share it via Arc.
             let handle_for_monitor = Arc::new(TokioMutex::new(sh));
+
+            // Share the same Arc with SshBackend for SFTP access.
+            *handle_for_spawn.lock().await = Some(handle_for_monitor.clone());
+
             let monitor_for_task = monitor2.clone();
             let info_for_task = info_for_monitor;
             TOKIO.spawn(async move {
                 monitor_loop(handle_for_monitor, info_for_task, monitor_for_task).await;
             });
 
-            // ---- 7. Event loop (read + cmd via tokio::select!) ----
+            // ---- Event loop (read + cmd via tokio::select!) ----
             loop {
                 select! {
                     msg = channel.wait() => {
@@ -372,7 +399,22 @@ impl SshBackend {
             _event_rx,
             monitor,
             _on_status: on_status,
+            handle,
+            sftp_entries,
         }
+    }
+    /// Open an SFTP session over this SSH connection.
+    ///
+    /// Returns a `SftpBackend` that implements `CrabPortSftp`.
+    /// Returns an error if the SSH handle is not yet established (e.g. still
+    /// connecting) or the server doesn't support the sftp subsystem.
+    pub async fn sftp(&self) -> anyhow::Result<crabport_sftp::SftpBackend> {
+        let guard = self.handle.lock().await;
+        let shared = guard
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("SSH handle not available"))?;
+        let h = shared.lock().await;
+        crabport_sftp::SftpBackend::connect(&*h).await
     }
 }
 
@@ -604,6 +646,14 @@ impl CrabPortTerminal for SshBackend {
 
     fn as_monitor(&self) -> Option<&dyn CrabPortMonitor> {
         Some(self)
+    }
+
+    fn allow_sftp(&self) -> bool {
+        true
+    }
+
+    fn sftp_entries(&self) -> Option<Vec<(String, bool)>> {
+        self.sftp_entries.read().clone()
     }
 }
 

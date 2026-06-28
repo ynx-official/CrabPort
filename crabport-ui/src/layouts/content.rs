@@ -6,6 +6,7 @@ use gpui::*;
 use crate::app::{CrabportApp, SidebarItem, Tab, TabKind};
 use crate::color::*;
 use crate::layouts::connection_form::ConnectionFormState;
+use crate::layouts::sftp::render_sftp_sidebar;
 use crate::layouts::tabbar::render_tab_bar;
 use crate::layouts::terminal_toolbar::render_terminal_toolbar;
 use crate::views;
@@ -147,6 +148,24 @@ pub fn render_content(
         )
     };
 
+    // Read SFTP entries from the active TerminalView's backend
+    let (has_sftp, sftp_entries) = if is_terminal {
+        if let Some(terminal_entity) = active_tab.and_then(|tab| terminal_views.get(&tab.id)) {
+            terminal_entity.read_with(cx, |view, _cx| {
+                if view.allow_sftp() {
+                    let entries = view.sftp_entries();
+                    (entries.is_some(), entries.unwrap_or_default())
+                } else {
+                    (false, Vec::new())
+                }
+            })
+        } else {
+            (false, Vec::new())
+        }
+    } else {
+        (false, Vec::new())
+    };
+
     div()
         .flex_1()
         .h_full()
@@ -160,6 +179,14 @@ pub fn render_content(
             active_tab.map(|t| t.kind == TabKind::Home).unwrap_or(false),
             on_close,
         ))
-        .child(view)
+        .child(
+            div()
+                .flex_1()
+                .flex()
+                .flex_row()
+                .overflow_hidden()
+                .child(view)
+                .child(render_sftp_sidebar(&sftp_entries, has_sftp)),
+        )
         .child(render_terminal_toolbar(is_terminal, status, metrics))
 }

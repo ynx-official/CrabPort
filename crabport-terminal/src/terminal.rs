@@ -30,6 +30,16 @@ pub trait CrabPortTerminal: Send + Sync {
     fn as_monitor(&self) -> Option<&dyn CrabPortMonitor> {
         None
     }
+
+    /// Whether this backend supports SFTP.
+    fn allow_sftp(&self) -> bool {
+        false
+    }
+
+    /// Current SFTP directory entries. Returns None if not yet loaded.
+    fn sftp_entries(&self) -> Option<Vec<(String, bool)>> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -239,6 +249,14 @@ impl TerminalSession {
 
     pub fn monitor(&self) -> Option<&dyn CrabPortMonitor> {
         self.backend.as_monitor()
+    }
+
+    pub fn allow_sftp(&self) -> bool {
+        self.backend.allow_sftp()
+    }
+
+    pub fn sftp_entries(&self) -> Option<Vec<(String, bool)>> {
+        self.backend.sftp_entries()
     }
 
     pub fn scroll(&self, delta: i32) {

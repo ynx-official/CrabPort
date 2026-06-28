@@ -3,7 +3,6 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::*;
-use gpui_animation::animation::TransitionExt;
 use rust_i18n::t;
 
 use crate::color::*;
@@ -795,22 +794,7 @@ impl Render for CrabportApp {
             .key_context("App")
             .on_action(cx.listener(Self::toggle_command))
             // -- Sidebar --
-            .child(
-                div()
-                    .id("sidebar-container")
-                    .h_full()
-                    .bg(rgb(BG_SIDEBAR))
-                    .overflow_x_hidden()
-                    .with_transition("sidebar-container")
-                    .transition_when_else(
-                        show_sidebar,
-                        std::time::Duration::from_millis(300),
-                        gpui_animation::transition::general::EaseInOutCubic,
-                        |el| el.w(px(200.0)),
-                        |el| el.w_0(),
-                    )
-                    .child(render_sidebar(self.sidebar_item, &handle)),
-            )
+            .child(render_sidebar(self.sidebar_item, show_sidebar, &handle))
             .child(content)
             // -- Command palette --
             .child(self.command_palette.clone())

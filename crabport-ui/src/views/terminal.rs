@@ -372,6 +372,14 @@ impl TerminalView {
         self.session.monitor()
     }
 
+    pub fn allow_sftp(&self) -> bool {
+        self.session.allow_sftp()
+    }
+
+    pub fn sftp_entries(&self) -> Option<Vec<(String, bool)>> {
+        self.session.sftp_entries()
+    }
+
     pub fn set_on_backend_closed(&mut self, f: impl Fn(&mut App) + 'static) {
         self.on_backend_closed = Some(Rc::new(f));
     }
