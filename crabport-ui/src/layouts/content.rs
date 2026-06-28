@@ -95,7 +95,8 @@ pub fn render_content(
 
                 div()
                     .size_full()
-                    .m_2()
+                    .pt_2()
+                    .pl_2()
                     .key_context("Terminal")
                     .child(terminal_entity.clone())
                     .into_any_element()
