@@ -156,6 +156,20 @@ impl Button {
         self.centered = centered;
         self
     }
+
+    /// Clean up all gpui-animation state associated with this Button.
+    /// Call this when the Button is removed from the render tree
+    /// (e.g. when closing a tab) to prevent stale hover/transition state
+    /// from persisting in the global DashMap.
+    pub fn cleanup_animation(id: &ElementId, has_close: bool) {
+        gpui_animation::reset_transition(id);
+        if has_close {
+            let close_bg_id = ElementId::Name(format!("{}-close-bg", id).into());
+            let close_opacity_id = ElementId::Name(format!("{}-close-opacity", id).into());
+            gpui_animation::reset_transition(&close_bg_id);
+            gpui_animation::reset_transition(&close_opacity_id);
+        }
+    }
 }
 
 impl RenderOnce for Button {

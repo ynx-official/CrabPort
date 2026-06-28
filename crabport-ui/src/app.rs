@@ -6,6 +6,7 @@ use gpui::*;
 use rust_i18n::t;
 
 use crate::color::*;
+use crate::components::button::Button;
 use crate::layouts::command_palette::{CommandView, ConnectionType};
 use crate::layouts::connection_form::{AuthKind, ConnectionFormState, ConnectionKind};
 use crate::layouts::sidebar::render_sidebar;
@@ -352,13 +353,18 @@ impl CrabportApp {
         } else {
             return;
         }
-        // After animation finishes, destroy the state
+        // After animation finishes, destroy the state and clean up animations
         let app = cx.entity().clone();
         cx.spawn(async move |_this, cx| {
             smol::Timer::after(std::time::Duration::from_millis(200)).await;
             let _ = app.update(cx, |app, cx| {
-                app.connection_form = None;
-                cx.notify();
+                if app.connection_form.is_some() {
+                    // Clean up Tabs animation state (conn-auth-tabs has 2 panes)
+                    let tabs_id = ElementId::Name("conn-auth-tabs".into());
+                    crate::components::tabs::Tabs::cleanup_animation(&tabs_id, 2);
+                    app.connection_form = None;
+                    cx.notify();
+                }
             });
         })
         .detach();
@@ -724,6 +730,17 @@ impl CrabportApp {
         if id == 0 {
             return;
         }
+
+        // Find the tab before removing it, to know if it had a close button
+        let tab = self.tabs.iter().find(|t| t.id == id);
+        let is_home_tab = tab.map(|t| t.kind == TabKind::Home).unwrap_or(true);
+
+        // Clean up gpui-animation state
+        let tab_btn_id = ElementId::Name(format!("tab-{}", id).into());
+        let tab_wrapper_id = ElementId::Name(format!("tab-wrapper-{}", id).into());
+        Button::cleanup_animation(&tab_btn_id, !is_home_tab);
+        gpui_animation::reset_transition(&tab_wrapper_id);
+
         if let Some(view) = self.terminal_views.remove(&id) {
             view.update(cx, |v, _cx| {
                 v.close();

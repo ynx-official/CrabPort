@@ -74,13 +74,33 @@ impl Tabs {
         self.on_change = Some(std::rc::Rc::new(f));
         self
     }
+
+    /// Clean up all gpui-animation state associated with this Tabs component,
+    /// including its internal SegmentedControl, track, and panels.
+    /// Call this when the component is removed from the render tree.
+    pub fn cleanup_animation(id: &ElementId, pane_count: usize) {
+        gpui_animation::reset_transition(id);
+
+        // Internal SegmentedControl
+        let ctrl_id = ElementId::Name(format!("{}-ctrl", id).into());
+        SegmentedControl::cleanup_animation(&ctrl_id, pane_count);
+
+        // Track
+        let track_id = ElementId::Name(format!("{}-slide-track", id).into());
+        gpui_animation::reset_transition(&track_id);
+
+        // Panels
+        for i in 0..pane_count {
+            let panel_id = ElementId::Name(format!("{}-panel-{}", id, i).into());
+            gpui_animation::reset_transition(&panel_id);
+        }
+    }
 }
 
 impl RenderOnce for Tabs {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
         let count = self.panes.len().max(1);
         let active = self.active.min(count - 1);
-        let id_str = format!("{:?}", self.id);
 
         // -----------------------------------------------------------------------
         // SegmentedControl
@@ -88,7 +108,7 @@ impl RenderOnce for Tabs {
         let on_change_rc: Option<std::rc::Rc<dyn Fn(usize, &mut Window, &mut App)>> =
             self.on_change;
 
-        let mut ctrl = SegmentedControl::new(ElementId::Name(format!("{}-ctrl", id_str).into()))
+        let mut ctrl = SegmentedControl::new(ElementId::Name(format!("{}-ctrl", self.id).into()))
             .active(active);
 
         for (i, pane) in self.panes.iter().enumerate() {
@@ -101,7 +121,7 @@ impl RenderOnce for Tabs {
             ctrl = ctrl.segment(seg);
         }
 
-        let track_id = ElementId::Name(format!("{}-slide-track", id_str).into());
+        let track_id = ElementId::Name(format!("{}-slide-track", self.id).into());
 
         let panel_w = DefiniteLength::Fraction(1.0_f32 / count as f32);
 
@@ -111,7 +131,7 @@ impl RenderOnce for Tabs {
             .enumerate()
             .map(|(i, pane)| {
                 let is_active = i == active;
-                let panel_id = ElementId::Name(format!("{}-panel-{}", id_str, i).into());
+                let panel_id = ElementId::Name(format!("{}-panel-{}", self.id, i).into());
 
                 div()
                     .id(panel_id.clone())

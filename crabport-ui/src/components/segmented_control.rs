@@ -57,6 +57,17 @@ impl SegmentedControl {
         self.active = index;
         self
     }
+
+    /// Clean up all gpui-animation state associated with this SegmentedControl.
+    /// Call this when the component is removed from the render tree.
+    pub fn cleanup_animation(id: &ElementId, segment_count: usize) {
+        let spacer_id: ElementId = ElementId::Name(format!("{}-spacer", id).into());
+        gpui_animation::reset_transition(&spacer_id);
+        for i in 0..segment_count {
+            let tab_id: ElementId = ElementId::Name(format!("{}-tab-{}", id, i).into());
+            gpui_animation::reset_transition(&tab_id);
+        }
+    }
 }
 
 impl RenderOnce for SegmentedControl {
