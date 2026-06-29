@@ -1,4 +1,5 @@
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -8,14 +9,14 @@ use gpui_component::scroll::ScrollableElement;
 use crate::color::*;
 
 pub fn render_sftp_panel(
-    entries: Vec<(String, bool)>,
-    cwd: Option<String>,
+    entries: Arc<Vec<(String, bool)>>,
+    cwd: Option<Arc<String>>,
     on_navigate: Option<Rc<dyn Fn(String, &mut Window, &mut App)>>,
 ) -> impl IntoElement {
-    let cwd_display = cwd.clone().unwrap_or_else(|| "/".into());
+    let cwd_display = cwd.as_ref().map(|s| s.as_str()).unwrap_or("/").to_string();
 
     // Sort entries alphabetically, directories first
-    let mut sorted = entries;
+    let mut sorted: Vec<(String, bool)> = entries.iter().cloned().collect();
     sorted.sort_by(|a, b| {
         // . and .. always first
         match (a.0.as_str(), b.0.as_str()) {
@@ -68,7 +69,7 @@ pub fn render_sftp_panel(
                     };
 
                     // Build target path for navigation
-                    let cwd_ref = cwd.as_deref().unwrap_or("/");
+                    let cwd_ref = cwd.as_ref().map(|s| s.as_str()).unwrap_or("/");
                     let target_path = if name == "." {
                         cwd_ref.to_string()
                     } else if name == ".." {

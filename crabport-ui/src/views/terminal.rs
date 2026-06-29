@@ -1,7 +1,6 @@
-use std::num::NonZeroUsize;
 use std::rc::Rc;
 use std::sync::{
-    Arc, OnceLock,
+    Arc,
     atomic::{AtomicBool, Ordering},
 };
 
@@ -18,147 +17,25 @@ use crabport_terminal::terminal::{CrabPortMonitor, RemoteStatus, TerminalSession
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_animation::{animation::TransitionExt, transition::general::EaseInOutCubic};
-use lru::LruCache;
 use parking_lot::Mutex;
-use rust_i18n::t;
 
 use crate::app::{CrabPortTab, TerminalShiftTab, TerminalTab};
-use crate::components::button::Button;
+use crate::views::terminal::color::*;
+use crate::views::terminal::connection_overlay::*;
+use crate::views::terminal::fonts::palette;
+use crate::views::terminal::render_cache::{
+    CellSnap, RenderCache, RowSnapshot, SharedRenderCache, hash_row,
+};
+use crate::views::terminal::runs::build_runs;
+use crate::views::terminal::selection::*;
 
 pub mod connection_overlay;
 
 mod color;
+mod fonts;
+mod render_cache;
+mod runs;
 mod selection;
-
-use color::*;
-use connection_overlay::*;
-use selection::*;
-
-// ---------------------------------------------------------------------------
-// Shared, build-once resources.
-// ---------------------------------------------------------------------------
-
-/// Palette built once and reused for every cell of every frame.
-fn palette() -> &'static alacritty_terminal::term::color::Colors {
-    static P: OnceLock<alacritty_terminal::term::color::Colors> = OnceLock::new();
-    P.get_or_init(alacritty_terminal::term::color::Colors::default)
-}
-
-/// Pre-built font variants, cloned cheaply per run.
-struct Fonts {
-    regular: Font,
-    bold: Font,
-    italic: Font,
-    bold_italic: Font,
-}
-
-fn fonts() -> &'static Fonts {
-    static F: OnceLock<Fonts> = OnceLock::new();
-    F.get_or_init(|| {
-        let base = font("Menlo");
-        let mut italic = base.clone();
-        italic.style = FontStyle::Italic;
-        let mut bold_italic = base.clone().bold();
-        bold_italic.style = FontStyle::Italic;
-        Fonts {
-            regular: base.clone(),
-            bold: base.bold(),
-            italic,
-            bold_italic,
-        }
-    })
-}
-
-fn pick_font(bold: bool, italic: bool) -> Font {
-    let f = fonts();
-    match (bold, italic) {
-        (false, false) => f.regular.clone(),
-        (true, false) => f.bold.clone(),
-        (false, true) => f.italic.clone(),
-        (true, true) => f.bold_italic.clone(),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Render snapshot / shaped-line cache.
-// ---------------------------------------------------------------------------
-
-#[derive(Clone)]
-struct CellSnap {
-    c: char,
-    fg: u32,
-    bg: u32,
-    flags: Flags,
-    custom_bg: bool,
-}
-
-#[derive(Clone)]
-struct RowSnapshot {
-    cells: Vec<CellSnap>,
-    hash: u64,
-    /// True if any cell needs a background quad (custom bg or inverse).
-    has_bg: bool,
-}
-
-impl Default for RowSnapshot {
-    fn default() -> Self {
-        Self {
-            cells: Vec::new(),
-            hash: u64::MAX,
-            has_bg: false,
-        }
-    }
-}
-
-struct RenderCache {
-    rows: Vec<RowSnapshot>,
-    /// Keyed by row content hash so scrolled-back lines reuse their shaping.
-    shaped: LruCache<u64, ShapedLine>,
-    cols: usize,
-    rows_count: usize,
-}
-
-impl Default for RenderCache {
-    fn default() -> Self {
-        Self {
-            rows: Vec::new(),
-            shaped: LruCache::new(NonZeroUsize::new(1024).unwrap()),
-            cols: 0,
-            rows_count: 0,
-        }
-    }
-}
-
-impl RenderCache {
-    fn resize(&mut self, cols: usize, rows: usize) {
-        self.cols = cols;
-        self.rows_count = rows;
-        self.rows = vec![RowSnapshot::default(); rows];
-        // Keep the shaped LRU — identical lines after resize still hit.
-    }
-
-    fn clear_all(&mut self) {
-        self.rows.clear();
-        self.shaped.clear();
-        self.cols = 0;
-        self.rows_count = 0;
-    }
-}
-
-fn hash_row(cells: &[CellSnap]) -> u64 {
-    use std::hash::Hasher;
-    let mut h = rustc_hash::FxHasher::default();
-    for c in cells {
-        h.write_u32(c.c as u32);
-        h.write_u32(c.fg);
-        h.write_u32(c.bg);
-        h.write_u16(c.flags.bits() as u16);
-    }
-    h.finish()
-}
-
-type SharedRenderCache = Arc<Mutex<RenderCache>>;
 
 // ---- TerminalView ----
 
@@ -171,13 +48,24 @@ pub struct TerminalView {
     last_bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
     selection: Arc<Mutex<Option<Selection>>>,
     render_cache: SharedRenderCache,
-    /// Set by data/blink/status; consumed by the ~120Hz frame pump.
+    /// Set by data/status; consumed by the ~120Hz frame pump.
     needs_repaint: Arc<AtomicBool>,
     bindings: Vec<keybind::Binding>,
     pending_paste: bool,
     pending_copy: bool,
-    cursor_visible: bool,
     scroll_accumulator: f32,
+    /// Latest display_offset from the alacritty grid, updated each prepaint.
+    /// Used by mouse handlers to convert viewport rows to grid lines.
+    display_offset: Arc<std::sync::atomic::AtomicI32>,
+    /// Latest history_size from the alacritty grid, updated each prepaint.
+    /// Used by the scrollbar overlay to compute thumb position/size.
+    history_size: Arc<std::sync::atomic::AtomicI32>,
+    /// Latest visible row count, updated each prepaint.
+    visible_rows: Arc<std::sync::atomic::AtomicI32>,
+    /// Whether the scrollbar thumb is currently being dragged.
+    scrollbar_dragging: Arc<std::sync::atomic::AtomicBool>,
+    /// Y offset (in px) from the thumb top to the mouse cursor at drag start.
+    scrollbar_drag_offset: Arc<Mutex<f32>>,
     overlay: SharedOverlayState,
     remote_host: String,
     count: u64,
@@ -307,25 +195,6 @@ impl TerminalView {
         })
         .detach();
 
-        // Cursor blink: flips state then marks dirty (no direct notify).
-        let dirty_blink = needs_repaint.clone();
-        let blink_entity = cx.entity().downgrade();
-        cx.spawn(async move |_this, cx| {
-            loop {
-                smol::Timer::after(std::time::Duration::from_millis(530)).await;
-                let ok = blink_entity
-                    .update(cx, |this, _cx| {
-                        this.cursor_visible = !this.cursor_visible;
-                    })
-                    .is_ok();
-                if !ok {
-                    break;
-                }
-                dirty_blink.store(true, Ordering::Release);
-            }
-        })
-        .detach();
-
         if is_remote {
             let overlay_fade = overlay.clone();
             let dirty_fade = needs_repaint.clone();
@@ -358,8 +227,12 @@ impl TerminalView {
             bindings: keybind::default_bindings(),
             pending_paste: false,
             pending_copy: false,
-            cursor_visible: true,
             scroll_accumulator: 0.0,
+            display_offset: Arc::new(std::sync::atomic::AtomicI32::new(0)),
+            history_size: Arc::new(std::sync::atomic::AtomicI32::new(0)),
+            visible_rows: Arc::new(std::sync::atomic::AtomicI32::new(0)),
+            scrollbar_dragging: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            scrollbar_drag_offset: Arc::new(Mutex::new(0.0)),
             overlay,
             remote_host: host,
             count,
@@ -376,11 +249,11 @@ impl TerminalView {
         self.session.allow_sftp()
     }
 
-    pub fn sftp_entries(&self) -> Option<Vec<(String, bool)>> {
+    pub fn sftp_entries(&self) -> Option<std::sync::Arc<Vec<(String, bool)>>> {
         self.session.sftp_entries()
     }
 
-    pub fn sftp_cwd(&self) -> Option<String> {
+    pub fn sftp_cwd(&self) -> Option<std::sync::Arc<String>> {
         self.session.sftp_cwd()
     }
 
@@ -520,16 +393,25 @@ impl TerminalView {
     fn copy_selected_text(session: &Arc<TerminalSession>, sel: &Selection) -> String {
         session.with_term(|term| {
             let grid = term.grid();
-            let display_offset = grid.display_offset();
             let num_cols = grid.columns();
-            let num_lines = grid.screen_lines();
+            let num_lines = grid.screen_lines() as i32;
+            let display_offset = grid.display_offset() as i32;
+            // Selection rows are grid lines. Clamp to visible viewport range.
             let (sr, er, sc, ec) = sel.range();
+            // Visible grid lines: from -(display_offset) to (num_lines-1-display_offset).
+            let vp_top = -display_offset;
+            let vp_bottom = num_lines - 1 - display_offset;
+            let sr = sr.max(vp_top);
+            let er = er.min(vp_bottom);
+            if sr > er {
+                return String::new();
+            }
             let mut result = String::new();
-            for row in sr..=er.min(num_lines.saturating_sub(1)) {
+            for row in sr..=er {
                 if row > sr {
                     result.push('\n');
                 }
-                let li = alacritty_terminal::index::Line(row as i32 - display_offset as i32);
+                let li = alacritty_terminal::index::Line(row);
                 let (cs, ce) = if sel.start_row <= sel.end_row {
                     let cs = if row == sr { sc } else { 0 };
                     let ce = if row == er { ec + 1 } else { num_cols };
@@ -548,125 +430,6 @@ impl TerminalView {
             }
             result
         })
-    }
-
-    fn make_run(
-        len: usize,
-        bold: bool,
-        italic: bool,
-        fg: u32,
-        inverse: bool,
-        inverse_bg: u32,
-        underline: bool,
-    ) -> TextRun {
-        let run_font = pick_font(bold, italic);
-        let fg_color = if inverse { rgb(inverse_bg) } else { rgb(fg) };
-        TextRun {
-            len,
-            font: run_font,
-            color: fg_color.into(),
-            background_color: None,
-            underline: if underline {
-                Some(UnderlineStyle {
-                    color: Some(fg_color.into()),
-                    thickness: px(1.0),
-                    wavy: false,
-                })
-            } else {
-                None
-            },
-            strikethrough: None,
-        }
-    }
-
-    fn build_runs(cells: &[CellSnap], num_cols: usize) -> (String, Vec<TextRun>) {
-        let mut line_text = String::new();
-        let mut runs: Vec<TextRun> = Vec::new();
-        let mut run_start = 0usize;
-        let mut cur_fg = TERM_FG;
-        let mut cur_inv_bg = TERM_BG;
-        let mut cur_bold = false;
-        let mut cur_italic = false;
-        let mut cur_underline = false;
-        let mut cur_inverse = false;
-
-        for (ci, cell) in cells.iter().enumerate() {
-            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
-                continue;
-            }
-            let ef = cell.fg;
-            let eb = cell.bg;
-            let is_b = cell.flags.contains(Flags::BOLD);
-            let is_i = cell.flags.contains(Flags::ITALIC);
-            let is_u = cell.flags.contains(Flags::UNDERLINE);
-            let is_inv = cell.flags.contains(Flags::INVERSE);
-
-            let new_run = ef != cur_fg
-                || eb != cur_inv_bg
-                || is_b != cur_bold
-                || is_i != cur_italic
-                || is_u != cur_underline
-                || is_inv != cur_inverse;
-
-            if new_run {
-                let rl = line_text.len() - run_start;
-                if rl > 0 {
-                    runs.push(Self::make_run(
-                        rl,
-                        cur_bold,
-                        cur_italic,
-                        cur_fg,
-                        cur_inverse,
-                        cur_inv_bg,
-                        cur_underline,
-                    ));
-                }
-                run_start = line_text.len();
-                cur_fg = ef;
-                cur_inv_bg = eb;
-                cur_bold = is_b;
-                cur_italic = is_i;
-                cur_underline = is_u;
-                cur_inverse = is_inv;
-            }
-
-            if cell.c == '\t' {
-                let ns = ((ci / 8) + 1) * 8 - ci;
-                for _ in 0..ns {
-                    line_text.push(' ');
-                }
-            } else {
-                line_text.push(cell.c);
-            }
-        }
-
-        let rl = line_text.len() - run_start;
-        if rl > 0 {
-            runs.push(Self::make_run(
-                rl,
-                cur_bold,
-                cur_italic,
-                cur_fg,
-                cur_inverse,
-                cur_inv_bg,
-                cur_underline,
-            ));
-        }
-
-        if line_text.len() < num_cols {
-            let pad = num_cols - line_text.len();
-            line_text.extend(std::iter::repeat(' ').take(pad));
-            runs.push(TextRun {
-                len: pad,
-                font: pick_font(false, false),
-                color: rgb(TERM_FG).into(),
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            });
-        }
-
-        (line_text, runs)
     }
 }
 // ---- GPUI Render ----
@@ -727,7 +490,17 @@ impl Render for TerminalView {
         let render_cache_paint = render_cache.clone();
         let needs_repaint = self.needs_repaint.clone();
         let entity = cx.entity().downgrade();
-        let cursor_visible = self.cursor_visible;
+        let display_offset_atomic = self.display_offset.clone();
+        let display_offset_mouse = self.display_offset.clone();
+        let display_offset_mouse_move = self.display_offset.clone();
+        let display_offset_mouse_up = self.display_offset.clone();
+        let history_size_atomic = self.history_size.clone();
+        let visible_rows_atomic = self.visible_rows.clone();
+        let history_size_sb = self.history_size.clone();
+        let visible_rows_sb = self.visible_rows.clone();
+        let display_offset_sb = self.display_offset.clone();
+        let scrollbar_dragging = self.scrollbar_dragging.clone();
+        let scrollbar_drag_offset = self.scrollbar_drag_offset.clone();
 
         let ov = self.overlay.lock();
         let overlay_visible = ov.is_visible();
@@ -779,7 +552,7 @@ impl Render for TerminalView {
             }))
             .child(
                 canvas(
-                    // ---- prepaint: resize + try_lock incremental snapshot ----
+                    // ---- prepaint: resize + try-lock incremental snapshot ----
                     move |bounds, _window, _cx| {
                         let mut last = last_bounds.lock();
                         let (cols, rows) = {
@@ -876,21 +649,36 @@ impl Render for TerminalView {
                                 }
                             }
 
-                            let cursor = term.renderable_content().cursor;
-                            (Some(cursor), grid_cols, grid_lines)
+                            // Skip the expensive renderable_content() call; we
+                            // only need cursor point + shape for rendering.
+                            let cursor_point = term.grid().cursor.point;
+                            let cursor_shape = term.cursor_style().shape;
+                            let history_size = grid.history_size() as i32;
+                            // Persist offset for mouse handlers.
+                            display_offset_atomic.store(offset as i32, Ordering::Relaxed);
+                            history_size_atomic.store(history_size, Ordering::Relaxed);
+                            visible_rows_atomic.store(grid_lines as i32, Ordering::Relaxed);
+                            (
+                                Some((cursor_point, cursor_shape)),
+                                grid_cols,
+                                grid_lines,
+                                offset as i32,
+                                history_size,
+                            )
                         });
 
                         match got {
                             Some(v) => v,
                             None => {
                                 let cache = render_cache.lock();
-                                (None, cache.cols, cache.rows_count)
+                                (None, cache.cols, cache.rows_count, 0, 0)
                             }
                         }
                     },
                     // ---- paint: hash-keyed LRU shaped lines ----
                     move |bounds, lines, window, cx| {
-                        let (cursor, num_cols, _num_lines) = lines;
+                        let (cursor, num_cols, _num_lines, display_offset, _history_size) = lines;
+                        // cursor is Option<(Point, CursorShape)>
                         let text_system = window.text_system().clone();
 
                         let sel_guard = selection.lock();
@@ -909,22 +697,27 @@ impl Render for TerminalView {
                         for row_idx in 0..row_count {
                             let y = bounds.origin.y + line_height * row_idx as f32;
 
+                            // Convert selection grid lines to viewport rows.
+                            // viewport_row = grid_line + display_offset
                             let (sel_start, sel_end) = if let Some(ref s) = sel {
                                 let (sr, er, sc, ec) = s.range();
-                                if row_idx < sr || row_idx > er {
+                                let vp_sr = sr + display_offset;
+                                let vp_er = er + display_offset;
+                                let ri = row_idx as i32;
+                                if ri < vp_sr || ri > vp_er {
                                     (None, None)
-                                } else if sr == er {
+                                } else if vp_sr == vp_er {
                                     let lo = sc.min(num_cols);
                                     let hi = (ec + 1).min(num_cols).max(lo + 1);
                                     (Some(lo), Some(hi))
-                                } else if row_idx == sr {
+                                } else if ri == vp_sr {
                                     let col = if s.start_row <= s.end_row {
                                         s.start_col
                                     } else {
                                         s.end_col
                                     };
                                     (Some(col.min(num_cols)), Some(num_cols))
-                                } else if row_idx == er {
+                                } else if ri == vp_er {
                                     let col = if s.start_row <= s.end_row {
                                         s.end_col
                                     } else {
@@ -990,7 +783,7 @@ impl Render for TerminalView {
                             let hash = row.hash;
                             if cache.shaped.peek(&hash).is_none() {
                                 let (line_text, runs) =
-                                    Self::build_runs(&cache.rows[row_idx].cells, num_cols);
+                                    build_runs(&cache.rows[row_idx].cells, num_cols);
                                 if !line_text.is_empty() && !runs.is_empty() {
                                     let shaped = text_system.shape_line(
                                         line_text.into(),
@@ -1014,57 +807,28 @@ impl Render for TerminalView {
                         drop(cache);
 
                         // Cursor (no reshape involved).
-                        if let Some(cursor) = cursor
-                            && cursor.shape != CursorShape::Hidden
-                            && cursor.point.line.0 >= 0
-                            && cursor.point.line.0 < row_count as i32
+                        // cursor.point.line is a grid line; convert to viewport row.
+                        if let Some((cursor_point, cursor_shape)) = cursor
+                            && cursor_shape != CursorShape::Hidden
                         {
-                            let cx_x = bounds.origin.x + cursor.point.column.0 as f32 * cell_width;
-                            let cx_y = bounds.origin.y + cursor.point.line.0 as f32 * line_height;
-                            match cursor.shape {
-                                CursorShape::Block => {
-                                    let c: Hsla = rgb(TERM_CURSOR).into();
-                                    window.paint_quad(fill(
-                                        Bounds::new(
-                                            point(cx_x, cx_y),
-                                            size(cell_width, line_height),
-                                        ),
-                                        c.opacity(0.5),
-                                    ));
-                                }
-                                CursorShape::HollowBlock => {
-                                    window.paint_quad(outline(
-                                        Bounds::new(
-                                            point(cx_x, cx_y),
-                                            size(cell_width, line_height),
-                                        ),
-                                        rgb(TERM_CURSOR),
-                                        BorderStyle::Solid,
-                                    ));
-                                }
-                                CursorShape::Underline => {
-                                    window.paint_quad(fill(
-                                        Bounds::new(
-                                            point(cx_x, cx_y + line_height - px(2.0)),
-                                            size(cell_width, px(2.0)),
-                                        ),
-                                        rgb(TERM_CURSOR),
-                                    ));
-                                }
-                                CursorShape::Beam => {
-                                    if cursor_visible {
-                                        window.paint_quad(fill(
-                                            Bounds::new(
-                                                point(cx_x, cx_y),
-                                                size(px(1.5), line_height),
-                                            ),
-                                            rgb(TERM_CURSOR),
-                                        ));
-                                    }
-                                }
-                                CursorShape::Hidden => {}
+                            let cursor_vp_row = cursor_point.line.0 + display_offset;
+                            if cursor_vp_row >= 0 && cursor_vp_row < row_count as i32 {
+                                let cx_x =
+                                    bounds.origin.x + cursor_point.column.0 as f32 * cell_width;
+                                let cx_y = bounds.origin.y + cursor_vp_row as f32 * line_height;
+                                paint_cursor(
+                                    cursor_shape,
+                                    cx_x,
+                                    cx_y,
+                                    cell_width,
+                                    line_height,
+                                    window,
+                                );
                             }
                         }
+
+                        // Scrollbar is rendered as an interactive overlay div outside
+                        // the canvas; nothing to paint here.
                     },
                 )
                 .size_full(),
@@ -1095,8 +859,10 @@ impl Render for TerminalView {
                                     session.scroll(lines);
                                 }
                             });
-                            // Scroll marks dirty; the frame pump coalesces repaints.
+                            // Notify immediately for low-latency scroll feedback;
+                            // the frame pump coalesces subsequent PTY-driven repaints.
                             needs_repaint.store(true, Ordering::Release);
+                            let _ = entity.update(cx, |_, cx| cx.notify());
                         }
                     })
                     .on_mouse_down(MouseButton::Left, {
@@ -1105,11 +871,28 @@ impl Render for TerminalView {
                         let needs_repaint = needs_repaint.clone();
                         let cell_width = cell_width;
                         let line_height = line_height;
+                        let display_offset_mouse = display_offset_mouse.clone();
+                        let scrollbar_dragging_down = scrollbar_dragging.clone();
                         move |event, _window, _cx| {
+                            // If the click landed on the scrollbar area, skip selection.
+                            if scrollbar_dragging_down.load(Ordering::Acquire) {
+                                return;
+                            }
                             if let Some(bounds) = *last_bounds.lock() {
-                                if let Some((col, row)) =
-                                    mouse_to_grid(event.position, bounds, cell_width, line_height)
-                                {
+                                // Skip if click is in the scrollbar region (right 10px).
+                                let in_scrollbar = event.position.x
+                                    > bounds.origin.x + bounds.size.width - px(10.0);
+                                if in_scrollbar {
+                                    return;
+                                }
+                                let offset = display_offset_mouse.load(Ordering::Relaxed);
+                                if let Some((col, row)) = mouse_to_grid(
+                                    event.position,
+                                    bounds,
+                                    cell_width,
+                                    line_height,
+                                    offset,
+                                ) {
                                     *selection.lock() = Some(Selection::new(col, row));
                                     needs_repaint.store(true, Ordering::Release);
                                 }
@@ -1122,14 +905,21 @@ impl Render for TerminalView {
                         let needs_repaint = needs_repaint.clone();
                         let cell_width = cell_width;
                         let line_height = line_height;
+                        let display_offset_mouse_move = display_offset_mouse_move.clone();
+                        let scrollbar_dragging_move = scrollbar_dragging.clone();
                         move |event, _window, _cx| {
+                            if scrollbar_dragging_move.load(Ordering::Acquire) {
+                                return;
+                            }
                             if event.dragging() {
                                 if let Some(bounds) = *last_bounds.lock() {
+                                    let offset = display_offset_mouse_move.load(Ordering::Relaxed);
                                     if let Some((col, row)) = mouse_to_grid(
                                         event.position,
                                         bounds,
                                         cell_width,
                                         line_height,
+                                        offset,
                                     ) {
                                         if let Some(ref mut sel) = *selection.lock() {
                                             sel.end_col = col;
@@ -1147,33 +937,162 @@ impl Render for TerminalView {
                         let needs_repaint = needs_repaint.clone();
                         let cell_width = cell_width;
                         let line_height = line_height;
+                        let display_offset_mouse_up = display_offset_mouse_up.clone();
                         move |event, _window, _cx| {
-                            let clear = if let Some(bounds) = *last_bounds.lock() {
-                                if let Some((up_col, up_row)) =
-                                    mouse_to_grid(event.position, bounds, cell_width, line_height)
-                                {
+                            if let Some(bounds) = *last_bounds.lock() {
+                                let offset = display_offset_mouse_up.load(Ordering::Relaxed);
+                                if let Some((up_col, up_row)) = mouse_to_grid(
+                                    event.position,
+                                    bounds,
+                                    cell_width,
+                                    line_height,
+                                    offset,
+                                ) {
                                     let sel_guard = selection.lock();
-                                    if let Some(ref sel) = *sel_guard {
+                                    let clear = if let Some(ref sel) = *sel_guard {
                                         sel.start_col == up_col && sel.start_row == up_row
                                     } else {
                                         false
+                                    };
+                                    drop(sel_guard);
+                                    if clear {
+                                        *selection.lock() = None;
+                                    } else if let Some(ref mut sel) = *selection.lock() {
+                                        sel.active = false;
                                     }
-                                } else {
-                                    false
                                 }
-                            } else {
-                                false
-                            };
-
-                            if clear {
-                                *selection.lock() = None;
-                            } else if let Some(ref mut sel) = *selection.lock() {
-                                sel.active = false;
                             }
                             needs_repaint.store(true, Ordering::Release);
                         }
                     }),
             )
+            // Scrollbar overlay: only visible when there is scrollback history.
+            // The thumb is draggable to scroll.
+            .when(history_size_sb.load(Ordering::Relaxed) > 0, |el| {
+                let history = history_size_sb.load(Ordering::Relaxed) as f32;
+                let visible = visible_rows_sb.load(Ordering::Relaxed) as f32;
+                let offset = display_offset_sb.load(Ordering::Relaxed) as f32;
+                let total = history + visible;
+                let thumb_h_frac = (visible / total).clamp(0.04, 1.0);
+                // display_offset=0 → viewport at bottom (newest) → thumb at bottom.
+                // display_offset=history → viewport at top → thumb at top.
+                // thumb_y_frac: 0=top, 1=bottom. So thumb_y_frac = 1 - offset/history ... but
+                // we also account for thumb height. Position the thumb so its top represents
+                // the fraction of content scrolled past at the top.
+                //
+                // content above viewport top = history - offset
+                // fraction of total content above viewport top = (history - offset) / total
+                // thumb_top_frac = (history - offset) / total, clamped.
+                let thumb_y_frac = ((history - offset) / total).clamp(0.0, 1.0 - thumb_h_frac);
+
+                let scrollbar_dragging_c = scrollbar_dragging.clone();
+                let scrollbar_drag_offset_c = scrollbar_drag_offset.clone();
+                let last_bounds_sb = last_bounds_c.clone();
+
+                el.child(
+                    div()
+                        .id("terminal-scrollbar")
+                        .absolute()
+                        .top_0()
+                        .right_0()
+                        .bottom_0()
+                        .w(px(10.0))
+                        .child(
+                            div()
+                                .id("terminal-scrollbar-thumb")
+                                .absolute()
+                                .top(DefiniteLength::Fraction(thumb_y_frac))
+                                .right_1()
+                                .h(DefiniteLength::Fraction(thumb_h_frac))
+                                .w(px(6.0))
+                                .rounded_full()
+                                .bg(rgb(0x979799))
+                                .cursor_pointer()
+                                .on_mouse_down(MouseButton::Left, {
+                                    let scrollbar_drag_offset_c = scrollbar_drag_offset_c.clone();
+                                    let scrollbar_dragging_c = scrollbar_dragging_c.clone();
+                                    let last_bounds_sb = last_bounds_sb.clone();
+                                    move |event, _window, _cx| {
+                                        scrollbar_dragging_c.store(true, Ordering::Release);
+                                        if let Some(bounds) = *last_bounds_sb.lock() {
+                                            let thumb_top =
+                                                bounds.origin.y + bounds.size.height * thumb_y_frac;
+                                            *scrollbar_drag_offset_c.lock() =
+                                                (event.position.y - thumb_top) / px(1.0);
+                                        }
+                                    }
+                                }),
+                        ),
+                )
+            })
+            // Drag capture overlay: a full-size transparent div rendered ONLY
+            // while the scrollbar thumb is being dragged. It captures mouse
+            // move/up so the drag never loses events, and has zero cost when
+            // not dragging (the div doesn't exist in the tree).
+            .when(scrollbar_dragging.load(Ordering::Acquire), |el| {
+                let scrollbar_dragging_c = scrollbar_dragging.clone();
+                let scrollbar_drag_offset_c = scrollbar_drag_offset.clone();
+                let last_bounds_sb = last_bounds_c.clone();
+                let session_sb = session_c.clone();
+                let needs_repaint_sb = needs_repaint.clone();
+                let display_offset_sb_move = display_offset_sb.clone();
+                let history_sb_move = history_size_sb.clone();
+                let visible_sb_move = visible_rows_sb.clone();
+                el.child(
+                    div()
+                        .id("terminal-scrollbar-drag")
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .cursor_pointer()
+                        .on_mouse_move({
+                            let scrollbar_dragging_c = scrollbar_dragging_c.clone();
+                            move |event, _window, _cx| {
+                                if !scrollbar_dragging_c.load(Ordering::Acquire) {
+                                    return;
+                                }
+                                if let Some(bounds) = *last_bounds_sb.lock() {
+                                    let history = history_sb_move.load(Ordering::Relaxed) as f32;
+                                    let visible = visible_sb_move.load(Ordering::Relaxed) as f32;
+                                    if history <= 0.0 {
+                                        return;
+                                    }
+                                    let drag_offset = *scrollbar_drag_offset_c.lock();
+                                    let track_h = (bounds.size.height - px(4.0)) / px(1.0);
+                                    let thumb_h = track_h * (visible / (history + visible));
+                                    let new_thumb_top = ((event.position.y - bounds.origin.y)
+                                        / px(1.0)
+                                        - drag_offset)
+                                        .clamp(0.0, (track_h - thumb_h).max(0.0));
+                                    let new_y_frac = if track_h > 0.0 {
+                                        new_thumb_top / track_h
+                                    } else {
+                                        0.0
+                                    };
+                                    let total = history + visible;
+                                    let new_offset = (history - new_y_frac * total).round() as i32;
+                                    let cur_offset = display_offset_sb_move.load(Ordering::Relaxed);
+                                    let delta = new_offset - cur_offset;
+                                    if delta != 0 {
+                                        // Immediately update the atomic so the next
+                                        // move event sees the new offset, preventing
+                                        // repeated scrolls with stale cur_offset.
+                                        display_offset_sb_move.store(new_offset, Ordering::Relaxed);
+                                        session_sb.scroll(delta);
+                                        needs_repaint_sb.store(true, Ordering::Release);
+                                    }
+                                }
+                            }
+                        })
+                        .on_mouse_up(MouseButton::Left, {
+                            let scrollbar_dragging_c = scrollbar_dragging_c.clone();
+                            move |_event, _window, _cx| {
+                                scrollbar_dragging_c.store(false, Ordering::Release);
+                            }
+                        }),
+                )
+            })
             // Connection overlay (remote sessions only).
             .when(is_remote, |el| {
                 let on_reconnect: Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)> =
@@ -1192,113 +1111,6 @@ impl Render for TerminalView {
     }
 }
 
-// ---- Connection Overlay Rendering ----
-
-fn render_connection_overlay(
-    overlay_visible: bool,
-    is_fading_out: bool,
-    status: RemoteStatus,
-    logs: &[ConnectionLogEntry],
-    count: u64,
-    on_reconnect: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
-) -> AnyElement {
-    if !overlay_visible {
-        return div().into_any_element();
-    }
-
-    div()
-        .id(ElementId::Name(
-            format!("connection-overlay-{}", count).into(),
-        ))
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full()
-        .flex()
-        .cursor_default()
-        .items_center()
-        .justify_center()
-        .bg(rgb(TERM_BG))
-        .opacity(1.0)
-        .with_transition(("connection-overlay-opacity", count))
-        .transition_when(
-            is_fading_out,
-            std::time::Duration::from_millis(500),
-            EaseInOutCubic,
-            |el| el.opacity(0.0),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap_6()
-                .max_w(px(400.0))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_3()
-                        .child(match status {
-                            RemoteStatus::Connecting => render_spinner(),
-                            RemoteStatus::Disconnected => {
-                                div().size(px(12.0)).rounded_full().bg(rgb(0xf38ba8))
-                            }
-                            _ => div().size(px(12.0)).rounded_full().bg(rgb(0xa6e3a1)),
-                        })
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(TERM_FG))
-                                .child(match status {
-                                    RemoteStatus::Connecting => "Connecting…",
-                                    RemoteStatus::Disconnected => "Connection failed",
-                                    _ => "Connected",
-                                }),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .w_full()
-                        .children(logs.iter().map(|entry| {
-                            let prefix = entry.level.prefix();
-                            let color = entry.level.color();
-                            let text = format!("{}{}", prefix, entry.message);
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_start()
-                                .text_sm()
-                                .text_color(rgb(color))
-                                .child(text)
-                        })),
-                )
-                .when(status == RemoteStatus::Disconnected, |el| {
-                    let mut btn =
-                        Button::new(ElementId::Name(format!("reconnect-btn-{}", count).into()))
-                            .centered(true)
-                            .child(t!("terminal.reconnect").to_string());
-                    if let Some(cb) = on_reconnect {
-                        btn = btn.on_click(move |e, w, a| cb(e, w, a));
-                    }
-                    el.child(btn)
-                }),
-        )
-        .into_any_element()
-}
-
-fn render_spinner() -> Div {
-    div()
-        .size(px(12.0))
-        .rounded_full()
-        .border_2()
-        .border_color(rgb(TERM_FG))
-}
-
 impl Focusable for TerminalView {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
@@ -1308,5 +1120,50 @@ impl Focusable for TerminalView {
 impl CrabPortTab for TerminalView {
     fn close(&mut self) {
         self.session.close();
+    }
+}
+
+/// Paint the terminal cursor as one or more quads.
+/// Paint the terminal cursor as one or more quads.
+#[allow(clippy::too_many_arguments)]
+fn paint_cursor(
+    shape: CursorShape,
+    cx_x: Pixels,
+    cx_y: Pixels,
+    cell_width: Pixels,
+    line_height: Pixels,
+    window: &mut Window,
+) {
+    match shape {
+        CursorShape::Block => {
+            let c: Hsla = rgb(TERM_CURSOR).into();
+            window.paint_quad(fill(
+                Bounds::new(point(cx_x, cx_y), size(cell_width, line_height)),
+                c.opacity(0.5),
+            ));
+        }
+        CursorShape::HollowBlock => {
+            window.paint_quad(outline(
+                Bounds::new(point(cx_x, cx_y), size(cell_width, line_height)),
+                rgb(TERM_CURSOR),
+                BorderStyle::Solid,
+            ));
+        }
+        CursorShape::Underline => {
+            window.paint_quad(fill(
+                Bounds::new(
+                    point(cx_x, cx_y + line_height - px(2.0)),
+                    size(cell_width, px(2.0)),
+                ),
+                rgb(TERM_CURSOR),
+            ));
+        }
+        CursorShape::Beam => {
+            window.paint_quad(fill(
+                Bounds::new(point(cx_x, cx_y), size(px(1.5), line_height)),
+                rgb(TERM_CURSOR),
+            ));
+        }
+        CursorShape::Hidden => {}
     }
 }

@@ -84,8 +84,8 @@ pub struct SshBackend {
     monitor: Arc<RwLock<MonitorState>>,
     _on_status: Arc<dyn Fn(String) + Send + Sync>,
     handle: Arc<TokioMutex<Option<Arc<TokioMutex<client::Handle<SshHandler>>>>>>,
-    sftp_entries: Arc<RwLock<Option<Vec<(String, bool)>>>>,
-    sftp_cwd: Arc<RwLock<Option<String>>>,
+    sftp_entries: Arc<RwLock<Option<Arc<Vec<(String, bool)>>>>>,
+    sftp_cwd: Arc<RwLock<Option<Arc<String>>>>,
 }
 
 impl SshBackend {
@@ -106,9 +106,10 @@ impl SshBackend {
         let handle: Arc<TokioMutex<Option<Arc<TokioMutex<client::Handle<SshHandler>>>>>> =
             Arc::new(TokioMutex::new(None));
 
-        let sftp_entries: Arc<RwLock<Option<Vec<(String, bool)>>>> = Arc::new(RwLock::new(None));
+        let sftp_entries: Arc<RwLock<Option<Arc<Vec<(String, bool)>>>>> =
+            Arc::new(RwLock::new(None));
         let sftp_entries2 = sftp_entries.clone();
-        let sftp_cwd: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
+        let sftp_cwd: Arc<RwLock<Option<Arc<String>>>> = Arc::new(RwLock::new(None));
         let sftp_cwd2 = sftp_cwd.clone();
 
         let event_tx2 = event_tx.clone();
@@ -320,13 +321,13 @@ impl SshBackend {
                     // Resolve cwd
                     match sftp.canonicalize(".").await {
                         Ok(cwd) => {
-                            *sftp_cwd2.write() = Some(cwd.clone());
+                            *sftp_cwd2.write() = Some(Arc::new(cwd));
                         }
                         Err(e) => tracing::warn!("SSH: SFTP canonicalize failed ({e})"),
                     }
                     match sftp.read_dir(".").await {
                         Ok(entries) => {
-                            *sftp_entries2.write() = Some(entries);
+                            *sftp_entries2.write() = Some(Arc::new(entries));
                         }
                         Err(e) => tracing::warn!("SSH: SFTP read_dir failed ({e})"),
                     }
@@ -663,11 +664,11 @@ impl CrabPortTerminal for SshBackend {
         true
     }
 
-    fn sftp_entries(&self) -> Option<Vec<(String, bool)>> {
+    fn sftp_entries(&self) -> Option<Arc<Vec<(String, bool)>>> {
         self.sftp_entries.read().clone()
     }
 
-    fn sftp_cwd(&self) -> Option<String> {
+    fn sftp_cwd(&self) -> Option<Arc<String>> {
         self.sftp_cwd.read().clone()
     }
 
@@ -700,8 +701,8 @@ impl CrabPortTerminal for SshBackend {
             };
             match sftp.read_dir(&resolved).await {
                 Ok(dir_entries) => {
-                    *entries.write() = Some(dir_entries);
-                    *cwd.write() = Some(resolved);
+                    *entries.write() = Some(Arc::new(dir_entries));
+                    *cwd.write() = Some(Arc::new(resolved));
                 }
                 Err(e) => {
                     tracing::warn!("SFTP navigate: read_dir failed ({e})");

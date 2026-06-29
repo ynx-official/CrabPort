@@ -37,12 +37,12 @@ pub trait CrabPortTerminal: Send + Sync {
     }
 
     /// Current SFTP directory entries. Returns None if not yet loaded.
-    fn sftp_entries(&self) -> Option<Vec<(String, bool)>> {
+    fn sftp_entries(&self) -> Option<std::sync::Arc<Vec<(String, bool)>>> {
         None
     }
 
     /// Current SFTP working directory. Returns None if not yet loaded.
-    fn sftp_cwd(&self) -> Option<String> {
+    fn sftp_cwd(&self) -> Option<std::sync::Arc<String>> {
         None
     }
 
@@ -264,11 +264,11 @@ impl TerminalSession {
         self.backend.allow_sftp()
     }
 
-    pub fn sftp_entries(&self) -> Option<Vec<(String, bool)>> {
+    pub fn sftp_entries(&self) -> Option<std::sync::Arc<Vec<(String, bool)>>> {
         self.backend.sftp_entries()
     }
 
-    pub fn sftp_cwd(&self) -> Option<String> {
+    pub fn sftp_cwd(&self) -> Option<std::sync::Arc<String>> {
         self.backend.sftp_cwd()
     }
 

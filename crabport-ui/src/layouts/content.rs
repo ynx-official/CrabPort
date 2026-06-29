@@ -150,20 +150,23 @@ pub fn render_content(
     };
 
     // Read SFTP state from the active TerminalView's backend
-    let (sftp_entries, sftp_cwd): (Vec<(String, bool)>, Option<String>) = if is_terminal {
+    let (sftp_entries, sftp_cwd): (
+        std::sync::Arc<Vec<(String, bool)>>,
+        Option<std::sync::Arc<String>>,
+    ) = if is_terminal {
         if let Some(terminal_entity) = active_tab.and_then(|tab| terminal_views.get(&tab.id)) {
             terminal_entity.read_with(cx, |view, _cx| {
                 if view.allow_sftp() {
                     (view.sftp_entries().unwrap_or_default(), view.sftp_cwd())
                 } else {
-                    (Vec::new(), None)
+                    (std::sync::Arc::new(Vec::new()), None)
                 }
             })
         } else {
-            (Vec::new(), None)
+            (std::sync::Arc::new(Vec::new()), None)
         }
     } else {
-        (Vec::new(), None)
+        (std::sync::Arc::new(Vec::new()), None)
     };
 
     // Build SFTP navigate callback

@@ -1,4 +1,4 @@
-use gpui::*;
+use gpui::{prelude::FluentBuilder, *};
 use gpui_animation::{animation::TransitionExt, transition::general::EaseInOutCubic};
 use std::time::Duration;
 
@@ -39,6 +39,11 @@ pub fn render_terminal_toolbar(
     status: RemoteStatus,
     metrics: RemoteMetrics,
 ) -> impl IntoElement {
+    // Only render the toolbar contents when metrics have actually been loaded.
+    // Matches the SFTP panel pattern: no data → no element tree.
+    let has_metrics = is_terminal
+        && (metrics.latency_ms.is_some() || metrics.memory.is_some() || metrics.network.is_some());
+
     div()
         .id("terminal-toolbar")
         .w_full()
@@ -46,7 +51,7 @@ pub fn render_terminal_toolbar(
         .border_t_1()
         .with_transition("terminal-toolbar-height")
         .transition_when_else(
-            is_terminal,
+            has_metrics,
             Duration::from_millis(500),
             EaseInOutCubic,
             |el| el.h(px(TOOLBAR_HEIGHT)),
@@ -55,20 +60,22 @@ pub fn render_terminal_toolbar(
         .bg(rgb(BG_TAB_BAR))
         .border_b_1()
         .border_color(rgb(BORDER))
-        .child(
-            div()
-                .w_full()
-                .h(px(TOOLBAR_HEIGHT))
-                .flex()
-                .flex_row()
-                .items_center()
-                .px_3()
-                .gap_4()
-                .text_color(rgb(TEXT_MUTED))
-                .child(render_connection(status, metrics.latency_ms))
-                .children(render_memory(metrics.memory))
-                .children(render_network(metrics.network)),
-        )
+        .when(has_metrics, |el| {
+            el.child(
+                div()
+                    .w_full()
+                    .h(px(TOOLBAR_HEIGHT))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .px_3()
+                    .gap_4()
+                    .text_color(rgb(TEXT_MUTED))
+                    .child(render_connection(status, metrics.latency_ms))
+                    .children(render_memory(metrics.memory))
+                    .children(render_network(metrics.network)),
+            )
+        })
 }
 
 // ---------------------------------------------------------------------------
