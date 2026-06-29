@@ -111,7 +111,7 @@ impl SidebarItem {
 
 impl CrabportApp {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        rust_i18n::set_locale("zh-CN");
+        rust_i18n::set_locale("en");
         let home_tab = Tab {
             id: 0,
             title: "Home".into(),
@@ -430,6 +430,18 @@ impl CrabportApp {
             });
         });
 
+        // Re-render the app when SFTP transfer progress changes so the
+        // toolbar (rendered in `render_content`) picks up the latest
+        // snapshot. We use a dedicated callback rather than observing the
+        // whole view to avoid re-rendering the app on every terminal frame
+        // pump tick (~120Hz during output).
+        let app_handle = cx.entity().downgrade();
+        terminal_view.update(cx, |view, _cx| {
+            view.set_on_sftp_progress_changed(move |cx| {
+                let _ = app_handle.update(cx, |_, cx| cx.notify());
+            });
+        });
+
         self.terminal_views.insert(id, terminal_view);
 
         self.active_tab_id = id;
@@ -509,6 +521,15 @@ impl CrabportApp {
                 app_handle.update(cx, |app, cx| {
                     app.close_tab(id, cx);
                 });
+            });
+        });
+
+        // Re-render the app when SFTP transfer progress changes so the
+        // toolbar picks up the latest snapshot.
+        let app_handle = cx.entity().downgrade();
+        terminal_view.update(cx, |view, _cx| {
+            view.set_on_sftp_progress_changed(move |cx| {
+                let _ = app_handle.update(cx, |_, cx| cx.notify());
             });
         });
 

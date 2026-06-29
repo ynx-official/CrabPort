@@ -54,10 +54,22 @@ terminal:
 sftp:
   enter: "Enter"
   download: "Download"
+  download_n: "Download (%{count} items)"
+  download_prompt: "Select download destination"
+  upload: "Upload"
+  upload_prompt: "Select files to upload"
+  refresh: "Refresh"
   delete: "Delete"
   delete_title: "Delete"
   delete_prompt: 'Are you sure you want to delete "%{name}"? This cannot be undone.'
   delete_confirm: "Delete"
+  progress:
+    download: "Download"
+    upload: "Upload"
+    compress: "Compressing"
+    transfer: "Transferring"
+    decompress: "Decompressing"
+    cleanup: "Cleaning up"
 hosts:
   edit: "Edit"
   delete: "Delete"

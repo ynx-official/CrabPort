@@ -7,3 +7,9 @@ edition = "2024"
 anyhow = "1"
 russh = "0.45"
 russh-sftp = "2"
+tokio = { version = "1", features = ["rt", "fs", "io-util", "macros"] }
+futures = "0.3"
+async-compression = { version = "0.4", features = ["tokio", "gzip"] }
+tar = "0.4"
+flate2 = "1"
+tracing = { version = "0.1", default-features = false, features = ["std"] }

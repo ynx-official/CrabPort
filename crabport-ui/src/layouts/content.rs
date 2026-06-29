@@ -139,28 +139,34 @@ pub fn render_content(
         .unwrap_or(false);
 
     // Read monitor status & metrics from the active TerminalView's backend
-    let (status, metrics) = if is_terminal {
+    let (status, metrics, sftp_progress) = if is_terminal {
         if let Some(terminal_entity) = active_tab.and_then(|tab| terminal_views.get(&tab.id)) {
             terminal_entity.read_with(cx, |view, _cx| {
-                if let Some(m) = view.monitor() {
+                let (status, metrics) = if let Some(m) = view.monitor() {
                     (m.status(), m.metrics())
                 } else {
                     (
                         crabport_terminal::terminal::RemoteStatus::Local,
                         crabport_terminal::terminal::RemoteMetrics::default(),
                     )
-                }
+                };
+                // Clone the live SFTP progress snapshot so the toolbar can
+                // render it without holding the entity lock across the
+                // render call. `None` when no transfer is in flight.
+                (status, metrics, view.sftp_progress().cloned())
             })
         } else {
             (
                 crabport_terminal::terminal::RemoteStatus::Local,
                 crabport_terminal::terminal::RemoteMetrics::default(),
+                None,
             )
         }
     } else {
         (
             crabport_terminal::terminal::RemoteStatus::Local,
             crabport_terminal::terminal::RemoteMetrics::default(),
+            None,
         )
     };
 
@@ -201,12 +207,74 @@ pub fn render_content(
         None
     };
 
+    // Build SFTP download callback. Mirrors `sftp_navigate`'s shape: a thin
+    // closure that forwards `(remote_path, local_path)` to the active
+    // terminal's backend. The backend reports completion asynchronously via
+    // `BackendEvent::SftpTransferFinished`, which `TerminalView` already
+    // surfaces as a status line — no extra plumbing needed here.
+    let sftp_download: Option<Rc<dyn Fn(String, String, &mut App)>> = if is_terminal {
+        active_tab.and_then(|tab| {
+            terminal_views.get(&tab.id).map(|entity| {
+                let entity = entity.clone();
+                Rc::new(
+                    move |remote_path: String, local_path: String, cx: &mut App| {
+                        entity.read_with(cx, |view, _cx| {
+                            view.sftp_download(&remote_path, &local_path);
+                        });
+                    },
+                ) as Rc<dyn Fn(String, String, &mut App)>
+            })
+        })
+    } else {
+        None
+    };
+
+    // Build SFTP upload callback. Same shape as `sftp_download` but with the
+    // argument order swapped to match `view.sftp_upload(local, remote)`.
+    let sftp_upload: Option<Rc<dyn Fn(String, String, &mut App)>> = if is_terminal {
+        active_tab.and_then(|tab| {
+            terminal_views.get(&tab.id).map(|entity| {
+                let entity = entity.clone();
+                Rc::new(
+                    move |local_path: String, remote_path: String, cx: &mut App| {
+                        entity.read_with(cx, |view, _cx| {
+                            view.sftp_upload(&local_path, &remote_path);
+                        });
+                    },
+                ) as Rc<dyn Fn(String, String, &mut App)>
+            })
+        })
+    } else {
+        None
+    };
+
+    // Build SFTP delete callback. Forwards the remote path to the backend's
+    // `sftp_delete`, which stats the path to choose `remove_file` vs
+    // recursive `remove_dir`.
+    let sftp_delete: Option<Rc<dyn Fn(String, &mut App)>> = if is_terminal {
+        active_tab.and_then(|tab| {
+            terminal_views.get(&tab.id).map(|entity| {
+                let entity = entity.clone();
+                Rc::new(move |remote_path: String, cx: &mut App| {
+                    entity.read_with(cx, |view, _cx| {
+                        view.sftp_delete(&remote_path);
+                    });
+                }) as Rc<dyn Fn(String, &mut App)>
+            })
+        })
+    } else {
+        None
+    };
+
     let has_sftp = !sftp_entries.is_empty();
     sftp_panel.update(cx, |panel, cx| {
         panel.set_state(
             sftp_entries,
             sftp_cwd,
             sftp_navigate,
+            sftp_download,
+            sftp_upload,
+            sftp_delete,
             active_tab_id,
             context_menu.clone(),
             alert_controller.clone(),
@@ -305,5 +373,10 @@ pub fn render_content(
                 .child(view)
                 .child(render_panel(is_terminal, 0, has_sftp, sftp_panel.clone())),
         )
-        .child(render_terminal_toolbar(is_terminal, status, metrics))
+        .child(render_terminal_toolbar(
+            is_terminal,
+            status,
+            metrics,
+            sftp_progress,
+        ))
 }

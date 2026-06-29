@@ -2,9 +2,14 @@ use gpui::{prelude::FluentBuilder, *};
 use gpui_animation::{animation::TransitionExt, transition::general::EaseInOutCubic};
 use std::time::Duration;
 
-use crabport_terminal::terminal::{MemoryStats, NetworkStats, RemoteMetrics, RemoteStatus};
+use crabport_terminal::terminal::{
+    MemoryStats, NetworkStats, RemoteMetrics, RemoteStatus, SftpTransferBytes, SftpTransferKind,
+    SftpTransferStage,
+};
+use rust_i18n::t;
 
 use crate::color::*;
+use crate::views::terminal::SftpProgress;
 
 const TOOLBAR_HEIGHT: f32 = 36.0;
 
@@ -38,11 +43,18 @@ pub fn render_terminal_toolbar(
     is_terminal: bool,
     status: RemoteStatus,
     metrics: RemoteMetrics,
+    sftp_progress: Option<SftpProgress>,
 ) -> impl IntoElement {
     // Only render the toolbar contents when metrics have actually been loaded.
     // Matches the SFTP panel pattern: no data → no element tree.
+    //
+    // We also keep the toolbar open while an SFTP transfer is in flight so
+    // the progress log stays visible even if metrics haven't loaded yet
+    // (e.g. on a freshly connected host before the first monitor tick).
     let has_metrics = is_terminal
         && (metrics.latency_ms.is_some() || metrics.memory.is_some() || metrics.network.is_some());
+    let has_progress = is_terminal && sftp_progress.is_some();
+    let show_toolbar = has_metrics || has_progress;
 
     div()
         .id("terminal-toolbar")
@@ -51,7 +63,7 @@ pub fn render_terminal_toolbar(
         .border_t_1()
         .with_transition("terminal-toolbar-height")
         .transition_when_else(
-            has_metrics,
+            show_toolbar,
             Duration::from_millis(500),
             EaseInOutCubic,
             |el| el.h(px(TOOLBAR_HEIGHT)),
@@ -60,7 +72,7 @@ pub fn render_terminal_toolbar(
         .bg(rgb(BG_TAB_BAR))
         .border_b_1()
         .border_color(rgb(BORDER))
-        .when(has_metrics, |el| {
+        .when(show_toolbar, |el| {
             el.child(
                 div()
                     .w_full()
@@ -73,7 +85,11 @@ pub fn render_terminal_toolbar(
                     .text_color(rgb(TEXT_MUTED))
                     .child(render_connection(status, metrics.latency_ms))
                     .children(render_memory(metrics.memory))
-                    .children(render_network(metrics.network)),
+                    .children(render_network(metrics.network))
+                    // Flexible spacer pushes the SFTP progress log to the
+                    // far right edge of the toolbar.
+                    .child(div().flex_1())
+                    .children(render_sftp_progress(sftp_progress)),
             )
         })
 }
@@ -219,6 +235,242 @@ fn human_bytes(bytes: u64) -> (f64, &'static str) {
 fn format_rate(bytes_per_sec: u64) -> String {
     let (val, unit) = human_bytes(bytes_per_sec);
     format!("{:.1}{}/s", val, unit)
+}
+
+// ---------------------------------------------------------------------------
+// SFTP transfer progress log
+// ---------------------------------------------------------------------------
+
+/// Render the right-aligned SFTP progress chip.
+///
+/// Returns `None` when there's no in-flight transfer, so the caller's
+/// `.children(...)` renders nothing.
+///
+/// Layout: direction icon + stage label + path, all in muted text so it
+/// reads as ambient status rather than a primary control. We deliberately
+/// don't animate a spinner here — the toolbar re-renders on every progress
+/// event (compress → transfer → decompress → cleanup), so the changing
+/// stage label itself conveys activity without the cost of a continuous
+/// animation loop on the app-level render path.
+fn render_sftp_progress(progress: Option<SftpProgress>) -> Option<impl IntoElement> {
+    let p = progress?;
+    let kind_label = match p.kind {
+        SftpTransferKind::Download => t!("sftp.progress.download").to_string(),
+        SftpTransferKind::Upload => t!("sftp.progress.upload").to_string(),
+    };
+    let (stage_label, stage_color) = match p.stage {
+        SftpTransferStage::Compress => (t!("sftp.progress.compress").to_string(), COLOR_WARNING),
+        SftpTransferStage::Transfer => (t!("sftp.progress.transfer").to_string(), COLOR_ACCENT),
+        SftpTransferStage::Decompress => {
+            (t!("sftp.progress.decompress").to_string(), COLOR_WARNING)
+        }
+        SftpTransferStage::CleanUp => (t!("sftp.progress.cleanup").to_string(), TEXT_MUTED),
+    };
+    let icon_path = match p.kind {
+        SftpTransferKind::Download => "icons/terminal-toolbar/arrow-down-to-line.svg",
+        SftpTransferKind::Upload => "icons/terminal-toolbar/arrow-up-to-line.svg",
+    };
+    // Middle-truncate long paths so the head (top-level dir) and tail
+    // (filename) stay visible — e.g. "/home/user/.../deeply/nested/file.txt".
+    let detail = truncate_path_middle(&p.message, 40);
+
+    // Optional determinate progress bar, shown only when the backend
+    // reports byte counts (currently the Transfer stage). Indeterminate
+    // stages (Compress/Decompress/CleanUp run via opaque remote exec) get
+    // no bar — the changing stage label conveys activity.
+    let bar = render_progress_bar(p.bytes, stage_color);
+
+    Some(
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1p5()
+            .min_w_0()
+            .child(
+                svg()
+                    .path(icon_path)
+                    .size(px(12.0))
+                    .flex_shrink_0()
+                    .text_color(rgb(stage_color)),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(stage_color))
+                    .child(stage_label),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(TEXT_MUTED))
+                    .min_w_0()
+                    .truncate()
+                    .child(format!("{kind_label}: {detail}")),
+            )
+            .when_some(bar, |el, bar| {
+                el.child(bar).when_some(p.bytes, |el, b| {
+                    el.child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(TEXT_MUTED))
+                            .flex_shrink_0()
+                            .child(format_byte_ratio(b.done, b.total)),
+                    )
+                })
+            }),
+    )
+}
+
+/// Render a thin determinate progress bar when byte counts are available.
+/// Returns `None` for indeterminate stages (no `bytes` field).
+///
+/// Uses `gpui-animation`'s `transition_when` with a stable element id so the
+/// fill width eases between updates — same pattern as the memory-usage bar.
+/// Without this, each progress event would snap the fill to its new width.
+fn render_progress_bar(bytes: Option<SftpTransferBytes>, color: u32) -> Option<impl IntoElement> {
+    let b = bytes?;
+    let ratio = if b.total == 0 {
+        0.0
+    } else {
+        (b.done as f64 / b.total as f64).clamp(0.0, 1.0)
+    };
+    let filled_w = BAR_WIDTH * ratio as f32;
+    Some(
+        div()
+            .w(px(BAR_WIDTH))
+            .h(px(BAR_HEIGHT))
+            .rounded(px(3.0))
+            .bg(rgb(BORDER))
+            .flex_shrink_0()
+            .child(
+                div()
+                    .id("sftp-progress-bar-fill")
+                    .h_full()
+                    .rounded(px(3.0))
+                    .bg(rgb(color))
+                    .with_transition("sftp-progress-bar-fill")
+                    .transition_when(
+                        true,
+                        Duration::from_millis(300),
+                        EaseInOutCubic,
+                        move |el| el.w(px(filled_w)),
+                    ),
+            ),
+    )
+}
+
+/// Format a `done / total` byte ratio for display, e.g. "2.1M / 8.0M".
+fn format_byte_ratio(done: u64, total: u64) -> String {
+    if total == 0 {
+        let (d, du) = human_bytes_simple(done);
+        format!("{:.1}{}", d, du)
+    } else {
+        let (d, du) = human_bytes_simple(done);
+        let (t, tu) = human_bytes_simple(total);
+        format!("{:.1}{} / {:.1}{}", d, du, t, tu)
+    }
+}
+
+fn human_bytes_simple(bytes: u64) -> (f64, &'static str) {
+    let b = bytes as f64;
+    const GB: f64 = 1024.0 * 1024.0 * 1024.0;
+    const MB: f64 = 1024.0 * 1024.0;
+    const KB: f64 = 1024.0;
+    if b >= GB {
+        (b / GB, "G")
+    } else if b >= MB {
+        (b / MB, "M")
+    } else if b >= KB {
+        (b / KB, "K")
+    } else {
+        (b, "B")
+    }
+}
+
+/// Truncate a filesystem path in the *middle*, keeping the head (top-level
+/// directory) and tail (filename) visible with `…` between them. This is
+/// more useful than a head-only or tail-only truncation because the user
+/// can tell both *which* top-level project a file belongs to and *what* the
+/// file is.
+///
+/// Examples (max=30):
+///   "/home/user/file.txt"              -> "/home/user/file.txt"
+///   "/home/user/projects/x/deep/f.txt"  -> "/home/.../deep/f.txt"
+///   "very_long_filename_no_slashes.txt" -> "very_long_filen...ses.txt"
+fn truncate_path_middle(path: &str, max: usize) -> String {
+    if path.len() <= max {
+        return path.to_string();
+    }
+    // Split into components on `/`. We keep the first segment (head) and the
+    // last segment (tail), and collapse everything in between into a single
+    // `…`. If even that doesn't fit, we hard-truncate the tail.
+    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let is_absolute = path.starts_with('/');
+    let prefix = if is_absolute { "/" } else { "" };
+
+    if parts.len() >= 3 {
+        let head = parts[0];
+        let tail = parts.last().unwrap();
+        // "/head/…/tail"
+        let candidate = format!("{prefix}{head}/…/{tail}");
+        if candidate.len() <= max {
+            return candidate;
+        }
+        // Tail alone is too long — hard-truncate it from the middle too.
+        let budget = max.saturating_sub(prefix.len() + head.len() + 4); // "/…/…"
+        if budget > 4 {
+            let half = budget / 2;
+            let t_len = tail.len();
+            if t_len > budget {
+                let keep_head = &tail[..half];
+                let keep_tail = &tail[t_len - half..];
+                return format!("{prefix}{head}/…/{keep_head}…{keep_tail}");
+            }
+        }
+        // Fallback: just show head + … + truncated tail.
+        let tail_budget = max.saturating_sub(prefix.len() + head.len() + 3); // "/…"
+        let cut = tail_budget.saturating_sub(1).max(1);
+        return format!("{prefix}{head}/…/{}…", &tail[..cut.min(tail.len())]);
+    }
+
+    // No slashes (or very few): hard-truncate the middle of the single
+    // segment.
+    let cut = max.saturating_sub(1);
+    let half = cut / 2;
+    let s = path.as_bytes();
+    // Be careful not to split a multi-byte char — fall back to char indices.
+    let chars: Vec<char> = path.chars().collect();
+    if chars.len() > cut {
+        let head: String = chars[..half].iter().collect();
+        let tail: String = chars[chars.len() - half..].iter().collect();
+        return format!("{head}…{tail}");
+    }
+    let _ = s;
+    path.chars().take(cut).collect::<String>() + "…"
+}
+
+/// Truncate a filesystem path for display, keeping the basename and
+/// prefixing with `…` when the full path exceeds `max` chars. Absolute
+/// paths and relative paths are both handled — we split on `/`.
+///
+/// Deprecated in favour of [`truncate_path_middle`], which preserves both
+/// the head and tail of a long path. Kept for any future callers that want
+/// the simpler tail-only form.
+#[allow(dead_code)]
+fn truncate_path(path: &str, max: usize) -> String {
+    if path.len() <= max {
+        return path.to_string();
+    }
+    // Find the last `/` and keep everything after it.
+    let base = path.rsplit('/').next().unwrap_or(path);
+    if base.len() >= max {
+        // Even the basename is too long — hard-truncate it.
+        let cut = max.saturating_sub(1);
+        format!("{}…", &base[..cut])
+    } else {
+        format!("…/{}", base)
+    }
 }
 
 // Accent color for the memory progress bar fill

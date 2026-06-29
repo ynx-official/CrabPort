@@ -19,6 +19,75 @@ pub enum BackendEvent {
     Data(Vec<u8>),
     Closed,
     Error(String),
+    /// A file transfer (download or upload) finished.
+    ///
+    /// `kind` identifies which direction, `success` is true on completion
+    /// and false on failure, and `message` is a short human-readable
+    /// description (the destination path on success, the error text on
+    /// failure).
+    SftpTransferFinished {
+        kind: SftpTransferKind,
+        success: bool,
+        message: String,
+    },
+    /// Live progress for an in-flight SFTP transfer. Emitted at each stage
+    /// boundary of the gzip/tmp staging flow (compress → transfer →
+    /// decompress → cleanup) so the UI can surface a stage-aware progress
+    /// log. A `SftpTransferFinished` always follows the last progress
+    /// event for a given transfer.
+    SftpTransferProgress {
+        kind: SftpTransferKind,
+        stage: SftpTransferStage,
+        /// Short human-readable detail — typically the path being worked
+        /// on, so the user can tell which file in a batch is current.
+        message: String,
+        /// Byte-level progress for the current stage. `None` for stages
+        /// that don't have a meaningful byte count (e.g. remote `gzip`
+        /// which runs as an opaque exec). When present, the UI renders a
+        /// determinate progress bar.
+        bytes: Option<SftpTransferBytes>,
+    },
+}
+
+/// Byte-level progress snapshot for a transfer stage.
+#[derive(Debug, Clone, Copy)]
+pub struct SftpTransferBytes {
+    /// Bytes processed so far in the current stage.
+    pub done: u64,
+    /// Total bytes expected for the current stage. Zero means "unknown";
+    /// the UI should render an indeterminate (animated) bar in that case.
+    pub total: u64,
+}
+
+/// Which direction an SFTP transfer ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SftpTransferKind {
+    Download,
+    Upload,
+}
+
+/// A coarse stage in the gzip/tmp staging flow used by SFTP transfers.
+///
+/// The ordering reflects the typical sequence for a download (compress
+/// remotely → stream the .gz down → decompress on the client → clean up
+/// the remote tmp); uploads run the mirror image. Not every transfer
+/// touches every stage — e.g. a recursive fallback skips compress/
+/// decompress and goes straight to per-file transfer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SftpTransferStage {
+    /// Compressing the source (remote `gzip -c` / `tar czf` for downloads,
+    /// client-side `tar+gz` for uploads).
+    Compress,
+    /// Streaming the staged archive over SFTP (download or upload of the
+    /// `.gz` / `.tar.gz`).
+    Transfer,
+    /// Decompressing the staged archive into its final location (client
+    /// `tar::Archive::unpack` for downloads, remote `gunzip`/`tar xzf`
+    /// for uploads).
+    Decompress,
+    /// Removing the remote tmp staging file. Best-effort; failures here
+    /// don't fail the overall transfer.
+    CleanUp,
 }
 
 pub trait CrabPortTerminal: Send + Sync {
@@ -49,6 +118,26 @@ pub trait CrabPortTerminal: Send + Sync {
     /// Navigate to a new directory via SFTP. The backend updates entries + cwd
     /// asynchronously and notifies the UI.
     fn sftp_navigate(&self, _path: &str) {}
+
+    /// Download a remote file to `local_path`, using implicit gzip staging
+    /// (see `SshBackend::sftp_download`).
+    ///
+    /// Completion is reported via a [`BackendEvent::SftpTransferFinished`]
+    /// event on the backend's event stream — the caller does not need to pass
+    /// a callback.
+    fn sftp_download(&self, _remote_path: &str, _local_path: &str) {}
+
+    /// Upload `local_path` to `remote_path`, using implicit gzip staging
+    /// (see `SshBackend::sftp_upload`). Completion is reported via
+    /// [`BackendEvent::SftpTransferFinished`].
+    fn sftp_upload(&self, _local_path: &str, _remote_path: &str) {}
+
+    /// Delete a remote file or directory at `remote_path`. The backend
+    /// stats the path to decide between `remove_file` and `remove_dir`.
+    /// Completion is reported via [`BackendEvent::SftpTransferFinished`] with
+    /// `kind = Delete` (a synthetic kind — there's no actual transfer, but
+    /// we reuse the event so the UI's existing finish handling applies).
+    fn sftp_delete(&self, _remote_path: &str) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -179,6 +268,12 @@ impl TerminalSession {
                                     Ok(BackendEvent::Error(err)) => {
                                         tracing::error!("terminal backend error: {}", err);
                                     }
+                                    Ok(BackendEvent::SftpTransferFinished { .. }) => {
+                                        // UI-only event; ignore during batch drain.
+                                    }
+                                    Ok(BackendEvent::SftpTransferProgress { .. }) => {
+                                        // UI-only event; ignore during batch drain.
+                                    }
                                     Err(_) => break, // queue drained
                                 }
                             }
@@ -195,6 +290,10 @@ impl TerminalSession {
                             tracing::error!("terminal backend error: {}", err);
                             let _ = wakeup_tx.try_broadcast(());
                         }
+                        // Transfer-finished events are for the UI, not the
+                        // terminal parser. Ignore them here.
+                        BackendEvent::SftpTransferFinished { .. } => {}
+                        BackendEvent::SftpTransferProgress { .. } => {}
                     },
                     Err(_e) => {
                         #[cfg(debug_assertions)]
@@ -274,6 +373,27 @@ impl TerminalSession {
 
     pub fn sftp_navigate(&self, path: &str) {
         self.backend.sftp_navigate(path)
+    }
+
+    /// Download a remote file via the implicit-gzip staged flow.
+    /// Completion is reported via the backend's event stream as
+    /// `BackendEvent::SftpTransferFinished`.
+    pub fn sftp_download(&self, remote_path: &str, local_path: &str) {
+        self.backend.sftp_download(remote_path, local_path);
+    }
+
+    /// Upload a local file via the implicit-gzip staged flow.
+    /// Completion is reported via the backend's event stream as
+    /// `BackendEvent::SftpTransferFinished`.
+    pub fn sftp_upload(&self, local_path: &str, remote_path: &str) {
+        self.backend.sftp_upload(local_path, remote_path);
+    }
+
+    /// Delete a remote file or directory.
+    /// Completion is reported via the backend's event stream as
+    /// `BackendEvent::SftpTransferFinished`.
+    pub fn sftp_delete(&self, remote_path: &str) {
+        self.backend.sftp_delete(remote_path);
     }
 
     pub fn scroll(&self, delta: i32) {

@@ -14,7 +14,10 @@ use crabport_core::keybind::{self, KeyAction, TerminalAction};
 use crabport_ssh::backend::HostKeyInfo;
 use crabport_ssh::session::SshConnectionInfo;
 use crabport_terminal::pty::PtyBackend;
-use crabport_terminal::terminal::{CrabPortMonitor, RemoteStatus, TerminalSession};
+use crabport_terminal::terminal::{
+    CrabPortMonitor, RemoteStatus, SftpTransferBytes, SftpTransferKind, SftpTransferStage,
+    TerminalSession,
+};
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -39,6 +42,26 @@ mod runs;
 mod selection;
 
 // ---- TerminalView ----
+
+/// Snapshot of an in-flight SFTP transfer, surfaced to the toolbar so the
+/// user can see which stage (compress / transfer / decompress / cleanup)
+/// is currently running and which path it's working on.
+///
+/// `None` on `TerminalView` means no transfer is active (either none was
+/// started, or the most recent one already finished and the result has
+/// been shown long enough — see [`TerminalView::clear_sftp_progress`]).
+#[derive(Clone, Debug)]
+pub struct SftpProgress {
+    pub kind: SftpTransferKind,
+    pub stage: SftpTransferStage,
+    /// Short detail string emitted by the backend — typically the path of
+    /// the file currently being processed.
+    pub message: String,
+    /// Byte-level progress for the current stage, when available. `None`
+    /// for stages that don't have a meaningful byte count (e.g. remote
+    /// `gzip` which runs as an opaque exec).
+    pub bytes: Option<SftpTransferBytes>,
+}
 
 pub struct TerminalView {
     session: Arc<TerminalSession>,
@@ -72,6 +95,14 @@ pub struct TerminalView {
     count: u64,
     ssh_info: Option<SshConnectionInfo>,
     on_backend_closed: Option<Rc<dyn Fn(&mut App)>>,
+    /// Latest SFTP transfer progress pushed by the backend, or `None` when
+    /// no transfer is in flight. Updated by the backend-event subscriber;
+    /// read by the toolbar via [`Self::sftp_progress`].
+    sftp_progress: Option<SftpProgress>,
+    /// Invoked whenever `sftp_progress` changes, so the app (which renders
+    /// the toolbar) can re-render without observing every terminal repaint.
+    /// Mirrors the `on_backend_closed` callback pattern.
+    on_sftp_progress_changed: Option<Rc<dyn Fn(&mut App)>>,
 }
 
 impl TerminalView {
@@ -153,6 +184,77 @@ impl TerminalView {
                                     .log(ConnectionLogLevel::Warning, "Connection closed");
                             }
                             cx.notify();
+                        });
+                    }
+                    crabport_terminal::terminal::BackendEvent::SftpTransferFinished {
+                        kind,
+                        success,
+                        message,
+                    } => {
+                        // Surface transfer results in the connection overlay
+                        // so the user gets feedback. A richer toast / status
+                        // bar can be added later without changing the backend.
+                        let level = if success {
+                            ConnectionLogLevel::Info
+                        } else {
+                            ConnectionLogLevel::Error
+                        };
+                        let prefix = match kind {
+                            crabport_terminal::terminal::SftpTransferKind::Download => "Download",
+                            crabport_terminal::terminal::SftpTransferKind::Upload => "Upload",
+                        };
+                        overlay_c.lock().log(level, format!("{prefix}: {message}"));
+                        // Clear the live progress indicator — the transfer
+                        // is done (success or failure). The toolbar will
+                        // re-render without the progress chip on the next
+                        // frame.
+                        let _ = entity.update(cx, |this, cx| {
+                            this.sftp_progress = None;
+                            // Auto-refresh the SFTP listing on success so
+                            // uploads/deletes are reflected immediately
+                            // without the user clicking the refresh button.
+                            // Downloads don't change the remote dir, but
+                            // re-navigating is cheap and harmless.
+                            if success {
+                                if let Some(cwd) = this
+                                    .session
+                                    .sftp_cwd()
+                                    .as_ref()
+                                    .map(|c| c.as_str().to_string())
+                                {
+                                    this.session.sftp_navigate(&cwd);
+                                }
+                            }
+                            let cb = this.on_sftp_progress_changed.clone();
+                            cx.notify();
+                            if let Some(cb) = cb {
+                                cx.defer(move |cx| cb(cx));
+                            }
+                        });
+                    }
+                    crabport_terminal::terminal::BackendEvent::SftpTransferProgress {
+                        kind,
+                        stage,
+                        message,
+                        bytes,
+                    } => {
+                        // Update the live progress snapshot read by the
+                        // toolbar. We don't log to the connection overlay
+                        // here — the toolbar is the dedicated surface for
+                        // in-flight progress, and double-logging would
+                        // spam the overlay with one entry per stage.
+                        let _ = entity.update(cx, |this, cx| {
+                            this.sftp_progress = Some(SftpProgress {
+                                kind,
+                                stage,
+                                message,
+                                bytes,
+                            });
+                            let cb = this.on_sftp_progress_changed.clone();
+                            cx.notify();
+                            if let Some(cb) = cb {
+                                cx.defer(move |cx| cb(cx));
+                            }
                         });
                     }
                     crabport_terminal::terminal::BackendEvent::Data(_) => {}
@@ -284,6 +386,8 @@ impl TerminalView {
             count,
             ssh_info,
             on_backend_closed: None,
+            sftp_progress: None,
+            on_sftp_progress_changed: None,
         }
     }
 
@@ -307,8 +411,35 @@ impl TerminalView {
         self.session.sftp_navigate(path)
     }
 
+    pub fn sftp_download(&self, remote_path: &str, local_path: &str) {
+        self.session.sftp_download(remote_path, local_path);
+    }
+
+    pub fn sftp_upload(&self, local_path: &str, remote_path: &str) {
+        self.session.sftp_upload(local_path, remote_path);
+    }
+
+    /// Delete a remote file or directory. The backend stats the path to
+    /// decide between `remove_file` and recursive `remove_dir`.
+    pub fn sftp_delete(&self, remote_path: &str) {
+        self.session.sftp_delete(remote_path);
+    }
+
+    /// Latest SFTP transfer progress, or `None` if no transfer is in flight.
+    /// Read by the terminal toolbar to render a stage-aware progress log.
+    pub fn sftp_progress(&self) -> Option<&SftpProgress> {
+        self.sftp_progress.as_ref()
+    }
+
     pub fn set_on_backend_closed(&mut self, f: impl Fn(&mut App) + 'static) {
         self.on_backend_closed = Some(Rc::new(f));
+    }
+
+    /// Set the callback invoked whenever `sftp_progress` changes. The app
+    /// uses this to trigger a re-render of the toolbar (which reads the
+    /// progress snapshot) without observing every terminal repaint.
+    pub fn set_on_sftp_progress_changed(&mut self, f: impl Fn(&mut App) + 'static) {
+        self.on_sftp_progress_changed = Some(Rc::new(f));
     }
 
     /// Returns the host-key info for a currently-pending host-key prompt,
@@ -403,6 +534,60 @@ impl TerminalView {
                                     .log(ConnectionLogLevel::Warning, "Connection closed");
                             }
                             cx.notify();
+                        });
+                    }
+                    crabport_terminal::terminal::BackendEvent::SftpTransferFinished {
+                        kind,
+                        success,
+                        message,
+                    } => {
+                        let level = if success {
+                            ConnectionLogLevel::Info
+                        } else {
+                            ConnectionLogLevel::Error
+                        };
+                        let prefix = match kind {
+                            crabport_terminal::terminal::SftpTransferKind::Download => "Download",
+                            crabport_terminal::terminal::SftpTransferKind::Upload => "Upload",
+                        };
+                        overlay_c.lock().log(level, format!("{prefix}: {message}"));
+                        let _ = entity.update(cx, |this, cx| {
+                            this.sftp_progress = None;
+                            if success {
+                                if let Some(cwd) = this
+                                    .session
+                                    .sftp_cwd()
+                                    .as_ref()
+                                    .map(|c| c.as_str().to_string())
+                                {
+                                    this.session.sftp_navigate(&cwd);
+                                }
+                            }
+                            let cb = this.on_sftp_progress_changed.clone();
+                            cx.notify();
+                            if let Some(cb) = cb {
+                                cx.defer(move |cx| cb(cx));
+                            }
+                        });
+                    }
+                    crabport_terminal::terminal::BackendEvent::SftpTransferProgress {
+                        kind,
+                        stage,
+                        message,
+                        bytes,
+                    } => {
+                        let _ = entity.update(cx, |this, cx| {
+                            this.sftp_progress = Some(SftpProgress {
+                                kind,
+                                stage,
+                                message,
+                                bytes,
+                            });
+                            let cb = this.on_sftp_progress_changed.clone();
+                            cx.notify();
+                            if let Some(cb) = cb {
+                                cx.defer(move |cx| cb(cx));
+                            }
                         });
                     }
                     crabport_terminal::terminal::BackendEvent::Data(_) => {}

@@ -7,6 +7,7 @@ use gpui_animation::{animation::TransitionExt, transition::general::Linear};
 use gpui_component::input::InputState;
 use gpui_component::scroll::ScrollableElement;
 use rust_i18n::t;
+use rustc_hash::FxHashSet;
 
 use crate::color::*;
 use crate::components::context_menu::{ContextMenuItem, ContextMenuState};
@@ -44,6 +45,24 @@ pub struct SftpPanel {
     /// The entry currently being hovered, if any. Used to drive the hover
     /// background transition (same pattern as HostsView).
     hovered_entry: Option<String>,
+    /// Multi-selection set. Keyed by entry name (unique within the current
+    /// cwd listing). `.` and `..` are never added — they're navigation
+    /// helpers, not selectable items. Cleared whenever the entries list
+    /// changes (e.g. directory navigation) so stale name→path mappings
+    /// can't survive a context switch.
+    selected: FxHashSet<String>,
+    /// Download callback — invoked with `(remote_path, local_path)` for
+    /// each entry the user chose to download. Mirrors `on_navigate`'s
+    /// signature shape; injected from `content.rs` so this view stays
+    /// agnostic of the terminal/backend wiring.
+    on_download: Option<Rc<dyn Fn(String, String, &mut App)>>,
+    /// Upload callback — invoked with `(local_path, remote_path)` for each
+    /// file the user picked. Mirrors `on_download` but with the argument
+    /// order swapped to match `view.sftp_upload(local, remote)`.
+    on_upload: Option<Rc<dyn Fn(String, String, &mut App)>>,
+    /// Delete callback — invoked with the remote path to remove. The
+    /// backend stats the path to decide between file/dir removal.
+    on_delete: Option<Rc<dyn Fn(String, &mut App)>>,
 }
 
 impl SftpPanel {
@@ -58,6 +77,10 @@ impl SftpPanel {
             alert_controller: None,
             context_menu_entry: None,
             hovered_entry: None,
+            selected: FxHashSet::default(),
+            on_download: None,
+            on_upload: None,
+            on_delete: None,
         }
     }
 
@@ -68,6 +91,9 @@ impl SftpPanel {
         entries: Arc<Vec<(String, bool)>>,
         cwd: Option<Arc<String>>,
         on_navigate: Option<Rc<dyn Fn(String, &mut App)>>,
+        on_download: Option<Rc<dyn Fn(String, String, &mut App)>>,
+        on_upload: Option<Rc<dyn Fn(String, String, &mut App)>>,
+        on_delete: Option<Rc<dyn Fn(String, &mut App)>>,
         active_tab_id: u64,
         context_menu: Entity<crate::components::context_menu::ContextMenuController>,
         alert_controller: Entity<AlertController>,
@@ -128,6 +154,9 @@ impl SftpPanel {
             self.active_tab_id = Some(active_tab_id);
             self.context_menu = Some(context_menu);
             self.alert_controller = Some(alert_controller);
+            self.on_download = on_download;
+            self.on_upload = on_upload;
+            self.on_delete = on_delete;
             return;
         }
 
@@ -165,11 +194,35 @@ impl SftpPanel {
         }
 
         self.cwd = cwd;
+        // Detect listing changes so we can invalidate the multi-selection:
+        // a name-keyed selection can't safely survive navigation or a refresh
+        // because the same name may map to a different remote path, or may
+        // no longer exist at all. We compare by reference identity first
+        // (cheap — `Arc` pointer eq covers the common case where the backend
+        // handed us the same snapshot twice) and fall back to a per-name
+        // comparison of the entry list.
+        let entries_changed = if Arc::ptr_eq(&self.entries, &entries) {
+            false
+        } else {
+            let prev = self
+                .entries
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .collect::<Vec<_>>();
+            let next = entries.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>();
+            prev != next
+        };
         self.entries = entries;
         self.on_navigate = on_navigate;
+        self.on_download = on_download;
+        self.on_upload = on_upload;
+        self.on_delete = on_delete;
         self.active_tab_id = Some(active_tab_id);
         self.context_menu = Some(context_menu);
         self.alert_controller = Some(alert_controller);
+        if tab_changed || entries_changed {
+            self.selected.clear();
+        }
     }
 }
 
@@ -191,9 +244,13 @@ impl Render for SftpPanel {
 
         let cwd = self.cwd.clone();
         let on_navigate = self.on_navigate.clone();
+        let on_download = self.on_download.clone();
+        let on_upload = self.on_upload.clone();
+        let on_delete = self.on_delete.clone();
         let path_input = self.path_input.clone();
         let context_menu = self.context_menu.clone();
         let alert_controller = self.alert_controller.clone();
+        let entity = _cx.entity().downgrade();
 
         // If the global context menu is no longer active, clear the
         // "menu-triggering entry" highlight.
@@ -207,6 +264,10 @@ impl Render for SftpPanel {
         }
         let context_menu_entry = self.context_menu_entry.clone();
         let hovered_entry = self.hovered_entry.clone();
+        // Snapshot the selection so the row closure can read membership
+        // without borrowing `self`. We rebuild this each render — same pattern
+        // as the other snapshot clones above.
+        let selected = self.selected.clone();
 
         div()
             .h_full()
@@ -228,6 +289,76 @@ impl Render for SftpPanel {
                     ),
                 )
             })
+            // Action button row: upload / download / refresh. Compact
+            // icon-only buttons that sit between the path bar and the
+            // listing. Upload opens a native file picker (multi-select) and
+            // uploads each chosen file into the current cwd. Download does
+            // the same for the multi-selection (re-using the context-menu
+            // batch flow). Refresh re-navigates to the current cwd to force
+            // a listing reload.
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .mb_1()
+                    .child(render_sftp_action_button(
+                        "sftp-upload-btn",
+                        "icons/upload.svg",
+                        t!("sftp.upload").to_string(),
+                        on_upload.is_some(),
+                        {
+                            let entity = entity.clone();
+                            let on_upload = on_upload.clone();
+                            let cwd = cwd.clone();
+                            move |_w, cx| {
+                                trigger_upload(
+                                    entity.clone(),
+                                    on_upload.as_ref(),
+                                    cwd.as_ref(),
+                                    cx,
+                                );
+                            }
+                        },
+                    ))
+                    .child(render_sftp_action_button(
+                        "sftp-download-btn",
+                        "icons/download.svg",
+                        t!("sftp.download").to_string(),
+                        on_download.is_some(),
+                        {
+                            let entity = entity.clone();
+                            let on_download = on_download.clone();
+                            let cwd = cwd.clone();
+                            move |_w, cx| {
+                                trigger_download_from_button(
+                                    entity.clone(),
+                                    on_download.as_ref(),
+                                    cwd.as_ref(),
+                                    cx,
+                                );
+                            }
+                        },
+                    ))
+                    .child(render_sftp_action_button(
+                        "sftp-refresh-btn",
+                        "icons/refresh-cw.svg",
+                        t!("sftp.refresh").to_string(),
+                        on_navigate.is_some(),
+                        {
+                            let on_navigate = on_navigate.clone();
+                            let cwd = cwd.clone();
+                            move |_w, cx| {
+                                let cb = on_navigate.as_ref();
+                                let cwd = cwd.as_ref();
+                                if let (Some(cb), Some(cwd)) = (cb, cwd) {
+                                    cb(cwd.as_str().to_string(), cx);
+                                }
+                            }
+                        },
+                    )),
+            )
             .child(
                 div()
                     .flex_1()
@@ -263,10 +394,12 @@ impl Render for SftpPanel {
                         };
 
                         let on_navigate = on_navigate.clone();
+                        let on_download = on_download.clone();
                         let context_menu = context_menu.clone();
                         let entity = _cx.entity().downgrade();
                         let is_hovered = hovered_entry.as_deref() == Some(name.as_str());
                         let force_highlight = context_menu_entry.as_deref() == Some(name.as_str());
+                        let is_selected = selected.contains(name.as_str()) && name != "..";
                         let is_highlighted = is_hovered || force_highlight;
                         let row_id = ElementId::Name(format!("sftp-{}", name).into());
                         let row_id_for_transition = row_id.clone();
@@ -280,62 +413,182 @@ impl Render for SftpPanel {
                             .px_2()
                             .py_1()
                             .rounded(px(4.0))
-                            .when(*is_dir, |el| {
-                                el.on_mouse_down(MouseButton::Left, {
-                                    let on_navigate = on_navigate.clone();
-                                    let target = target_path.clone();
-                                    move |event, _w, cx| {
-                                        if event.click_count == 2 {
-                                            if let Some(ref cb) = on_navigate {
-                                                cb(target.clone(), cx);
-                                            }
+                            // Left-click drives both navigation (double-click on
+                            // a dir) and multi-selection (cmd/ctrl-click on
+                            // any selectable row). `.` and `..` are excluded
+                            // from selection because they're navigation
+                            // helpers, not real entries.
+                            .on_mouse_down(MouseButton::Left, {
+                                let name = name.clone();
+                                let is_dir = *is_dir;
+                                let on_navigate = on_navigate.clone();
+                                let target = target_path.clone();
+                                let entity = entity.clone();
+                                move |event, _w, cx| {
+                                    // Double-click on a directory still
+                                    // navigates regardless of modifiers.
+                                    if is_dir && event.click_count == 2 {
+                                        if let Some(ref cb) = on_navigate {
+                                            cb(target.clone(), cx);
                                         }
+                                        return;
                                     }
-                                })
+                                    if name == ".." || name == "." {
+                                        return;
+                                    }
+                                    let _ = entity.update(cx, |view, cx| {
+                                        // `secondary` is cmd on macOS, ctrl
+                                        // elsewhere — the conventional
+                                        // "add to selection" modifier.
+                                        if event.modifiers.secondary() {
+                                            if view.selected.contains(name.as_str()) {
+                                                view.selected.remove(name.as_str());
+                                            } else {
+                                                view.selected.insert(name.clone());
+                                            }
+                                        } else {
+                                            view.selected.clear();
+                                            view.selected.insert(name.clone());
+                                        }
+                                        cx.notify();
+                                    });
+                                }
                             })
                             .on_mouse_down(MouseButton::Right, {
                                 let name = name.clone();
-                                let is_dir = *is_dir;
                                 let target_path = target_path.clone();
                                 let on_navigate = on_navigate.clone();
+                                let on_download = on_download.clone();
+                                let on_delete = on_delete.clone();
                                 let entity = entity.clone();
                                 let alert_controller = alert_controller.clone();
                                 move |event, _w, cx| {
                                     let Some(ref cm) = context_menu else {
                                         return;
                                     };
-                                    // Mark this entry as the menu-triggering
-                                    // entry so it keeps the hover background.
-                                    let _ = entity.update(cx, |view, cx| {
-                                        view.context_menu_entry = Some(name.clone());
-                                        cx.notify();
-                                    });
+                                    // Decide which entries this menu acts on.
+                                    // If the right-clicked row is already part
+                                    // of the multi-selection, the menu applies
+                                    // to the whole selection; otherwise the
+                                    // selection snaps to just this row (the
+                                    // standard Finder/Explorer behaviour).
                                     let pos = event.position;
-                                    let mut items = if is_dir {
-                                        vec![ContextMenuItem::new(t!("sftp.enter").to_string(), {
-                                            let target = target_path.clone();
-                                            let on_navigate = on_navigate.clone();
+                                    let menu_entries = entity
+                                        .update(cx, |view, cx| -> Vec<(String, bool, String)> {
+                                            if !view.selected.contains(name.as_str()) {
+                                                view.selected.clear();
+                                                if name != ".." && name != "." {
+                                                    view.selected.insert(name.clone());
+                                                }
+                                            }
+                                            // Mark this entry as the menu-
+                                            // triggering entry so it keeps the
+                                            // hover background.
+                                            view.context_menu_entry = Some(name.clone());
+                                            cx.notify();
+                                            // Build the list of (name, is_dir,
+                                            // remote_path) the menu will act
+                                            // on. We resolve from the current
+                                            // listing so the paths are fresh.
+                                            let cwd_str = view
+                                                .cwd
+                                                .as_ref()
+                                                .map(|s| s.as_str())
+                                                .unwrap_or("/");
+                                            view.entries
+                                                .iter()
+                                                .filter(|(n, _)| {
+                                                    n != "."
+                                                        && n != ".."
+                                                        && view.selected.contains(n.as_str())
+                                                })
+                                                .map(|(n, d)| {
+                                                    let p = if cwd_str.ends_with('/') {
+                                                        format!("{}{}", cwd_str, n)
+                                                    } else {
+                                                        format!("{}/{}", cwd_str, n)
+                                                    };
+                                                    (n.clone(), *d, p)
+                                                })
+                                                .collect()
+                                        })
+                                        .unwrap_or_default();
+
+                                    // Build the menu items. The rules:
+                                    //   - A single directory selected → prepend "Enter"
+                                    //     (navigate into it).
+                                    //   - One or more selectable entries → "Download"
+                                    //     (or "Download (N)" for multi-select).
+                                    //   - Right-click on `..` with no selection →
+                                    //     just "Enter" to navigate to parent.
+                                    let mut items: Vec<ContextMenuItem> = Vec::new();
+
+                                    // "Enter" (navigate) — only when exactly one
+                                    // directory is selected.
+                                    if menu_entries.len() == 1 && menu_entries[0].1 {
+                                        let target = menu_entries[0].2.clone();
+                                        let on_navigate = on_navigate.clone();
+                                        items.push(ContextMenuItem::new(
+                                            t!("sftp.enter").to_string(),
                                             move |_w, cx| {
                                                 if let Some(ref cb) = on_navigate {
                                                     cb(target.clone(), cx);
                                                 }
+                                            },
+                                        ));
+                                    }
+
+                                    // "Download" — available whenever there's at
+                                    // least one selectable entry. The backend's
+                                    // `sftp_download` dispatches between file
+                                    // and directory downloads internally (via
+                                    // `stat`), so we don't branch on `is_dir`.
+                                    if !menu_entries.is_empty() {
+                                        let count = menu_entries.len();
+                                        let label = if count == 1 {
+                                            t!("sftp.download").to_string()
+                                        } else {
+                                            t!("sftp.download_n", count = count).to_string()
+                                        };
+                                        let to_download = menu_entries.clone();
+                                        let on_download = on_download.clone();
+                                        let entity_for_clear = entity.clone();
+                                        items.push(ContextMenuItem::new(label, move |_w, cx| {
+                                            if to_download.is_empty() {
+                                                return;
                                             }
-                                        })]
-                                    } else {
-                                        vec![ContextMenuItem::new(
-                                            t!("sftp.download").to_string(),
-                                            {
-                                                let name = name.clone();
-                                                move |_w, _cx| {
-                                                    // TODO: wire actual SFTP
-                                                    // download once the backend
-                                                    // exposes a read_file API
-                                                    // to the UI.
-                                                    eprintln!("SFTP download requested: {}", name);
+                                            // Clear the multi-selection once the
+                                            // download is dispatched — the user
+                                            // has committed to the batch and
+                                            // lingering highlights would just
+                                            // obscure the next interaction.
+                                            let _ = entity_for_clear.update(cx, |view, cx| {
+                                                view.selected.clear();
+                                                cx.notify();
+                                            });
+                                            trigger_batch_download(
+                                                to_download.clone(),
+                                                on_download.as_ref(),
+                                                cx,
+                                            );
+                                        }));
+                                    }
+
+                                    // Fallback: right-click on `..` (or `.`)
+                                    // with no selectable entries — offer
+                                    // navigation only.
+                                    if items.is_empty() {
+                                        let target = target_path.clone();
+                                        let on_navigate = on_navigate.clone();
+                                        items.push(ContextMenuItem::new(
+                                            t!("sftp.enter").to_string(),
+                                            move |_w, cx| {
+                                                if let Some(ref cb) = on_navigate {
+                                                    cb(target.clone(), cx);
                                                 }
                                             },
-                                        )]
-                                    };
+                                        ));
+                                    }
                                     // Add a "Delete" item for everything
                                     // except the ".." parent-navigation entry.
                                     if name != ".." {
@@ -344,32 +597,68 @@ impl Render for SftpPanel {
                                                 let alert_controller = alert_controller.clone();
                                                 let name = name.clone();
                                                 let target_path = target_path.clone();
+                                                let on_delete = on_delete.clone();
+                                                let entity_for_clear = entity.clone();
                                                 move |_w, cx| {
                                                     let Some(ref ac) = alert_controller else {
                                                         return;
                                                     };
                                                     let target_path = target_path.clone();
+                                                    let on_delete = on_delete.clone();
+                                                    let entity_for_clear = entity_for_clear.clone();
                                                     ac.update(cx, |c, cx| {
                                                         c.show(
                                                             AlertState {
                                                                 severity: AlertSeverity::Danger,
-                                                                title: t!("sftp.delete_title").to_string().into(),
+                                                                title: t!("sftp.delete_title")
+                                                                    .to_string()
+                                                                    .into(),
                                                                 description: Some(
-                                                                    t!("sftp.delete_prompt", name = name.as_str())
-                                                                        .to_string()
-                                                                        .into(),
+                                                                    t!(
+                                                                        "sftp.delete_prompt",
+                                                                        name = name.as_str()
+                                                                    )
+                                                                    .to_string()
+                                                                    .into(),
                                                                 ),
-                                                                confirm_label: t!("sftp.delete_confirm").to_string().into(),
-                                                                cancel_label: t!("terminal.host_key_cancel").to_string().into(),
-                                                                on_confirm: Some(Rc::new(move |_w, _cx| {
-                                                                    // TODO: wire actual SFTP delete
-                                                                    // (remove_file / remove_dir) once
-                                                                    // the backend exposes it to the UI.
-                                                                    eprintln!(
-                                                                        "SFTP delete confirmed: {}",
-                                                                        target_path
-                                                                    );
-                                                                })),
+                                                                confirm_label: t!(
+                                                                    "sftp.delete_confirm"
+                                                                )
+                                                                .to_string()
+                                                                .into(),
+                                                                cancel_label: t!(
+                                                                    "terminal.host_key_cancel"
+                                                                )
+                                                                .to_string()
+                                                                .into(),
+                                                                on_confirm: Some(Rc::new(
+                                                                    move |_w, cx| {
+                                                                        // Dispatch the actual delete. The
+                                                                        // backend stats the path to decide
+                                                                        // between remove_file / remove_dir.
+                                                                        if let Some(ref cb) =
+                                                                            on_delete
+                                                                        {
+                                                                            cb(
+                                                                                target_path.clone(),
+                                                                                cx,
+                                                                            );
+                                                                        }
+                                                                        // Clear the selection so the
+                                                                        // deleted row's highlight doesn't
+                                                                        // linger — the listing will refresh
+                                                                        // when the backend re-reads the dir.
+                                                                        let _ = entity_for_clear
+                                                                            .update(
+                                                                                cx,
+                                                                                |view, cx| {
+                                                                                    view.selected
+                                                                                        .clear();
+                                                                                    cx.notify();
+                                                                                },
+                                                                            );
+                                                                    },
+                                                                )),
                                                                 ..AlertState::default()
                                                             },
                                                             cx,
@@ -419,6 +708,29 @@ impl Render for SftpPanel {
                                 |el| el.bg(rgba((SURFACE_HOVER << 8) | 0xFF)),
                                 |el| el.bg(rgba((SURFACE_HOVER << 8) | 0x00)),
                             )
+                            // Selected rows get a persistent blue accent bar
+                            // on the left edge plus a subtle blue tint so the
+                            // selection reads even when not hovered. We render
+                            // this as an absolutely-positioned stripe inside
+                            // the row so it doesn't affect the flex layout.
+                            // The tint is applied only when not highlighted so
+                            // the hover/menu colour takes precedence visually
+                            // when the user is interacting with the row.
+                            .when(is_selected, |el| {
+                                el.relative().child(
+                                    div()
+                                        .absolute()
+                                        .top(px(2.0))
+                                        .bottom(px(2.0))
+                                        .left_0()
+                                        .w(px(2.0))
+                                        .rounded(px(1.0))
+                                        .bg(rgb(BTN_PRIMARY_BG)),
+                                )
+                            })
+                            .when(is_selected && !is_highlighted, |el| {
+                                el.bg(rgba(INPUT_SELECTION))
+                            })
                             .child(
                                 svg()
                                     .path(icon_path)
@@ -437,4 +749,256 @@ impl Render for SftpPanel {
                     })),
             )
     }
+}
+
+// ---------------------------------------------------------------------------
+// Batch download orchestration
+// ---------------------------------------------------------------------------
+
+/// Drive a batch SFTP download.
+///
+/// `entries` is a list of `(name, is_dir, remote_path)` tuples representing
+/// the items the user wants to fetch. A single native folder-picker is shown
+/// (so the user isn't prompted once per file); once a destination is chosen,
+/// each entry is downloaded into it via the `on_download` callback, which
+/// routes to the active terminal's backend (`SshBackend::sftp_download`).
+///
+/// The backend already dispatches between single-file and directory downloads
+/// internally (via `stat`), so we don't need to branch on `is_dir` here — it's
+/// only carried along for potential future per-item UI (e.g. a transfer
+/// queue).
+///
+/// Cancellation is silent: if the user dismisses the picker, nothing is
+/// downloaded and no error is surfaced.
+fn trigger_batch_download(
+    entries: Vec<(String, bool, String)>,
+    on_download: Option<&Rc<dyn Fn(String, String, &mut App)>>,
+    cx: &mut App,
+) {
+    let Some(on_download) = on_download else {
+        return;
+    };
+    let on_download = on_download.clone();
+
+    // Show a single folder picker for the whole batch. We pick directories
+    // only (not files) because we're choosing a destination folder, and we
+    // disable multi-select since one destination is enough.
+    let rx = cx.prompt_for_paths(PathPromptOptions {
+        files: false,
+        directories: true,
+        multiple: false,
+        prompt: Some(t!("sftp.download_prompt").to_string().into()),
+    });
+
+    cx.spawn(async move |cx| {
+        // `oneshot::Receiver` is itself a `Future` — awaiting it yields
+        // `Result<T, Canceled>`, where `T` is the platform's
+        // `Result<Option<Vec<PathBuf>>>` (outer = platform error, inner =
+        // user cancellation as `None`).
+        let picked = match rx.await {
+            Ok(Ok(Some(mut paths))) => paths.pop(),
+            Ok(Ok(None)) => {
+                tracing::info!("SFTP download: user cancelled folder picker");
+                None
+            }
+            Ok(Err(e)) => {
+                tracing::warn!("SFTP download: folder picker error: {e}");
+                None
+            }
+            Err(e) => {
+                tracing::warn!("SFTP download: picker channel closed: {e}");
+                None
+            }
+        };
+        let Some(dest_dir) = picked else {
+            // User cancelled or picker failed — nothing to do.
+            return;
+        };
+        tracing::info!(
+            "SFTP download: dest dir = {}, {} entr{} to fetch",
+            dest_dir.display(),
+            entries.len(),
+            if entries.len() == 1 { "y" } else { "ies" }
+        );
+
+        // Iterate the chosen entries and dispatch each download. We do this
+        // inside a single `update` so the callback invocations share one main-
+        // thread turn rather than bouncing back to the executor per item.
+        let _ = cx.update(|cx| {
+            for (name, _is_dir, remote_path) in &entries {
+                // Local filename = the entry's basename. We deliberately don't
+                // recreate the remote directory hierarchy under `dest_dir` —
+                // a flat dump matches what a typical SFTP client does for a
+                // multi-selection download.
+                let local_path = dest_dir.join(name);
+                tracing::info!(
+                    "SFTP download: dispatching remote={remote_path} -> local={}",
+                    local_path.display()
+                );
+                on_download(
+                    remote_path.clone(),
+                    local_path.to_string_lossy().into_owned(),
+                    cx,
+                );
+            }
+        });
+    })
+    .detach();
+}
+
+// ---------------------------------------------------------------------------
+// Action button row (upload / download / refresh)
+// ---------------------------------------------------------------------------
+
+/// Render a compact icon-only action button for the SFTP toolbar. Uses the
+/// ghost-button colour scheme (transparent bg, subtle hover) so the row reads
+/// as a thin toolbar rather than three prominent buttons.
+///
+/// `enabled = false` dims the icon and disables the click handler — used when
+/// the corresponding backend callback isn't wired (e.g. no active terminal).
+fn render_sftp_action_button(
+    id: &'static str,
+    icon: &'static str,
+    tooltip: String,
+    enabled: bool,
+    on_click: impl Fn(&mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let color = if enabled { TEXT_MUTED } else { 0x45475a };
+    let hover_bg = rgba((SURFACE_HOVER << 8) | 0xFF);
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(24.0))
+        .rounded(px(4.0))
+        .when(enabled, |el| {
+            el.cursor_pointer().hover(move |s| s.bg(hover_bg))
+        })
+        .when(!enabled, |el| el.cursor_not_allowed())
+        .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tooltip.clone()).build(w, cx))
+        .when(enabled, |el| {
+            el.on_click(move |_e, w, cx| {
+                on_click(w, cx);
+                cx.stop_propagation();
+            })
+        })
+        .child(svg().path(icon).size(px(14.0)).text_color(rgb(color)))
+}
+
+/// Upload button handler: open a native multi-select file picker and upload
+/// each chosen file into the current remote cwd. Mirrors
+/// [`trigger_batch_download`] but in the opposite direction.
+///
+/// Cancellation is silent: dismissing the picker uploads nothing.
+fn trigger_upload(
+    entity: WeakEntity<SftpPanel>,
+    on_upload: Option<&Rc<dyn Fn(String, String, &mut App)>>,
+    cwd: Option<&Arc<String>>,
+    cx: &mut App,
+) {
+    let Some(on_upload) = on_upload else {
+        return;
+    };
+    let on_upload = on_upload.clone();
+    let Some(cwd) = cwd else {
+        return;
+    };
+    let cwd = cwd.as_str().to_string();
+
+    // Multi-select picker allowing both files and directories. The backend's
+    // `sftp_upload` stats each path and dispatches to the file or directory
+    // upload flow accordingly — directories get tar+gz'd locally, uploaded,
+    // then extracted remotely via `tar xzf`.
+    let rx = cx.prompt_for_paths(PathPromptOptions {
+        files: true,
+        directories: true,
+        multiple: true,
+        prompt: Some(t!("sftp.upload_prompt").to_string().into()),
+    });
+
+    cx.spawn(async move |cx| {
+        let picked = match rx.await {
+            Ok(Ok(Some(paths))) => Some(paths),
+            Ok(Ok(None)) => None,
+            Ok(Err(e)) => {
+                #[cfg(debug_assertions)]
+                tracing::warn!("SFTP upload: file picker error: {e}");
+                None
+            }
+            Err(e) => {
+                #[cfg(debug_assertions)]
+                tracing::warn!("SFTP upload: picker channel closed: {e}");
+                None
+            }
+        };
+        let Some(paths) = picked else {
+            return;
+        };
+        if paths.is_empty() {
+            return;
+        }
+
+        // Clear the multi-selection so the upload doesn't look like it's
+        // acting on the highlighted rows.
+        let _ = entity.update(cx, |view, cx| {
+            view.selected.clear();
+            cx.notify();
+        });
+
+        let _ = cx.update(|cx| {
+            for local in &paths {
+                let name = local
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| local.to_string_lossy().into_owned());
+                let remote = if cwd.ends_with('/') {
+                    format!("{}{}", cwd, name)
+                } else {
+                    format!("{}/{}", cwd, name)
+                };
+                on_upload(local.to_string_lossy().into_owned(), remote, cx);
+            }
+        });
+    })
+    .detach();
+}
+
+/// Download button handler: collect the current multi-selection (or, if none,
+/// do nothing — the user must select entries first) and run the same batch
+/// download flow as the context menu. Re-uses [`trigger_batch_download`] so
+/// behaviour stays consistent between the two entry points.
+fn trigger_download_from_button(
+    entity: WeakEntity<SftpPanel>,
+    on_download: Option<&Rc<dyn Fn(String, String, &mut App)>>,
+    cwd: Option<&Arc<String>>,
+    cx: &mut App,
+) {
+    // Read the current selection + cwd + entries from the panel so we can
+    // resolve remote paths. If nothing is selected, bail silently — the
+    // toolbar button is a convenience for acting on an existing selection,
+    // not a replacement for the right-click flow.
+    let entries = entity.read_with(cx, |view, _cx| {
+        let cwd_str = view.cwd.as_ref().map(|s| s.as_str()).unwrap_or("/");
+        view.entries
+            .iter()
+            .filter(|(n, _)| n != "." && n != ".." && view.selected.contains(n.as_str()))
+            .map(|(n, d)| {
+                let p = if cwd_str.ends_with('/') {
+                    format!("{}{}", cwd_str, n)
+                } else {
+                    format!("{}/{}", cwd_str, n)
+                };
+                (n.clone(), *d, p)
+            })
+            .collect::<Vec<_>>()
+    });
+    let Ok(entries) = entries else {
+        return;
+    };
+    if entries.is_empty() {
+        return;
+    }
+    let _ = cwd; // cwd is read from the entity above to stay fresh
+    trigger_batch_download(entries, on_download, cx);
 }
