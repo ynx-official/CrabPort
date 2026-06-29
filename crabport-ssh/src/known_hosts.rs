@@ -1,0 +1,194 @@
+//! Persistent `known_hosts` store for SSH host-key verification (TOFU).
+//!
+//! # File layout
+//!
+//! ```text
+//! {data_dir}/crabport/known_hosts
+//! ```
+//!
+//! Each line is tab-separated:
+//!
+//! ```text
+//! <host>\t<port>\t<algo>\t<fingerprint>
+//! ```
+//!
+//! - `host` is the hostname or IP literal as given by the user (no
+//!   bracketing, no surrounding whitespace).
+//! - `port` is the SSH port.
+//! - `algo` is `russh::keys::key::PublicKey::name()`, e.g. `ssh-ed25519`.
+//! - `fingerprint` is the SHA-256 base64 fingerprint from
+//!   `russh::keys::key::PublicKey::fingerprint()`.
+//!
+//! The file is rewritten atomically on each successful new entry. It is
+//! intentionally line-oriented and grep-friendly so it can be inspected
+//! or edited by hand.
+
+use std::collections::HashSet;
+use std::fs;
+use std::io::Write;
+use std::path::PathBuf;
+
+/// A single known_hosts entry.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct KnownHost {
+    pub host: String,
+    pub port: u16,
+    pub algo: String,
+    pub fingerprint: String,
+}
+
+impl KnownHost {
+    /// Serialize to a single line (without trailing newline).
+    pub fn to_line(&self) -> String {
+        format!(
+            "{}\t{}\t{}\t{}",
+            self.host, self.port, self.algo, self.fingerprint
+        )
+    }
+
+    /// Parse a single line. Returns `None` on malformed input.
+    pub fn from_line(line: &str) -> Option<Self> {
+        let mut parts = line.split('\t');
+        let host = parts.next()?.trim().to_string();
+        let port: u16 = parts.next()?.trim().parse().ok()?;
+        let algo = parts.next()?.trim().to_string();
+        let fingerprint = parts.next()?.trim().to_string();
+        if host.is_empty() || algo.is_empty() || fingerprint.is_empty() {
+            return None;
+        }
+        Some(Self {
+            host,
+            port,
+            algo,
+            fingerprint,
+        })
+    }
+}
+
+/// Result of looking up a host key in the store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LookupResult {
+    /// No entry for this `host:port` exists yet — the caller should ask
+    /// the user whether to trust this key (TOFU).
+    NotFound,
+    /// An entry exists and its fingerprint matches the presented key.
+    Matched,
+    /// An entry exists but the fingerprint differs from the presented
+    /// key — a likely man-in-the-middle attack. The caller MUST refuse
+    /// to connect.
+    Mismatched {
+        expected_algo: String,
+        expected_fingerprint: String,
+    },
+}
+
+/// Persistent known_hosts store backed by a plain text file.
+pub struct KnownHosts {
+    path: PathBuf,
+}
+
+impl KnownHosts {
+    /// Open (or lazily create) the store at the platform data directory.
+    pub fn open() -> std::io::Result<Self> {
+        let dir = default_data_dir()?;
+        fs::create_dir_all(&dir)?;
+        Ok(Self {
+            path: dir.join("known_hosts"),
+        })
+    }
+
+    /// Open at an explicit path (mainly for tests).
+    pub fn open_at(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    /// Read all entries currently in the file.
+    fn read_all(&self) -> std::io::Result<HashSet<KnownHost>> {
+        let mut set = HashSet::new();
+        let Ok(contents) = fs::read_to_string(&self.path) else {
+            // Missing file == empty store.
+            return Ok(set);
+        };
+        for line in contents.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some(entry) = KnownHost::from_line(line) {
+                set.insert(entry);
+            }
+        }
+        Ok(set)
+    }
+
+    /// Look up the presented key for `host:port`.
+    pub fn lookup(
+        &self,
+        host: &str,
+        port: u16,
+        algo: &str,
+        fingerprint: &str,
+    ) -> std::io::Result<LookupResult> {
+        let all = self.read_all()?;
+        // Match any entry for this host:port (we may have more than one
+        // if the server rotated keys across algorithms).
+        let mut found = false;
+        for entry in &all {
+            if entry.host == host && entry.port == port {
+                found = true;
+                if entry.algo == algo && entry.fingerprint == fingerprint {
+                    return Ok(LookupResult::Matched);
+                }
+            }
+        }
+        if found {
+            // We have an entry for this host:port but none matched the
+            // presented (algo, fingerprint). Report the first stored one
+            // as the "expected" value for diagnostics.
+            let expected = all
+                .iter()
+                .find(|e| e.host == host && e.port == port)
+                .expect("found == true implies an entry exists");
+            Ok(LookupResult::Mismatched {
+                expected_algo: expected.algo.clone(),
+                expected_fingerprint: expected.fingerprint.clone(),
+            })
+        } else {
+            Ok(LookupResult::NotFound)
+        }
+    }
+
+    /// Persist a new trusted entry. Rewrites the file atomically.
+    pub fn add(&self, entry: &KnownHost) -> std::io::Result<()> {
+        let mut all = self.read_all()?;
+        all.insert(entry.clone());
+
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let tmp = self.path.with_extension("tmp");
+        {
+            let mut f = fs::File::create(&tmp)?;
+            writeln!(
+                f,
+                "# CrabPort known_hosts — do not edit while the app is running"
+            )?;
+            // Sort for deterministic output.
+            let mut lines: Vec<String> = all.iter().map(|e| e.to_line()).collect();
+            lines.sort();
+            for line in lines {
+                writeln!(f, "{line}")?;
+            }
+            f.sync_all()?;
+        }
+        fs::rename(&tmp, &self.path)?;
+        Ok(())
+    }
+}
+
+fn default_data_dir() -> std::io::Result<PathBuf> {
+    let base = dirs::data_dir()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "data dir"))?;
+    Ok(base.join("crabport"))
+}

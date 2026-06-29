@@ -7,6 +7,7 @@ use rust_i18n::t;
 
 use crate::color::*;
 use crate::components::button::Button;
+use crate::components::dialog::AlertController;
 use crate::layouts::command_palette::{CommandView, ConnectionType};
 use crate::layouts::connection_form::{AuthKind, ConnectionFormState, ConnectionKind};
 use crate::layouts::sidebar::render_sidebar;
@@ -55,6 +56,10 @@ pub struct CrabportApp {
     pub command_palette: Entity<CommandView>,
     pub sftp_panel: Entity<crate::views::panel::sftp::SftpPanel>,
     pub hosts_view: Entity<crate::views::hosts::HostsView>,
+    /// Global alert dialog host. Rendered at the app root so it overlays the
+    /// entire window regardless of which view is active. Triggered via
+    /// `alert_controller.update(cx, |c, cx| c.show(state, cx))`.
+    pub alert_controller: Entity<AlertController>,
     store: Store,
     wired: bool,
     /// Tab id that currently holds focus. Used to focus the terminal only on
@@ -114,6 +119,7 @@ impl CrabportApp {
         let sftp_panel = cx.new(|_cx| crate::views::panel::sftp::SftpPanel::new());
         let app_entity = cx.entity();
         let hosts_view = cx.new(|_cx| crate::views::hosts::HostsView::new(app_entity));
+        let alert_controller = cx.new(|_cx| AlertController::new());
 
         // Open store and load persisted data
         let store = Store::open().expect("failed to open store");
@@ -150,6 +156,7 @@ impl CrabportApp {
             command_palette,
             sftp_panel,
             hosts_view,
+            alert_controller,
             store,
             wired: false,
             last_focused_tab_id: None,
@@ -458,6 +465,13 @@ impl CrabportApp {
             ));
         let overlay_cb = overlay.clone();
 
+        // Host-key verifier: pushes a confirmation prompt into the overlay
+        // when the server presents an unknown key, and awaits the user's
+        // decision (TOFU). See `make_host_key_verifier` for the repaint
+        // mechanism.
+        let verifier =
+            crate::views::terminal::connection_overlay::make_host_key_verifier(overlay.clone());
+
         let backend = Arc::new(SshBackend::new(
             info,
             cols as u16,
@@ -468,6 +482,7 @@ impl CrabportApp {
                     msg,
                 );
             }),
+            Some(verifier),
         ));
         let terminal_view = cx.new(|cx| {
             TerminalView::with_backend_and_host_and_overlay(
@@ -812,6 +827,7 @@ impl Render for CrabportApp {
             self.connection_form.as_ref(),
             &self.sftp_panel,
             &self.hosts_view,
+            &self.alert_controller,
             _window,
             cx,
         );
@@ -844,5 +860,7 @@ impl Render for CrabportApp {
             .child(content)
             // -- Command palette --
             .child(self.command_palette.clone())
+            // -- Global alert dialog (host-key prompts, etc.) --
+            .child(self.alert_controller.clone())
     }
 }

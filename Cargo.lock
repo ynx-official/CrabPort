@@ -1317,6 +1317,7 @@ dependencies = [
  "async-trait",
  "crabport-sftp",
  "crabport-terminal",
+ "dirs 6.0.0",
  "parking_lot",
  "russh",
  "smol",
@@ -1366,6 +1367,7 @@ dependencies = [
  "rust-i18n 4.1.0",
  "rustc-hash 2.1.2",
  "smol",
+ "tokio",
  "tracing",
 ]
 

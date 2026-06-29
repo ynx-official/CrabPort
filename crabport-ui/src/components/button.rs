@@ -19,6 +19,11 @@ pub struct Button {
     selected: Option<bool>,
     disabled: Option<bool>,
     centered: bool,
+    /// When true, the content area allows text to wrap across multiple
+    /// lines instead of being clamped to a single line with an ellipsis.
+    /// Useful for buttons whose label is longer than the button width
+    /// (e.g. the host-key confirmation buttons in the connection overlay).
+    multiline: bool,
     // Colors
     bg: u32,
     bg_hover: u32,
@@ -53,6 +58,7 @@ impl Button {
             selected: None,
             disabled: None,
             centered: false,
+            multiline: false,
             bg: BTN_BG,
             bg_hover: BTN_BG_HOVER,
             bg_selected: BTN_BG_SELECTED,
@@ -170,6 +176,18 @@ impl Button {
         self
     }
 
+    /// Allow the button's text content to wrap across multiple lines.
+    ///
+    /// By default the content area is `whitespace_nowrap` + `text_ellipsis`,
+    /// so a long label is truncated to a single line. Enabling multiline
+    /// swaps that for `whitespace_normal` and drops the ellipsis so the
+    /// label wraps inside the button's width. Pair with an explicit height
+    /// (e.g. `.h_10()`) tall enough to fit two lines.
+    pub fn multiline(mut self, multiline: bool) -> Self {
+        self.multiline = multiline;
+        self
+    }
+
     /// Clean up all gpui-animation state associated with this Button.
     /// Call this when the Button is removed from the render tree
     /// (e.g. when closing a tab) to prevent stale hover/transition state
@@ -219,6 +237,8 @@ impl RenderOnce for Button {
             .bg(to_color(bg));
         root.style().refine(&self.style);
 
+        let multiline = self.multiline;
+
         // Icon
         let icon_el = self.icon.map(|path| {
             svg()
@@ -231,13 +251,21 @@ impl RenderOnce for Button {
 
         // Content area
         let mut content = div()
-            .flex()
             .items_center()
             .gap_2()
             .min_w_0()
             .overflow_hidden()
-            .text_ellipsis()
-            .whitespace_nowrap();
+            .when_else(
+                multiline,
+                |this| {
+                    // Multiline: use a column layout with full width so the
+                    // text node is constrained to the button's content box
+                    // and actually wraps. `whitespace_normal` only takes
+                    // effect when the text element has a bounded width.
+                    this.flex_col().w_full().whitespace_normal().text_center()
+                },
+                |this| this.flex().text_ellipsis().whitespace_nowrap(),
+            );
 
         if has_close {
             content = content.flex_1();

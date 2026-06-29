@@ -1,12 +1,15 @@
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_animation::{animation::TransitionExt, transition::general::EaseInOutCubic};
 use parking_lot::Mutex;
 use rust_i18n::t;
+use tokio::sync::oneshot;
 
+use crabport_ssh::backend::{HostKeyInfo, HostKeyVerifier};
 use crabport_terminal::terminal::RemoteStatus;
 
 use crate::components::button::Button;
@@ -59,6 +62,34 @@ pub struct ConnectionOverlayState {
     pub fade_out_started: bool,
     /// Whether the overlay should be completely hidden after fade-out.
     pub hidden: bool,
+    /// A pending host-key verification prompt. While `Some`, the overlay
+    /// renders a confirmation dialog instead of the usual connecting /
+    /// connected view. The `oneshot::Sender` resolves the verifier future
+    /// that the SSH backend is awaiting in `check_server_key`.
+    pub pending_host_key: Option<PendingHostKey>,
+    /// Set to `true` whenever the overlay state changes from a non-gpui
+    /// thread (e.g. the SSH backend pushing a host-key prompt). The
+    /// `TerminalView` frame pump polls this and folds it into its own
+    /// `needs_repaint` flag — that way we get a repaint without needing
+    /// an `AsyncApp` (which is not `Send`) inside the verifier closure.
+    pub dirty: Arc<AtomicBool>,
+}
+
+/// A pending host-key confirmation request from the SSH backend.
+pub struct PendingHostKey {
+    pub info: HostKeyInfo,
+    /// `Some(true)` => trust & continue, `Some(false)` => abort.
+    /// `None` (dropped sender) is treated as abort.
+    pub responder: Option<oneshot::Sender<bool>>,
+}
+
+impl PendingHostKey {
+    /// Resolve the prompt. Returns `true` if the backend will continue.
+    pub fn resolve(&mut self, accept: bool) {
+        if let Some(tx) = self.responder.take() {
+            let _ = tx.send(accept);
+        }
+    }
 }
 
 impl ConnectionOverlayState {
@@ -68,6 +99,8 @@ impl ConnectionOverlayState {
             status: RemoteStatus::Connecting,
             fade_out_started: false,
             hidden: false,
+            pending_host_key: None,
+            dirty: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -90,6 +123,10 @@ impl ConnectionOverlayState {
                 self.fade_out_started = false;
                 self.hidden = false;
                 self.logs.clear();
+                // Abort any pending host-key prompt from the previous attempt.
+                if let Some(mut p) = self.pending_host_key.take() {
+                    p.resolve(false);
+                }
                 self.log(
                     ConnectionLogLevel::Info,
                     format!("Connecting to {}...", host),
@@ -115,7 +152,7 @@ impl ConnectionOverlayState {
 
     /// Returns `true` when the overlay should be rendered.
     pub fn is_visible(&self) -> bool {
-        !self.hidden
+        !self.hidden || self.pending_host_key.is_some()
     }
 
     /// Returns `true` when the fade-out overlay (successful connection) should be rendered.
@@ -131,6 +168,88 @@ impl ConnectionOverlayState {
 
 /// Shared wrapper so background tasks and the render method can both access it.
 pub type SharedOverlayState = Arc<Mutex<ConnectionOverlayState>>;
+
+/// Build the [`HostKeyVerifier`] closure that the SSH backend calls inside
+/// `check_server_key`.
+///
+/// The closure stashes a [`PendingHostKey`] (containing a `oneshot::Sender`)
+/// into the shared overlay state so the render method can show a confirm
+/// dialog, then awaits the matching receiver.
+///
+/// # Repaint
+///
+/// The verifier runs on the SSH backend's tokio runtime, but the overlay is
+/// rendered by the gpui foreground. We can't capture an `AsyncApp` here (it
+/// is not `Send`), so instead we set the overlay's `dirty` flag — the
+/// `TerminalView` frame pump polls it (alongside its own `needs_repaint`)
+/// and triggers a `cx.notify()`, which makes the dialog appear promptly.
+pub fn make_host_key_verifier(overlay: SharedOverlayState) -> HostKeyVerifier {
+    Arc::new(move |info: HostKeyInfo| {
+        let (tx, rx) = oneshot::channel::<bool>();
+        let dirty;
+        {
+            let mut ov = overlay.lock();
+            // Abort any previous (shouldn't happen) prompt and install the new one.
+            if let Some(mut p) = ov.pending_host_key.take() {
+                p.resolve(false);
+            }
+            ov.pending_host_key = Some(PendingHostKey {
+                info,
+                responder: Some(tx),
+            });
+            dirty = ov.dirty.clone();
+        }
+        // Signal the terminal frame pump to repaint so the dialog shows up.
+        dirty.store(true, Ordering::Release);
+        Box::pin(async move { rx.await.unwrap_or(false) })
+    })
+}
+
+/// Build an [`AlertState`] for the host-key confirmation prompt backed by the
+/// given pending prompt.
+///
+/// `on_confirm` / `on_cancel` receive `(&mut Window, &mut App)` (matching
+/// [`crate::components::dialog::AlertState`]) and are expected to resolve the
+/// pending prompt via [`PendingHostKey::resolve`] — typically the caller
+/// wires them to `this.overlay.lock().pending_host_key.take()`.
+pub fn host_key_alert_state(
+    info: &HostKeyInfo,
+    on_confirm: Option<Rc<dyn Fn(&mut Window, &mut App) + 'static>>,
+    on_cancel: Option<Rc<dyn Fn(&mut Window, &mut App) + 'static>>,
+) -> crate::components::dialog::AlertState {
+    use crate::components::dialog::{AlertSeverity, AlertState};
+
+    let host_port = if info.port == 22 {
+        info.host.clone()
+    } else {
+        format!("{}:{}", info.host, info.port)
+    };
+
+    AlertState {
+        open: true,
+        severity: AlertSeverity::Warning,
+        title: t!("terminal.host_key_unknown").into(),
+        description: Some(
+            t!("terminal.host_key_prompt", host = host_port.as_str())
+                .to_string()
+                .into(),
+        ),
+        details: vec![
+            (
+                t!("terminal.host_key_algo").to_string().into(),
+                info.algo.clone().into(),
+            ),
+            (
+                t!("terminal.host_key_fingerprint").to_string().into(),
+                info.fingerprint.clone().into(),
+            ),
+        ],
+        confirm_label: t!("terminal.host_key_accept").to_string().into(),
+        cancel_label: t!("terminal.host_key_cancel").to_string().into(),
+        on_confirm,
+        on_cancel,
+    }
+}
 
 // ---- Connection Overlay Rendering ----
 
@@ -220,6 +339,7 @@ pub(crate) fn render_connection_overlay(
                 .when(status == RemoteStatus::Disconnected, |el| {
                     let mut btn =
                         Button::new(ElementId::Name(format!("reconnect-btn-{}", count).into()))
+                            .h_10()
                             .centered(true)
                             .child(t!("terminal.reconnect").to_string());
                     if let Some(cb) = on_reconnect {

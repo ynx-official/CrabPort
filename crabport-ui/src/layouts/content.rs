@@ -2,9 +2,11 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use gpui::*;
+use rust_i18n::t;
 
 use crate::app::{CrabportApp, SidebarItem, Tab, TabKind};
 use crate::color::*;
+use crate::components::dialog::{AlertController, AlertSeverity, AlertState};
 use crate::layouts::connection_form::ConnectionFormState;
 use crate::layouts::panel::render_panel;
 use crate::layouts::tabbar::render_tab_bar;
@@ -24,6 +26,7 @@ pub fn render_content(
     form_entity: Option<&ConnectionFormState>,
     sftp_panel: &Entity<SftpPanel>,
     hosts_view: &Entity<HostsView>,
+    alert_controller: &Entity<AlertController>,
     window: &mut Window,
     cx: &mut App,
 ) -> Div {
@@ -205,6 +208,74 @@ pub fn render_content(
             cx,
         );
     });
+
+    // ---- Host-key prompt ----
+    //
+    // If the active terminal view has a pending host-key prompt (pushed by
+    // the SSH backend's `check_server_key` via the verifier), surface it via
+    // the global `AlertController`. We only trigger when the controller is
+    // idle so we don't re-spawn the dialog on every render while it's
+    // already showing — the overlay retains the `PendingHostKey` until the
+    // user resolves it (the alert's confirm/cancel callbacks call
+    // `TerminalView::resolve_pending_host_key`).
+    if is_terminal {
+        if let Some(terminal_entity) = active_tab.and_then(|tab| terminal_views.get(&tab.id)) {
+            let pending = terminal_entity.read_with(cx, |view, _| view.pending_host_key_info());
+            if let Some(info) = pending {
+                let controller_busy = alert_controller.read_with(cx, |c, _| c.is_active());
+                if !controller_busy {
+                    let term_for_confirm = terminal_entity.clone();
+                    let on_confirm = Rc::new(move |_w: &mut Window, cx: &mut App| {
+                        term_for_confirm.update(cx, |view, _cx| {
+                            view.resolve_pending_host_key(true);
+                        });
+                    });
+                    let term_for_cancel = terminal_entity.clone();
+                    let on_cancel = Rc::new(move |_w: &mut Window, cx: &mut App| {
+                        term_for_cancel.update(cx, |view, _cx| {
+                            view.resolve_pending_host_key(false);
+                        });
+                    });
+                    alert_controller.update(cx, |c, cx| {
+                        c.show(
+                            AlertState {
+                                severity: AlertSeverity::Warning,
+                                title: t!("terminal.host_key_unknown").to_string().into(),
+                                description: {
+                                    let host_port = if info.port == 22 {
+                                        info.host.clone()
+                                    } else {
+                                        format!("{}:{}", info.host, info.port)
+                                    };
+                                    Some(
+                                        t!("terminal.host_key_prompt", host = host_port.as_str())
+                                            .to_string()
+                                            .into(),
+                                    )
+                                },
+                                details: vec![
+                                    (
+                                        t!("terminal.host_key_algo").to_string().into(),
+                                        info.algo.clone().into(),
+                                    ),
+                                    (
+                                        t!("terminal.host_key_fingerprint").to_string().into(),
+                                        info.fingerprint.clone().into(),
+                                    ),
+                                ],
+                                confirm_label: t!("terminal.host_key_accept").to_string().into(),
+                                cancel_label: t!("terminal.host_key_cancel").to_string().into(),
+                                open: true,
+                                on_confirm: Some(on_confirm),
+                                on_cancel: Some(on_cancel),
+                            },
+                            cx,
+                        );
+                    });
+                }
+            }
+        }
+    }
 
     div()
         .flex_1()

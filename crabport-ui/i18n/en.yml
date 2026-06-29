@@ -45,3 +45,9 @@ tunnels:
   empty: "No active tunnels. Click '+ New' to create one."
 terminal:
   reconnect: "Reconnect"
+  host_key_unknown: "Unknown Host Key"
+  host_key_prompt: "The authenticity of host %{host} can't be established."
+  host_key_algo: "Algorithm"
+  host_key_fingerprint: "Fingerprint"
+  host_key_accept: "Trust & Connect"
+  host_key_cancel: "Cancel"

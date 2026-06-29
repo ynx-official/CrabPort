@@ -4,4 +4,5 @@
 //! and bridges data between the terminal parser and the SSH channel.
 
 pub mod backend;
+pub mod known_hosts;
 pub mod session;

@@ -11,6 +11,7 @@ use alacritty_terminal::{
     vte::ansi::{Color, CursorShape, NamedColor},
 };
 use crabport_core::keybind::{self, KeyAction, TerminalAction};
+use crabport_ssh::backend::HostKeyInfo;
 use crabport_ssh::session::SshConnectionInfo;
 use crabport_terminal::pty::PtyBackend;
 use crabport_terminal::terminal::{CrabPortMonitor, RemoteStatus, TerminalSession};
@@ -182,10 +183,21 @@ impl TerminalView {
 
         // Frame pump: at most ~120Hz, notify only when dirty.
         let dirty_pump = needs_repaint.clone();
+        let overlay_dirty_pump = overlay.clone();
         let pump_entity = cx.entity().downgrade();
         cx.spawn(async move |_this, cx| {
             loop {
                 smol::Timer::after(std::time::Duration::from_micros(8333)).await;
+                // Fold the overlay-side dirty flag (set from non-gpui threads,
+                // e.g. the SSH backend pushing a host-key prompt) into the
+                // view's own needs_repaint flag.
+                if overlay_dirty_pump
+                    .lock()
+                    .dirty
+                    .swap(false, Ordering::AcqRel)
+                {
+                    dirty_pump.store(true, Ordering::Release);
+                }
                 if dirty_pump.swap(false, Ordering::AcqRel) {
                     if pump_entity.update(cx, |_, cx| cx.notify()).is_err() {
                         break;
@@ -265,6 +277,37 @@ impl TerminalView {
         self.on_backend_closed = Some(Rc::new(f));
     }
 
+    /// Returns the host-key info for a currently-pending host-key prompt,
+    /// if any. The prompt stays pending in the overlay until resolved via
+    /// [`resolve_pending_host_key`]. Used by the global alert controller
+    /// flow: `render_content` reads this to decide whether to show the
+    /// alert, and the alert's confirm/cancel callbacks call
+    /// [`resolve_pending_host_key`] to unblock the SSH backend.
+    pub fn pending_host_key_info(&self) -> Option<HostKeyInfo> {
+        self.overlay
+            .lock()
+            .pending_host_key
+            .as_ref()
+            .map(|p| p.info.clone())
+    }
+
+    /// Resolve a pending host-key prompt: `accept = true` continues the
+    /// connection, `false` aborts it. No-op if no prompt is pending.
+    pub fn resolve_pending_host_key(&self, accept: bool) {
+        let mut ov = self.overlay.lock();
+        if let Some(mut p) = ov.pending_host_key.take() {
+            p.resolve(accept);
+            if accept {
+                ov.log(ConnectionLogLevel::Info, "Host key accepted — continuing…");
+            } else {
+                ov.log(
+                    ConnectionLogLevel::Error,
+                    "Host key rejected — connection aborted",
+                );
+            }
+        }
+    }
+
     pub fn reconnect(&mut self, cx: &mut Context<Self>) {
         let info = match self.ssh_info.clone() {
             Some(i) => i,
@@ -286,6 +329,9 @@ impl TerminalView {
         let rows: usize = 24;
 
         let overlay_cb = self.overlay.clone();
+        let verifier = crate::views::terminal::connection_overlay::make_host_key_verifier(
+            self.overlay.clone(),
+        );
         let backend = Arc::new(crabport_ssh::backend::SshBackend::new(
             info,
             cols as u16,
@@ -293,6 +339,7 @@ impl TerminalView {
             Arc::new(move |msg: String| {
                 overlay_cb.lock().log(ConnectionLogLevel::Info, msg);
             }),
+            Some(verifier),
         ));
 
         let session = Arc::new(TerminalSession::new(backend, cols, rows));
@@ -1094,6 +1141,13 @@ impl Render for TerminalView {
                 )
             })
             // Connection overlay (remote sessions only).
+            //
+            // Note: the host-key confirmation prompt is no longer rendered
+            // here. It is surfaced via the global `AlertController` (held by
+            // `CrabportApp`), which `render_content` triggers when it sees a
+            // pending host key on the active terminal view. That way the
+            // dialog overlays the whole window and is unaffected by the
+            // terminal container's padding.
             .when(is_remote, |el| {
                 let on_reconnect: Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)> =
                     Rc::new(cx.listener(|this, _event: &ClickEvent, _window, cx| {
