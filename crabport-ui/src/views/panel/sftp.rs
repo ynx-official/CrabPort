@@ -921,14 +921,14 @@ fn trigger_upload(
         let picked = match rx.await {
             Ok(Ok(Some(paths))) => Some(paths),
             Ok(Ok(None)) => None,
-            Ok(Err(e)) => {
+            Ok(Err(_e)) => {
                 #[cfg(debug_assertions)]
-                tracing::warn!("SFTP upload: file picker error: {e}");
+                tracing::warn!("SFTP upload: file picker error: {_e}");
                 None
             }
-            Err(e) => {
+            Err(_e) => {
                 #[cfg(debug_assertions)]
-                tracing::warn!("SFTP upload: picker channel closed: {e}");
+                tracing::warn!("SFTP upload: picker channel closed: {_e}");
                 None
             }
         };
