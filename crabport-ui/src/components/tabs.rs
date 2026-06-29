@@ -38,6 +38,7 @@ impl TabPane {
 pub struct Tabs {
     id: ElementId,
     style: StyleRefinement,
+    ctrl_style: StyleRefinement,
     panes: Vec<TabPane>,
     active: usize,
     on_change: Option<std::rc::Rc<dyn Fn(usize, &mut Window, &mut App) + 'static>>,
@@ -54,6 +55,7 @@ impl Tabs {
         Self {
             id: id.into(),
             style: Default::default(),
+            ctrl_style: Default::default(),
             panes: Vec::new(),
             active: 0,
             on_change: None,
@@ -72,6 +74,12 @@ impl Tabs {
 
     pub fn on_change(mut self, f: impl Fn(usize, &mut Window, &mut App) + 'static) -> Self {
         self.on_change = Some(std::rc::Rc::new(f));
+        self
+    }
+
+    /// Apply custom styles to the internal SegmentedControl (tab bar).
+    pub fn ctrl_style(mut self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self {
+        self.ctrl_style = f(self.ctrl_style);
         self
     }
 
@@ -110,6 +118,7 @@ impl RenderOnce for Tabs {
 
         let mut ctrl = SegmentedControl::new(ElementId::Name(format!("{}-ctrl", self.id).into()))
             .active(active);
+        ctrl.style().refine(&self.ctrl_style);
 
         for (i, pane) in self.panes.iter().enumerate() {
             let cb = on_change_rc.clone();

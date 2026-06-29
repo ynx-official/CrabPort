@@ -6,7 +6,7 @@ use gpui::*;
 use crate::app::{CrabportApp, SidebarItem, Tab, TabKind};
 use crate::color::*;
 use crate::layouts::connection_form::ConnectionFormState;
-use crate::layouts::sftp::render_sftp_sidebar;
+use crate::layouts::panel::render_panel;
 use crate::layouts::tabbar::render_tab_bar;
 use crate::layouts::terminal_toolbar::render_terminal_toolbar;
 use crate::views;
@@ -149,22 +149,37 @@ pub fn render_content(
         )
     };
 
-    // Read SFTP entries from the active TerminalView's backend
-    let (has_sftp, sftp_entries) = if is_terminal {
+    // Read SFTP state from the active TerminalView's backend
+    let (sftp_entries, sftp_cwd): (Vec<(String, bool)>, Option<String>) = if is_terminal {
         if let Some(terminal_entity) = active_tab.and_then(|tab| terminal_views.get(&tab.id)) {
             terminal_entity.read_with(cx, |view, _cx| {
                 if view.allow_sftp() {
-                    let entries = view.sftp_entries();
-                    (entries.is_some(), entries.unwrap_or_default())
+                    (view.sftp_entries().unwrap_or_default(), view.sftp_cwd())
                 } else {
-                    (false, Vec::new())
+                    (Vec::new(), None)
                 }
             })
         } else {
-            (false, Vec::new())
+            (Vec::new(), None)
         }
     } else {
-        (false, Vec::new())
+        (Vec::new(), None)
+    };
+
+    // Build SFTP navigate callback
+    let sftp_navigate: Option<Rc<dyn Fn(String, &mut Window, &mut App)>> = if is_terminal {
+        active_tab.and_then(|tab| {
+            terminal_views.get(&tab.id).map(|entity| {
+                let entity = entity.clone();
+                Rc::new(move |path: String, _w: &mut Window, cx: &mut App| {
+                    entity.read_with(cx, |view, _cx| {
+                        view.sftp_navigate(&path);
+                    });
+                }) as Rc<dyn Fn(String, &mut Window, &mut App)>
+            })
+        })
+    } else {
+        None
     };
 
     div()
@@ -187,7 +202,13 @@ pub fn render_content(
                 .flex_row()
                 .overflow_hidden()
                 .child(view)
-                .child(render_sftp_sidebar(&sftp_entries, has_sftp)),
+                .child(render_panel(
+                    is_terminal,
+                    0,
+                    sftp_entries,
+                    sftp_cwd,
+                    sftp_navigate,
+                )),
         )
         .child(render_terminal_toolbar(is_terminal, status, metrics))
 }

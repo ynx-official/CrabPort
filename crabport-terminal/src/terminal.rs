@@ -40,6 +40,15 @@ pub trait CrabPortTerminal: Send + Sync {
     fn sftp_entries(&self) -> Option<Vec<(String, bool)>> {
         None
     }
+
+    /// Current SFTP working directory. Returns None if not yet loaded.
+    fn sftp_cwd(&self) -> Option<String> {
+        None
+    }
+
+    /// Navigate to a new directory via SFTP. The backend updates entries + cwd
+    /// asynchronously and notifies the UI.
+    fn sftp_navigate(&self, _path: &str) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -257,6 +266,14 @@ impl TerminalSession {
 
     pub fn sftp_entries(&self) -> Option<Vec<(String, bool)>> {
         self.backend.sftp_entries()
+    }
+
+    pub fn sftp_cwd(&self) -> Option<String> {
+        self.backend.sftp_cwd()
+    }
+
+    pub fn sftp_navigate(&self, path: &str) {
+        self.backend.sftp_navigate(path)
     }
 
     pub fn scroll(&self, delta: i32) {

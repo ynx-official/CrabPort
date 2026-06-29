@@ -85,6 +85,7 @@ pub struct SshBackend {
     _on_status: Arc<dyn Fn(String) + Send + Sync>,
     handle: Arc<TokioMutex<Option<Arc<TokioMutex<client::Handle<SshHandler>>>>>>,
     sftp_entries: Arc<RwLock<Option<Vec<(String, bool)>>>>,
+    sftp_cwd: Arc<RwLock<Option<String>>>,
 }
 
 impl SshBackend {
@@ -107,6 +108,8 @@ impl SshBackend {
 
         let sftp_entries: Arc<RwLock<Option<Vec<(String, bool)>>>> = Arc::new(RwLock::new(None));
         let sftp_entries2 = sftp_entries.clone();
+        let sftp_cwd: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
+        let sftp_cwd2 = sftp_cwd.clone();
 
         let event_tx2 = event_tx.clone();
         let monitor2 = monitor.clone();
@@ -314,6 +317,13 @@ impl SshBackend {
             match crabport_sftp::SftpBackend::connect(&sh).await {
                 Ok(sftp) => {
                     tracing::info!("SSH: SFTP subsystem available");
+                    // Resolve cwd
+                    match sftp.canonicalize(".").await {
+                        Ok(cwd) => {
+                            *sftp_cwd2.write() = Some(cwd.clone());
+                        }
+                        Err(e) => tracing::warn!("SSH: SFTP canonicalize failed ({e})"),
+                    }
                     match sftp.read_dir(".").await {
                         Ok(entries) => {
                             *sftp_entries2.write() = Some(entries);
@@ -401,6 +411,7 @@ impl SshBackend {
             _on_status: on_status,
             handle,
             sftp_entries,
+            sftp_cwd,
         }
     }
     /// Open an SFTP session over this SSH connection.
@@ -654,6 +665,49 @@ impl CrabPortTerminal for SshBackend {
 
     fn sftp_entries(&self) -> Option<Vec<(String, bool)>> {
         self.sftp_entries.read().clone()
+    }
+
+    fn sftp_cwd(&self) -> Option<String> {
+        self.sftp_cwd.read().clone()
+    }
+
+    fn sftp_navigate(&self, path: &str) {
+        let handle = self.handle.clone();
+        let entries = self.sftp_entries.clone();
+        let cwd = self.sftp_cwd.clone();
+        let path = path.to_string();
+        TOKIO.spawn(async move {
+            let guard = handle.lock().await;
+            let shared = match guard.as_ref() {
+                Some(h) => h,
+                None => return,
+            };
+            let h = shared.lock().await;
+            let sftp = match crabport_sftp::SftpBackend::connect(&*h).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("SFTP navigate: connect failed ({e})");
+                    return;
+                }
+            };
+            // Resolve the target path
+            let resolved = match sftp.canonicalize(&path).await {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!("SFTP navigate: canonicalize '{}' failed ({e})", path);
+                    return;
+                }
+            };
+            match sftp.read_dir(&resolved).await {
+                Ok(dir_entries) => {
+                    *entries.write() = Some(dir_entries);
+                    *cwd.write() = Some(resolved);
+                }
+                Err(e) => {
+                    tracing::warn!("SFTP navigate: read_dir failed ({e})");
+                }
+            }
+        });
     }
 }
 

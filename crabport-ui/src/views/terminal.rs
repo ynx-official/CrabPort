@@ -380,6 +380,14 @@ impl TerminalView {
         self.session.sftp_entries()
     }
 
+    pub fn sftp_cwd(&self) -> Option<String> {
+        self.session.sftp_cwd()
+    }
+
+    pub fn sftp_navigate(&self, path: &str) {
+        self.session.sftp_navigate(path)
+    }
+
     pub fn set_on_backend_closed(&mut self, f: impl Fn(&mut App) + 'static) {
         self.on_backend_closed = Some(Rc::new(f));
     }
