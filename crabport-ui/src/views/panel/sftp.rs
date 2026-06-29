@@ -3,11 +3,14 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::InteractiveElementExt;
+use gpui_animation::{animation::TransitionExt, transition::general::Linear};
 use gpui_component::input::InputState;
 use gpui_component::scroll::ScrollableElement;
+use rust_i18n::t;
 
 use crate::color::*;
+use crate::components::context_menu::{ContextMenuItem, ContextMenuState};
+use crate::components::dialog::{AlertController, AlertSeverity, AlertState};
 use crate::components::input::StyledInput;
 
 /// SFTP panel view.
@@ -29,6 +32,18 @@ pub struct SftpPanel {
     /// When the active tab changes we force-sync the input to the new
     /// backend's cwd instead of preserving the previous tab's text.
     active_tab_id: Option<u64>,
+    /// Global context menu host. Held so the panel can open a right-click
+    /// menu on entries ("Enter" for dirs, "Download" for files).
+    context_menu: Option<Entity<crate::components::context_menu::ContextMenuController>>,
+    /// Global alert dialog host, used for the delete-confirmation prompt.
+    alert_controller: Option<Entity<AlertController>>,
+    /// The entry name that triggered the currently-open context menu, if
+    /// any. While set, that row stays highlighted in the hover color even
+    /// though the mouse has moved to the overlay.
+    context_menu_entry: Option<String>,
+    /// The entry currently being hovered, if any. Used to drive the hover
+    /// background transition (same pattern as HostsView).
+    hovered_entry: Option<String>,
 }
 
 impl SftpPanel {
@@ -39,6 +54,10 @@ impl SftpPanel {
             entries: Arc::new(Vec::new()),
             on_navigate: None,
             active_tab_id: None,
+            context_menu: None,
+            alert_controller: None,
+            context_menu_entry: None,
+            hovered_entry: None,
         }
     }
 
@@ -50,6 +69,8 @@ impl SftpPanel {
         cwd: Option<Arc<String>>,
         on_navigate: Option<Rc<dyn Fn(String, &mut App)>>,
         active_tab_id: u64,
+        context_menu: Entity<crate::components::context_menu::ContextMenuController>,
+        alert_controller: Entity<AlertController>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -105,6 +126,8 @@ impl SftpPanel {
             self.path_input = Some(entity);
             self.cwd = cwd.clone();
             self.active_tab_id = Some(active_tab_id);
+            self.context_menu = Some(context_menu);
+            self.alert_controller = Some(alert_controller);
             return;
         }
 
@@ -145,6 +168,8 @@ impl SftpPanel {
         self.entries = entries;
         self.on_navigate = on_navigate;
         self.active_tab_id = Some(active_tab_id);
+        self.context_menu = Some(context_menu);
+        self.alert_controller = Some(alert_controller);
     }
 }
 
@@ -167,6 +192,21 @@ impl Render for SftpPanel {
         let cwd = self.cwd.clone();
         let on_navigate = self.on_navigate.clone();
         let path_input = self.path_input.clone();
+        let context_menu = self.context_menu.clone();
+        let alert_controller = self.alert_controller.clone();
+
+        // If the global context menu is no longer active, clear the
+        // "menu-triggering entry" highlight.
+        let menu_active = self
+            .context_menu
+            .as_ref()
+            .map(|cm| cm.read_with(_cx, |c, _| c.is_active()))
+            .unwrap_or(false);
+        if !menu_active {
+            self.context_menu_entry = None;
+        }
+        let context_menu_entry = self.context_menu_entry.clone();
+        let hovered_entry = self.hovered_entry.clone();
 
         div()
             .h_full()
@@ -223,9 +263,16 @@ impl Render for SftpPanel {
                         };
 
                         let on_navigate = on_navigate.clone();
+                        let context_menu = context_menu.clone();
+                        let entity = _cx.entity().downgrade();
+                        let is_hovered = hovered_entry.as_deref() == Some(name.as_str());
+                        let force_highlight = context_menu_entry.as_deref() == Some(name.as_str());
+                        let is_highlighted = is_hovered || force_highlight;
+                        let row_id = ElementId::Name(format!("sftp-{}", name).into());
+                        let row_id_for_transition = row_id.clone();
 
                         div()
-                            .id(ElementId::Name(format!("sftp-{}", name).into()))
+                            .id(row_id.clone())
                             .flex()
                             .flex_row()
                             .items_center()
@@ -233,18 +280,145 @@ impl Render for SftpPanel {
                             .px_2()
                             .py_1()
                             .rounded(px(4.0))
-                            .hover(|s| s.bg(rgb(SURFACE_HOVER)))
                             .when(*is_dir, |el| {
-                                el.on_double_click({
+                                el.on_mouse_down(MouseButton::Left, {
                                     let on_navigate = on_navigate.clone();
                                     let target = target_path.clone();
-                                    move |_, _w, cx| {
-                                        if let Some(ref cb) = on_navigate {
-                                            cb(target.clone(), cx);
+                                    move |event, _w, cx| {
+                                        if event.click_count == 2 {
+                                            if let Some(ref cb) = on_navigate {
+                                                cb(target.clone(), cx);
+                                            }
                                         }
                                     }
                                 })
                             })
+                            .on_mouse_down(MouseButton::Right, {
+                                let name = name.clone();
+                                let is_dir = *is_dir;
+                                let target_path = target_path.clone();
+                                let on_navigate = on_navigate.clone();
+                                let entity = entity.clone();
+                                let alert_controller = alert_controller.clone();
+                                move |event, _w, cx| {
+                                    let Some(ref cm) = context_menu else {
+                                        return;
+                                    };
+                                    // Mark this entry as the menu-triggering
+                                    // entry so it keeps the hover background.
+                                    let _ = entity.update(cx, |view, cx| {
+                                        view.context_menu_entry = Some(name.clone());
+                                        cx.notify();
+                                    });
+                                    let pos = event.position;
+                                    let mut items = if is_dir {
+                                        vec![ContextMenuItem::new(t!("sftp.enter").to_string(), {
+                                            let target = target_path.clone();
+                                            let on_navigate = on_navigate.clone();
+                                            move |_w, cx| {
+                                                if let Some(ref cb) = on_navigate {
+                                                    cb(target.clone(), cx);
+                                                }
+                                            }
+                                        })]
+                                    } else {
+                                        vec![ContextMenuItem::new(
+                                            t!("sftp.download").to_string(),
+                                            {
+                                                let name = name.clone();
+                                                move |_w, _cx| {
+                                                    // TODO: wire actual SFTP
+                                                    // download once the backend
+                                                    // exposes a read_file API
+                                                    // to the UI.
+                                                    eprintln!("SFTP download requested: {}", name);
+                                                }
+                                            },
+                                        )]
+                                    };
+                                    // Add a "Delete" item for everything
+                                    // except the ".." parent-navigation entry.
+                                    if name != ".." {
+                                        items.push(
+                                            ContextMenuItem::new(t!("sftp.delete").to_string(), {
+                                                let alert_controller = alert_controller.clone();
+                                                let name = name.clone();
+                                                let target_path = target_path.clone();
+                                                move |_w, cx| {
+                                                    let Some(ref ac) = alert_controller else {
+                                                        return;
+                                                    };
+                                                    let target_path = target_path.clone();
+                                                    ac.update(cx, |c, cx| {
+                                                        c.show(
+                                                            AlertState {
+                                                                severity: AlertSeverity::Danger,
+                                                                title: t!("sftp.delete_title").to_string().into(),
+                                                                description: Some(
+                                                                    t!("sftp.delete_prompt", name = name.as_str())
+                                                                        .to_string()
+                                                                        .into(),
+                                                                ),
+                                                                confirm_label: t!("sftp.delete_confirm").to_string().into(),
+                                                                cancel_label: t!("terminal.host_key_cancel").to_string().into(),
+                                                                on_confirm: Some(Rc::new(move |_w, _cx| {
+                                                                    // TODO: wire actual SFTP delete
+                                                                    // (remove_file / remove_dir) once
+                                                                    // the backend exposes it to the UI.
+                                                                    eprintln!(
+                                                                        "SFTP delete confirmed: {}",
+                                                                        target_path
+                                                                    );
+                                                                })),
+                                                                ..AlertState::default()
+                                                            },
+                                                            cx,
+                                                        );
+                                                    });
+                                                }
+                                            })
+                                            .danger(true),
+                                        );
+                                    }
+                                    cm.update(cx, |c, cx| {
+                                        c.show(
+                                            ContextMenuState {
+                                                position: pos,
+                                                items,
+                                                ..ContextMenuState::default()
+                                            },
+                                            cx,
+                                        );
+                                    });
+                                }
+                            })
+                            // Smooth hover color transition. Uses
+                            // `transition_when_else` (not `transition_on_hover`)
+                            // so we can also force the highlight on when a
+                            // context menu triggered by this row is open.
+                            .with_transition(row_id_for_transition)
+                            .on_hover({
+                                let name = name.clone();
+                                move |hovered, _w, cx| {
+                                    let _ = entity.update(cx, |view, cx| {
+                                        if *hovered {
+                                            view.hovered_entry = Some(name.clone());
+                                        } else if view.hovered_entry.as_deref()
+                                            == Some(name.as_str())
+                                        {
+                                            view.hovered_entry = None;
+                                        }
+                                        cx.notify();
+                                    });
+                                }
+                            })
+                            .transition_when_else(
+                                is_highlighted,
+                                std::time::Duration::from_millis(120),
+                                Linear,
+                                |el| el.bg(rgba((SURFACE_HOVER << 8) | 0xFF)),
+                                |el| el.bg(rgba((SURFACE_HOVER << 8) | 0x00)),
+                            )
                             .child(
                                 svg()
                                     .path(icon_path)

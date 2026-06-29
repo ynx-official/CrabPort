@@ -51,3 +51,16 @@ terminal:
   host_key_fingerprint: "Fingerprint"
   host_key_accept: "Trust & Connect"
   host_key_cancel: "Cancel"
+sftp:
+  enter: "Enter"
+  download: "Download"
+  delete: "Delete"
+  delete_title: "Delete"
+  delete_prompt: 'Are you sure you want to delete "%{name}"? This cannot be undone.'
+  delete_confirm: "Delete"
+hosts:
+  edit: "Edit"
+  delete: "Delete"
+  delete_title: "Delete Host"
+  delete_prompt: 'Are you sure you want to delete "%{name}"? This cannot be undone.'
+  delete_confirm: "Delete"

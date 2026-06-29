@@ -51,3 +51,16 @@ terminal:
   host_key_fingerprint: "指纹"
   host_key_accept: "信任并连接"
   host_key_cancel: "取消"
+sftp:
+  enter: "进入"
+  download: "下载"
+  delete: "删除"
+  delete_title: "删除"
+  delete_prompt: "确定要删除「%{name}」吗？此操作无法撤销。"
+  delete_confirm: "删除"
+hosts:
+  edit: "编辑"
+  delete: "删除"
+  delete_title: "删除主机"
+  delete_prompt: "确定要删除「%{name}」吗？此操作无法撤销。"
+  delete_confirm: "删除"

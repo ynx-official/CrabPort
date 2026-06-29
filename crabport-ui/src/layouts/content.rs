@@ -6,6 +6,7 @@ use rust_i18n::t;
 
 use crate::app::{CrabportApp, SidebarItem, Tab, TabKind};
 use crate::color::*;
+use crate::components::context_menu::ContextMenuController;
 use crate::components::dialog::{AlertController, AlertSeverity, AlertState};
 use crate::layouts::connection_form::ConnectionFormState;
 use crate::layouts::panel::render_panel;
@@ -27,6 +28,7 @@ pub fn render_content(
     sftp_panel: &Entity<SftpPanel>,
     hosts_view: &Entity<HostsView>,
     alert_controller: &Entity<AlertController>,
+    context_menu: &Entity<ContextMenuController>,
     window: &mut Window,
     cx: &mut App,
 ) -> Div {
@@ -80,6 +82,8 @@ pub fn render_content(
                         Some(on_connect_rc),
                         Some(on_edit_rc),
                         Some(on_remove_rc),
+                        context_menu.clone(),
+                        alert_controller.clone(),
                         cx,
                     );
                 });
@@ -204,6 +208,8 @@ pub fn render_content(
             sftp_cwd,
             sftp_navigate,
             active_tab_id,
+            context_menu.clone(),
+            alert_controller.clone(),
             window,
             cx,
         );

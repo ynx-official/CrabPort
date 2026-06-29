@@ -11,6 +11,8 @@ use std::time::Duration;
 use crate::app::CrabportApp;
 use crate::color::*;
 use crate::components::button::Button;
+use crate::components::context_menu::{ContextMenuController, ContextMenuItem, ContextMenuState};
+use crate::components::dialog::{AlertController, AlertSeverity, AlertState};
 use crate::layouts::connection_form::{ConnectionFormState, ConnectionFormView};
 
 /// A saved connection host entry.
@@ -35,10 +37,18 @@ pub struct ConnectionHost {
 pub struct HostsView {
     /// The host row currently being hovered, if any.
     hovered_host_id: Option<i64>,
+    /// The host row that triggered the currently-open context menu, if any.
+    /// While set, that row stays highlighted in the hover color even though
+    /// the mouse has moved to the overlay.
+    context_menu_host_id: Option<i64>,
     // External data pushed in before each render.
     hosts: Vec<ConnectionHost>,
     form_state: Option<ConnectionFormState>,
     app: Entity<CrabportApp>,
+    // Global context menu host, used for the right-click menu on each row.
+    context_menu: Option<Entity<ContextMenuController>>,
+    // Global alert dialog host, used for the delete-confirmation prompt.
+    alert_controller: Option<Entity<AlertController>>,
     // Callbacks
     on_new: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
     on_connect: Option<Rc<dyn Fn(i64, &mut Window, &mut App)>>,
@@ -50,9 +60,12 @@ impl HostsView {
     pub fn new(app: Entity<CrabportApp>) -> Self {
         Self {
             hovered_host_id: None,
+            context_menu_host_id: None,
             hosts: Vec::new(),
             form_state: None,
             app,
+            context_menu: None,
+            alert_controller: None,
             on_new: None,
             on_connect: None,
             on_edit: None,
@@ -69,6 +82,8 @@ impl HostsView {
         on_connect: Option<Rc<dyn Fn(i64, &mut Window, &mut App)>>,
         on_edit: Option<Rc<dyn Fn(i64, &mut Window, &mut App)>>,
         on_remove: Option<Rc<dyn Fn(i64, &mut Window, &mut App)>>,
+        context_menu: Entity<ContextMenuController>,
+        alert_controller: Entity<AlertController>,
         cx: &mut Context<Self>,
     ) {
         // Clear stale hover if the host disappeared.
@@ -83,6 +98,8 @@ impl HostsView {
         self.on_connect = on_connect;
         self.on_edit = on_edit;
         self.on_remove = on_remove;
+        self.context_menu = Some(context_menu);
+        self.alert_controller = Some(alert_controller);
         // Note: do NOT call cx.notify() here — set_state is invoked every
         // render from render_content, so notifying would cause an infinite
         // loop. The HostsView re-renders naturally because its parent
@@ -100,7 +117,23 @@ impl Render for HostsView {
         let on_connect = self.on_connect.clone();
         let on_edit = self.on_edit.clone();
         let on_remove = self.on_remove.clone();
+        let context_menu = self.context_menu.clone();
+        let alert_controller = self.alert_controller.clone();
         let hovered_host_id = self.hovered_host_id;
+
+        // If the global context menu is no longer active, clear the
+        // "menu-triggering row" highlight. We do this in render (read-only
+        // on the controller) rather than via a callback because the menu's
+        // dismiss is async and we have no direct hook into it.
+        let menu_active = self
+            .context_menu
+            .as_ref()
+            .map(|cm| cm.read_with(_cx, |c, _| c.is_active()))
+            .unwrap_or(false);
+        if !menu_active {
+            self.context_menu_host_id = None;
+        }
+        let context_menu_host_id = self.context_menu_host_id;
 
         div()
             .size_full()
@@ -163,13 +196,19 @@ impl Render for HostsView {
                                 let on_connect = on_connect.clone();
                                 let on_edit = on_edit.clone();
                                 let on_remove = on_remove.clone();
+                                let context_menu = context_menu.clone();
+                                let alert_controller = alert_controller.clone();
                                 let is_hovered = hovered_host_id == Some(h.id);
+                                let force_highlight = context_menu_host_id == Some(h.id);
                                 let entity = _cx.entity().downgrade();
 
                                 host_row(
                                     &host,
                                     is_hovered,
+                                    force_highlight,
                                     entity,
+                                    context_menu,
+                                    alert_controller,
                                     move |w, cx| {
                                         if let Some(ref cb) = on_connect {
                                             cb(host.id, w, cx);
@@ -206,7 +245,10 @@ impl Render for HostsView {
 fn host_row(
     host: &ConnectionHost,
     is_hovered: bool,
+    force_highlight: bool,
     entity: WeakEntity<HostsView>,
+    context_menu: Option<Entity<ContextMenuController>>,
+    alert_controller: Option<Entity<AlertController>>,
     on_click: impl Fn(&mut Window, &mut App) + 'static,
     on_edit: impl Fn(&mut Window, &mut App) + 'static,
     on_remove: impl Fn(&mut Window, &mut App) + 'static,
@@ -214,12 +256,9 @@ fn host_row(
     let row_id = ElementId::Name(format!("host-row-{}", host.id).into());
     let row_id_clone = row_id.clone();
 
-    let edit_btn_id = ElementId::Name(format!("host-edit-{}", host.id).into());
-    let remove_btn_id = ElementId::Name(format!("host-remove-{}", host.id).into());
-    let edit_opacity_id = ElementId::Name(format!("host-edit-op-{}", host.id).into());
-    let remove_opacity_id = ElementId::Name(format!("host-remove-op-{}", host.id).into());
-
     let host_id = host.id;
+    let host_name = host.name.clone();
+    let is_highlighted = is_hovered || force_highlight;
 
     div()
         .id(row_id.clone())
@@ -235,21 +274,94 @@ fn host_row(
             gpui_animation::reset_transition(&row_id_clone);
             on_click(w, cx);
         })
-        // Track hover of the whole row so the action buttons can fade in
-        // with easing via `transition_when_else` below. State lives in the
-        // HostsView entity itself. This `.on_hover` is chained on the same
-        // animated wrapper as `transition_on_hover` (gpui-animation allows
-        // both; only gpui's native `on_hover` forbids duplicates).
+        // Right-click context menu: "Edit" + "Delete". Also record which
+        // row triggered the menu so it stays highlighted while the menu is
+        // open.
+        .on_mouse_down(MouseButton::Right, {
+            let on_edit = Rc::new(on_edit);
+            let on_remove = Rc::new(on_remove);
+            let entity = entity.clone();
+            move |event, _w, cx| {
+                let Some(ref cm) = context_menu else {
+                    return;
+                };
+                // Mark this row as the menu-triggering row so it keeps the
+                // hover background while the overlay is up.
+                let _ = entity.update(cx, |view, cx| {
+                    view.context_menu_host_id = Some(host_id);
+                    cx.notify();
+                });
+                let pos = event.position;
+                let on_edit = on_edit.clone();
+                let on_remove = on_remove.clone();
+                cm.update(cx, |c, cx| {
+                    c.show(
+                        ContextMenuState {
+                            position: pos,
+                            items: vec![
+                                ContextMenuItem::new(t!("hosts.edit").to_string(), {
+                                    let on_edit = on_edit.clone();
+                                    move |w, cx| {
+                                        on_edit(w, cx);
+                                    }
+                                }),
+                                ContextMenuItem::new(t!("hosts.delete").to_string(), {
+                                    let on_remove = on_remove.clone();
+                                    let alert_controller = alert_controller.clone();
+                                    let host_name = host_name.clone();
+                                    move |_w, cx| {
+                                        let Some(ref ac) = alert_controller else {
+                                            return;
+                                        };
+                                        let on_remove = on_remove.clone();
+                                        ac.update(cx, |c, cx| {
+                                            c.show(
+                                                AlertState {
+                                                    severity: AlertSeverity::Danger,
+                                                    title: t!("hosts.delete_title")
+                                                        .to_string()
+                                                        .into(),
+                                                    description: Some(
+                                                        t!(
+                                                            "hosts.delete_prompt",
+                                                            name = host_name.as_str()
+                                                        )
+                                                        .to_string()
+                                                        .into(),
+                                                    ),
+                                                    confirm_label: t!("hosts.delete_confirm")
+                                                        .to_string()
+                                                        .into(),
+                                                    cancel_label: t!("terminal.host_key_cancel")
+                                                        .to_string()
+                                                        .into(),
+                                                    on_confirm: Some(Rc::new(move |w, cx| {
+                                                        on_remove(w, cx);
+                                                    })),
+                                                    ..AlertState::default()
+                                                },
+                                                cx,
+                                            );
+                                        });
+                                    }
+                                })
+                                .danger(true),
+                            ],
+                            ..ContextMenuState::default()
+                        },
+                        cx,
+                    );
+                });
+            }
+        })
+        // Track hover of the whole row so the background color eases in.
+        // State lives in the HostsView entity itself.
         .with_transition(row_id)
         .on_hover(move |hovered, _w, cx| {
             let _ = entity.update(cx, |view, cx| {
                 if *hovered {
-                    // Entering this row — claim hover unconditionally.
                     view.hovered_host_id = Some(host_id);
                 } else {
-                    // Leaving this row — only clear if we still own hover.
-                    // Otherwise we'd clobber the new row's hover claim when
-                    // moving downward (leave-old fires after enter-new).
                     if view.hovered_host_id == Some(host_id) {
                         view.hovered_host_id = None;
                     }
@@ -257,13 +369,13 @@ fn host_row(
                 cx.notify();
             });
         })
-        .transition_on_hover(Duration::from_millis(120), Linear, |hovered, s| {
-            if *hovered {
-                s.bg(rgb(SURFACE_ACTIVE))
-            } else {
-                s.bg(rgb(BG_BASE))
-            }
-        })
+        .transition_when_else(
+            is_highlighted,
+            Duration::from_millis(120),
+            Linear,
+            |el| el.bg(rgb(SURFACE_ACTIVE)),
+            |el| el.bg(rgb(BG_BASE)),
+        )
         // Host info (name + address)
         .child(
             div()
@@ -282,76 +394,6 @@ fn host_row(
                         .text_xs()
                         .text_color(rgb(TEXT_MUTED))
                         .child(format!("{}@{}:{}", host.username, host.host, host.port)),
-                ),
-        )
-        // Edit button (fades in on row hover)
-        .child(
-            div()
-                .id(edit_opacity_id.clone())
-                .flex()
-                .items_center()
-                .justify_center()
-                .opacity(0.)
-                .child(
-                    Button::new(edit_btn_id)
-                        .ghost()
-                        .centered(true)
-                        .w(px(28.0))
-                        .h(px(28.0))
-                        .border_0()
-                        .rounded_sm()
-                        .child(
-                            svg()
-                                .path("icons/square-pen.svg")
-                                .size_4()
-                                .text_color(rgb(TEXT_MUTED)),
-                        )
-                        .on_click(move |_e, w, cx| {
-                            on_edit(w, cx);
-                        }),
-                )
-                .with_transition(edit_opacity_id)
-                .transition_when_else(
-                    is_hovered,
-                    Duration::from_millis(120),
-                    Linear,
-                    |el| el.opacity(0.7),
-                    |el| el.opacity(0.),
-                ),
-        )
-        // Remove button (fades in on row hover)
-        .child(
-            div()
-                .id(remove_opacity_id.clone())
-                .flex()
-                .items_center()
-                .justify_center()
-                .opacity(0.)
-                .child(
-                    Button::new(remove_btn_id)
-                        .ghost()
-                        .centered(true)
-                        .w(px(28.0))
-                        .h(px(28.0))
-                        .border_0()
-                        .rounded_sm()
-                        .child(
-                            svg()
-                                .path("icons/trash.svg")
-                                .size_4()
-                                .text_color(rgb(TEXT_MUTED)),
-                        )
-                        .on_click(move |_e, w, cx| {
-                            on_remove(w, cx);
-                        }),
-                )
-                .with_transition(remove_opacity_id)
-                .transition_when_else(
-                    is_hovered,
-                    Duration::from_millis(120),
-                    Linear,
-                    |el| el.opacity(0.7),
-                    |el| el.opacity(0.),
                 ),
         )
 }

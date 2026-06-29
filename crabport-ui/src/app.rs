@@ -7,6 +7,7 @@ use rust_i18n::t;
 
 use crate::color::*;
 use crate::components::button::Button;
+use crate::components::context_menu::ContextMenuController;
 use crate::components::dialog::AlertController;
 use crate::layouts::command_palette::{CommandView, ConnectionType};
 use crate::layouts::connection_form::{AuthKind, ConnectionFormState, ConnectionKind};
@@ -60,6 +61,9 @@ pub struct CrabportApp {
     /// entire window regardless of which view is active. Triggered via
     /// `alert_controller.update(cx, |c, cx| c.show(state, cx))`.
     pub alert_controller: Entity<AlertController>,
+    /// Global context menu host. Triggered via
+    /// `context_menu.update(cx, |c, cx| c.show(state, cx))`.
+    pub context_menu: Entity<ContextMenuController>,
     store: Store,
     wired: bool,
     /// Tab id that currently holds focus. Used to focus the terminal only on
@@ -120,6 +124,7 @@ impl CrabportApp {
         let app_entity = cx.entity();
         let hosts_view = cx.new(|_cx| crate::views::hosts::HostsView::new(app_entity));
         let alert_controller = cx.new(|_cx| AlertController::new());
+        let context_menu = cx.new(|_cx| ContextMenuController::new());
 
         // Open store and load persisted data
         let store = Store::open().expect("failed to open store");
@@ -157,6 +162,7 @@ impl CrabportApp {
             sftp_panel,
             hosts_view,
             alert_controller,
+            context_menu,
             store,
             wired: false,
             last_focused_tab_id: None,
@@ -828,6 +834,7 @@ impl Render for CrabportApp {
             &self.sftp_panel,
             &self.hosts_view,
             &self.alert_controller,
+            &self.context_menu,
             _window,
             cx,
         );
@@ -862,5 +869,7 @@ impl Render for CrabportApp {
             .child(self.command_palette.clone())
             // -- Global alert dialog (host-key prompts, etc.) --
             .child(self.alert_controller.clone())
+            // -- Global context menu --
+            .child(self.context_menu.clone())
     }
 }
