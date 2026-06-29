@@ -11,8 +11,7 @@ async-broadcast = "0.7"
 async-channel = "2.5"
 tokio = { version = "1", features = ["rt", "net", "macros", "io-util"] }
 async-trait = "0.1"
-smol = "2.0"
 anyhow = "1"
-tracing = "0.1"
+tracing = { version = "0.1", default-features = false, features = ["std"] }
 parking_lot = "0.12"
 dirs = "6"

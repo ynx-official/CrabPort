@@ -1285,16 +1285,12 @@ name = "crabport-core"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
- "async-broadcast",
- "async-channel 2.5.0",
  "chrono",
  "dirs 6.0.0",
  "getrandom 0.3.4",
  "gpui",
  "rusqlite",
  "serde",
- "serde_json",
- "smol",
  "tracing-subscriber",
 ]
 
@@ -1320,7 +1316,6 @@ dependencies = [
  "dirs 6.0.0",
  "parking_lot",
  "russh",
- "smol",
  "tokio",
  "tracing",
 ]
@@ -1332,9 +1327,6 @@ dependencies = [
  "alacritty_terminal",
  "async-broadcast",
  "async-channel 2.5.0",
- "bytes",
- "crossbeam-channel",
- "futures",
  "libc",
  "parking_lot",
  "smol",
@@ -1358,7 +1350,6 @@ dependencies = [
  "crabport-sftp",
  "crabport-ssh",
  "crabport-terminal",
- "futures",
  "gpui",
  "gpui-animation",
  "gpui-component",
@@ -1368,7 +1359,6 @@ dependencies = [
  "rustc-hash 2.1.2",
  "smol",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -1378,15 +1368,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
 dependencies = [
  "cfg-if",
-]
-
-[[package]]
-name = "crossbeam-channel"
-version = "0.5.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82b8f8f868b36967f9606790d1903570de9ceaf870a7bf9fbbd3016d636a2cb2"
-dependencies = [
- "crossbeam-utils",
 ]
 
 [[package]]
