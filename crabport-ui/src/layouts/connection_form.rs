@@ -38,6 +38,7 @@ pub enum AuthKind {
 
 /// Holds all mutable state for the connection form overlay so that
 /// `ConnectionFormView` can be a pure `RenderOnce` renderer.
+#[derive(Clone)]
 pub struct ConnectionFormState {
     pub active: bool,
     pub kind: ConnectionKind,

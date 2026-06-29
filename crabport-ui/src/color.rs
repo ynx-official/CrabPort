@@ -40,6 +40,18 @@ pub const BTN_PRIMARY_BG_DISABLED: u32 = 0x1e3a5f;
 pub const BTN_PRIMARY_BORDER: u32 = 0x3b82f6;
 pub const BTN_PRIMARY_TEXT_DISABLED: u32 = 0x93c5fd;
 
+// Button — Ghost (transparent, icon-only friendly)
+// Default bg is fully transparent (alpha = 0x00) so the button blends with
+// its parent row. Hover uses a brighter shade than row hover (SURFACE_ACTIVE
+// = 0x313244) so the icon button stands out when hovered. Colors use the
+// 0xRRGGBBAA format so the alpha channel is respected via rgba().
+pub const BTN_GHOST_BG: u32 = 0x00000000;
+pub const BTN_GHOST_BG_HOVER: u32 = 0x45475aff;
+pub const BTN_GHOST_BG_SELECTED: u32 = 0x313244ff;
+pub const BTN_GHOST_BG_DISABLED: u32 = 0x00000000;
+pub const BTN_GHOST_BORDER: u32 = 0x00000000;
+pub const BTN_GHOST_TEXT_DISABLED: u32 = 0x585b70ff;
+
 // Input
 pub const INPUT_BG: u32 = 0x181825;
 pub const INPUT_BG_FOCUSED: u32 = 0x1e1e2e;

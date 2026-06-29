@@ -45,6 +45,7 @@
 use gpui::{prelude::FluentBuilder, *};
 use gpui_animation::{animation::TransitionExt, transition::general::Linear};
 use gpui_component::input::{Input, InputState};
+use gpui_component::{Sizable, Size};
 use std::time::Duration;
 
 use crate::color::*;
@@ -67,6 +68,9 @@ pub struct StyledInput {
     disabled: bool,
     height: Pixels,
     multi_line: bool,
+    /// Optional override for the input text size (default inherits from
+    /// `gpui-component` Input, which is `text_sm` for `Size::Medium`).
+    input_size: Option<Size>,
 }
 
 impl StyledInput {
@@ -82,6 +86,7 @@ impl StyledInput {
             disabled: false,
             height: px(32.0),
             multi_line: false,
+            input_size: None,
         }
     }
 
@@ -131,6 +136,23 @@ impl StyledInput {
         self
     }
 
+    /// Override the input text size. Useful for compact inputs in side
+    /// panels (e.g. SFTP path bar).
+    pub fn text_size(mut self, size: Pixels) -> Self {
+        // `Size::Size(s)` makes gpui-component render text at `s * 0.875`.
+        // Solve for the pixel value that yields the requested size.
+        self.input_size = Some(Size::Size(size * (1.0 / 0.875)));
+        self
+    }
+
+    /// Compact variant: smaller text + shorter height. Convenience for
+    /// `text_size(px(11.0)).height(px(26.0))`.
+    pub fn xsmall(mut self) -> Self {
+        self.input_size = Some(Size::XSmall);
+        self.height = px(26.0);
+        self
+    }
+
     /// Set the number of visible rows for multi-line input.
     /// Each row is roughly one line-height (~20px).
     pub fn rows(mut self, rows: usize) -> Self {
@@ -167,16 +189,23 @@ impl RenderOnce for StyledInput {
 
         let col_id = ElementId::Name(format!("{}-col", self.id).into());
         let shell_id = ElementId::Name(format!("{}-shell", self.id).into());
+        let input_size = self.input_size;
 
         // ------------------------------------------------------------------
         // Prefix / suffix wrappers
         // ------------------------------------------------------------------
+        // In xsmall mode (`Size::XSmall`) use tighter padding so the icon sits
+        // closer to the left edge.
+        let (prefix_pl, prefix_pr, suffix_pl, suffix_pr) = match input_size {
+            Some(Size::XSmall) => (px(6.0), px(4.0), px(4.0), px(6.0)),
+            _ => (px(8.0), px(4.0), px(4.0), px(8.0)),
+        };
         let prefix_el = self.prefix.map(|p| {
             div()
                 .flex()
                 .items_center()
-                .pl_2()
-                .pr_1()
+                .pl(prefix_pl)
+                .pr(prefix_pr)
                 .flex_shrink_0()
                 .text_color(rgb(TEXT_MUTED))
                 .child(p)
@@ -186,8 +215,8 @@ impl RenderOnce for StyledInput {
             div()
                 .flex()
                 .items_center()
-                .pl_1()
-                .pr_2()
+                .pl(suffix_pl)
+                .pr(suffix_pr)
                 .flex_shrink_0()
                 .text_color(rgb(TEXT_MUTED))
                 .child(s)
@@ -228,12 +257,19 @@ impl RenderOnce for StyledInput {
             })
             .when_some(prefix_el, |el, p| el.child(p))
             .child(
-                div().flex_1().min_w_0().h_full().child(
-                    Input::new(&state)
-                        .appearance(false)
-                        .bordered(false)
-                        .when(multi_line, |input| input.h_full()),
-                ),
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .when_else(multi_line, |el| el.items_start(), |el| el.items_center())
+                    .child(
+                        Input::new(&state)
+                            .appearance(false)
+                            .bordered(false)
+                            .when_some(input_size, |input, size| input.with_size(size))
+                            .when(multi_line, |input| input.h_full()),
+                    ),
             )
             .when_some(suffix_el, |el, s| el.child(s));
 

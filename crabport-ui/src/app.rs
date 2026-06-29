@@ -53,8 +53,14 @@ pub struct CrabportApp {
     pub hosts: Vec<ConnectionHost>,
     pub connection_form: Option<ConnectionFormState>,
     pub command_palette: Entity<CommandView>,
+    pub sftp_panel: Entity<crate::views::panel::sftp::SftpPanel>,
+    pub hosts_view: Entity<crate::views::hosts::HostsView>,
     store: Store,
     wired: bool,
+    /// Tab id that currently holds focus. Used to focus the terminal only on
+    /// actual tab switches instead of every render (which would steal focus
+    /// from overlays like SFTP/command palette/connection form).
+    last_focused_tab_id: Option<u64>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -105,6 +111,9 @@ impl CrabportApp {
         };
 
         let command_palette = cx.new(|cx| CommandView::new(window, cx));
+        let sftp_panel = cx.new(|_cx| crate::views::panel::sftp::SftpPanel::new());
+        let app_entity = cx.entity();
+        let hosts_view = cx.new(|_cx| crate::views::hosts::HostsView::new(app_entity));
 
         // Open store and load persisted data
         let store = Store::open().expect("failed to open store");
@@ -139,8 +148,11 @@ impl CrabportApp {
             hosts,
             connection_form: None,
             command_palette,
+            sftp_panel,
+            hosts_view,
             store,
             wired: false,
+            last_focused_tab_id: None,
         }
     }
 
@@ -798,9 +810,26 @@ impl Render for CrabportApp {
             &self.terminal_views,
             &self.hosts,
             self.connection_form.as_ref(),
+            &self.sftp_panel,
+            &self.hosts_view,
             _window,
             cx,
         );
+
+        // Focus the active terminal tab only when the active tab actually
+        // changes — not on every render. Otherwise we'd steal focus from the
+        // SFTP panel, command palette, connection form, etc.
+        if self.last_focused_tab_id != Some(self.active_tab_id) {
+            let active = self.tabs.iter().find(|t| t.id == self.active_tab_id);
+            if let Some(tab) = active
+                && tab.kind == TabKind::Terminal
+                && let Some(entity) = self.terminal_views.get(&tab.id)
+            {
+                let fh = entity.read_with(cx, |view, cx| view.focus_handle(cx));
+                _window.focus(&fh);
+            }
+            self.last_focused_tab_id = Some(self.active_tab_id);
+        }
 
         // ---- Root ----
         div()

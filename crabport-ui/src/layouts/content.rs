@@ -10,7 +10,8 @@ use crate::layouts::panel::render_panel;
 use crate::layouts::tabbar::render_tab_bar;
 use crate::layouts::terminal_toolbar::render_terminal_toolbar;
 use crate::views;
-use crate::views::hosts::ConnectionHost;
+use crate::views::hosts::{ConnectionHost, HostsView};
+use crate::views::panel::sftp::SftpPanel;
 use crate::views::terminal::TerminalView;
 
 pub fn render_content(
@@ -21,6 +22,8 @@ pub fn render_content(
     terminal_views: &HashMap<u64, Entity<TerminalView>>,
     hosts: &[ConnectionHost],
     form_entity: Option<&ConnectionFormState>,
+    sftp_panel: &Entity<SftpPanel>,
+    hosts_view: &Entity<HostsView>,
     window: &mut Window,
     cx: &mut App,
 ) -> Div {
@@ -60,16 +63,25 @@ pub fn render_content(
                         app.remove_host(host_id, cx);
                     });
                 };
-                views::hosts::render_hosts_view(
-                    hosts,
-                    form_entity,
-                    handle.clone(),
-                    on_new,
-                    on_connect,
-                    on_edit,
-                    on_remove,
-                )
-                .into_any_element()
+
+                let on_new_rc: Rc<dyn Fn(&mut Window, &mut App)> = Rc::new(on_new);
+                let on_connect_rc: Rc<dyn Fn(i64, &mut Window, &mut App)> = Rc::new(on_connect);
+                let on_edit_rc: Rc<dyn Fn(i64, &mut Window, &mut App)> = Rc::new(on_edit);
+                let on_remove_rc: Rc<dyn Fn(i64, &mut Window, &mut App)> = Rc::new(on_remove);
+
+                hosts_view.update(cx, |view, cx| {
+                    view.set_state(
+                        hosts.to_vec(),
+                        form_entity.cloned(),
+                        Some(on_new_rc),
+                        Some(on_connect_rc),
+                        Some(on_edit_rc),
+                        Some(on_remove_rc),
+                        cx,
+                    );
+                });
+
+                hosts_view.clone().into_any_element()
             }
             SidebarItem::Tunnels => {
                 views::tunnels::render_tunnels_view(|_, _| {}).into_any_element()
@@ -89,10 +101,6 @@ pub fn render_content(
         },
         Some(TabKind::Terminal) => {
             if let Some(terminal_entity) = active_tab.and_then(|tab| terminal_views.get(&tab.id)) {
-                terminal_entity.read_with(cx, |view, cx| {
-                    window.focus(&view.focus_handle(cx));
-                });
-
                 div()
                     .size_full()
                     .pt_2()
@@ -149,7 +157,8 @@ pub fn render_content(
         )
     };
 
-    // Read SFTP state from the active TerminalView's backend
+    // Read SFTP state from the active TerminalView's backend and push it
+    // into the shared SftpPanel entity.
     let (sftp_entries, sftp_cwd): (
         std::sync::Arc<Vec<(String, bool)>>,
         Option<std::sync::Arc<String>>,
@@ -170,20 +179,32 @@ pub fn render_content(
     };
 
     // Build SFTP navigate callback
-    let sftp_navigate: Option<Rc<dyn Fn(String, &mut Window, &mut App)>> = if is_terminal {
+    let sftp_navigate: Option<Rc<dyn Fn(String, &mut App)>> = if is_terminal {
         active_tab.and_then(|tab| {
             terminal_views.get(&tab.id).map(|entity| {
                 let entity = entity.clone();
-                Rc::new(move |path: String, _w: &mut Window, cx: &mut App| {
+                Rc::new(move |path: String, cx: &mut App| {
                     entity.read_with(cx, |view, _cx| {
                         view.sftp_navigate(&path);
                     });
-                }) as Rc<dyn Fn(String, &mut Window, &mut App)>
+                }) as Rc<dyn Fn(String, &mut App)>
             })
         })
     } else {
         None
     };
+
+    let has_sftp = !sftp_entries.is_empty();
+    sftp_panel.update(cx, |panel, cx| {
+        panel.set_state(
+            sftp_entries,
+            sftp_cwd,
+            sftp_navigate,
+            active_tab_id,
+            window,
+            cx,
+        );
+    });
 
     div()
         .flex_1()
@@ -205,13 +226,7 @@ pub fn render_content(
                 .flex_row()
                 .overflow_hidden()
                 .child(view)
-                .child(render_panel(
-                    is_terminal,
-                    0,
-                    sftp_entries,
-                    sftp_cwd,
-                    sftp_navigate,
-                )),
+                .child(render_panel(is_terminal, 0, has_sftp, sftp_panel.clone())),
         )
         .child(render_terminal_toolbar(is_terminal, status, metrics))
 }

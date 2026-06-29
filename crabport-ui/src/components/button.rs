@@ -88,6 +88,19 @@ impl Button {
         }
     }
 
+    /// Ghost button: transparent background, no visible border. Hover reveals
+    /// a subtle surface background. Good for icon-only action buttons nested
+    /// inside rows (edit / delete / etc.).
+    pub fn ghost(mut self) -> Self {
+        self.bg = BTN_GHOST_BG;
+        self.bg_hover = BTN_GHOST_BG_HOVER;
+        self.bg_selected = BTN_GHOST_BG_SELECTED;
+        self.bg_disabled = BTN_GHOST_BG_DISABLED;
+        self.border = BTN_GHOST_BORDER;
+        self.text_disabled = BTN_GHOST_TEXT_DISABLED;
+        self
+    }
+
     // -- Color overrides --
 
     pub fn bg(mut self, color: u32) -> Self {
@@ -183,6 +196,10 @@ impl RenderOnce for Button {
         let bg_disabled = self.bg_disabled;
         let border = self.border;
         let text_disabled = self.text_disabled;
+        // Interpret each color as rgba() so the alpha channel is respected.
+        // Constants ≤ 0xFFFFFF (3-byte RGB) get an implicit opaque alpha
+        // (0xff) appended; 4-byte 0xRRGGBBAA constants use their own alpha.
+        let to_color = |c: u32| rgba(if c <= 0xFFFFFF { (c << 8) | 0xFF } else { c });
 
         let mut root = div()
             .id(self.id.clone())
@@ -195,11 +212,11 @@ impl RenderOnce for Button {
             )
             .w_full()
             .border_1()
-            .border_color(rgb(border))
+            .border_color(to_color(border))
             .rounded_md()
             .h_8()
             .overflow_hidden()
-            .bg(rgb(bg));
+            .bg(to_color(bg));
         root.style().refine(&self.style);
 
         // Icon
@@ -233,6 +250,9 @@ impl RenderOnce for Button {
         let content = content.children(self.children);
 
         // Close area
+        // The close container is sized to the icon plus a little padding so
+        // the hover region is a comfortable click target without spanning
+        // the whole right half of the button.
         let close_el = if has_close {
             let close_bg_id = ElementId::Name(format!("{}-close-bg", self.id).into());
             let close_opacity_id = ElementId::Name(format!("{}-close-opacity", self.id).into());
@@ -252,14 +272,14 @@ impl RenderOnce for Button {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .h_4()
-                            .w_4()
+                            .h_5()
+                            .w_5()
                             .rounded_sm()
                             .cursor_pointer()
                             .child(
                                 svg()
                                     .path("icons/close.svg")
-                                    .size_3()
+                                    .size_3p5()
                                     .text_color(rgb(TEXT_PRIMARY)),
                             )
                             .on_click({
@@ -268,6 +288,7 @@ impl RenderOnce for Button {
                                     if let Some(ref cb) = on_close {
                                         cb(w, cx);
                                     }
+                                    cx.stop_propagation();
                                 }
                             })
                             .bg(rgb(SURFACE_ACTIVE)),
@@ -295,8 +316,8 @@ impl RenderOnce for Button {
         root.with_transition(self.id).when_else(
             self.disabled.unwrap_or_default(),
             move |this| {
-                this.bg(rgb(bg_disabled))
-                    .text_color(rgb(text_disabled))
+                this.bg(to_color(bg_disabled))
+                    .text_color(to_color(text_disabled))
                     .cursor_not_allowed()
             },
             move |this| {
@@ -305,21 +326,26 @@ impl RenderOnce for Button {
                         this.on_hover(move |h, w, a| (on_hover)(h, w, a))
                     })
                     .when_some(self.on_click, |this, on_click| {
-                        this.on_click(move |e, w, a| (on_click)(e, w, a))
+                        this.on_click(move |e, w, a| {
+                            (on_click)(e, w, a);
+                            // Prevent the click from bubbling to parent
+                            // elements (e.g. row double-click handlers).
+                            a.stop_propagation();
+                        })
                     })
                     .transition_when_else(
                         self.selected.unwrap_or_default(),
                         Duration::from_millis(250),
                         Linear,
-                        move |this| this.bg(rgb(bg_selected)),
-                        move |this| this.bg(rgb(bg)),
+                        move |this| this.bg(to_color(bg_selected)),
+                        move |this| this.bg(to_color(bg)),
                     )
                     .transition_on_hover(
                         Duration::from_millis(250),
                         Linear,
                         move |hovered, this| {
                             if *hovered {
-                                this.bg(rgb(bg_hover))
+                                this.bg(to_color(bg_hover))
                             } else {
                                 this
                             }

@@ -13,6 +13,9 @@ fn main() {
         .run(|cx| {
             gpui_component::init(cx);
 
+            // Force dark theme regardless of system appearance.
+            gpui_component::theme::Theme::change(gpui_component::theme::ThemeMode::Dark, None, cx);
+
             cx.bind_keys([
                 KeyBinding::new("tab", TerminalTab, Some("CrabPortTerminal")),
                 KeyBinding::new("shift-tab", TerminalShiftTab, Some("CrabPortTerminal")),
