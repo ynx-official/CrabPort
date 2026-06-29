@@ -1,6 +1,6 @@
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -20,6 +20,11 @@ use crate::views::terminal::color::*;
 pub struct ConnectionLogEntry {
     pub message: String,
     pub level: ConnectionLogLevel,
+    /// When this entry was pushed. Used by the terminal frame pump to
+    /// keep repainting while any row is still mid-fade-in, so that
+    /// the gpui-animation transition on each row actually gets to
+    /// play out instead of being skipped due to a lack of redraws.
+    pub added_at: std::time::Instant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +78,11 @@ pub struct ConnectionOverlayState {
     /// `needs_repaint` flag — that way we get a repaint without needing
     /// an `AsyncApp` (which is not `Send`) inside the verifier closure.
     pub dirty: Arc<AtomicBool>,
+    /// Current spinner rotation in milliradians (0..2π*1000). Advanced by
+    /// the terminal frame pump while the overlay is visible and the status
+    /// is `Connecting`, so the loader icon spins smoothly. Read by the
+    /// render method and converted to `Radians` for the SVG transform.
+    pub spinner_rotation: Arc<AtomicU32>,
 }
 
 /// A pending host-key confirmation request from the SSH backend.
@@ -101,6 +111,7 @@ impl ConnectionOverlayState {
             hidden: false,
             pending_host_key: None,
             dirty: Arc::new(AtomicBool::new(false)),
+            spinner_rotation: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -109,6 +120,7 @@ impl ConnectionOverlayState {
         self.logs.push(ConnectionLogEntry {
             message: message.into(),
             level,
+            added_at: std::time::Instant::now(),
         });
     }
 
@@ -259,6 +271,7 @@ pub(crate) fn render_connection_overlay(
     status: RemoteStatus,
     logs: &[ConnectionLogEntry],
     count: u64,
+    spinner_rotation_mrad: u32,
     on_reconnect: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
 ) -> AnyElement {
     if !overlay_visible {
@@ -300,7 +313,7 @@ pub(crate) fn render_connection_overlay(
                         .items_center()
                         .gap_3()
                         .child(match status {
-                            RemoteStatus::Connecting => render_spinner(),
+                            RemoteStatus::Connecting => render_spinner(spinner_rotation_mrad),
                             RemoteStatus::Disconnected => {
                                 div().size(px(12.0)).rounded_full().bg(rgb(0xf38ba8))
                             }
@@ -318,23 +331,51 @@ pub(crate) fn render_connection_overlay(
                         ),
                 )
                 .child(
+                    // Log list with a bottom gradient mask so entries appear to
+                    // emerge from / fade into the overlay background.
                     div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
+                        .relative()
                         .w_full()
-                        .children(logs.iter().map(|entry| {
-                            let prefix = entry.level.prefix();
-                            let color = entry.level.color();
-                            let text = format!("{}{}", prefix, entry.message);
+                        .child(div().flex().flex_col().gap_1().w_full().children(
+                            logs.iter().enumerate().map(|(idx, entry)| {
+                                let prefix = entry.level.prefix();
+                                let color = entry.level.color();
+                                let text = format!("{}{}", prefix, entry.message);
+                                let row_id =
+                                    ElementId::Name(format!("conn-log-{}-{}", count, idx).into());
+                                div()
+                                    .id(row_id.clone())
+                                    .flex()
+                                    .flex_row()
+                                    .items_start()
+                                    .text_sm()
+                                    .text_color(rgb(color))
+                                    .opacity(0.0)
+                                    .mt(px(-4.0))
+                                    .with_transition(row_id)
+                                    .transition_when_else(
+                                        true,
+                                        std::time::Duration::from_millis(320),
+                                        EaseInOutCubic,
+                                        |el| el.opacity(1.0).mt_0(),
+                                        |el| el.opacity(0.0).mt(px(-4.0)),
+                                    )
+                                    .child(text)
+                            }),
+                        ))
+                        .child(
                             div()
-                                .flex()
-                                .flex_row()
-                                .items_start()
-                                .text_sm()
-                                .text_color(rgb(color))
-                                .child(text)
-                        })),
+                                .absolute()
+                                .bottom_0()
+                                .left_0()
+                                .w_full()
+                                .h(px(20.0))
+                                .bg(linear_gradient(
+                                    0.0,
+                                    linear_color_stop(rgb(TERM_BG), 0.0).opacity(1.0),
+                                    linear_color_stop(rgb(TERM_BG), 1.0).opacity(0.0),
+                                )),
+                        ),
                 )
                 .when(status == RemoteStatus::Disconnected, |el| {
                     let mut btn =
@@ -351,10 +392,14 @@ pub(crate) fn render_connection_overlay(
         .into_any_element()
 }
 
-fn render_spinner() -> Div {
-    div()
-        .size(px(12.0))
-        .rounded_full()
-        .border_2()
-        .border_color(rgb(TERM_FG))
+fn render_spinner(rotation_mrad: u32) -> Div {
+    // Convert milliradians → radians (0..2π).
+    let rad = (rotation_mrad as f32) / 1000.0;
+    div().child(
+        svg()
+            .path("icons/loader-circle.svg")
+            .size(px(14.0))
+            .text_color(rgb(TERM_FG))
+            .with_transformation(gpui::Transformation::rotate(gpui::radians(rad))),
+    )
 }

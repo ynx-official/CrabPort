@@ -186,16 +186,50 @@ impl TerminalView {
         let overlay_dirty_pump = overlay.clone();
         let pump_entity = cx.entity().downgrade();
         cx.spawn(async move |_this, cx| {
+            // One full revolution per ~900ms feels close to typical web
+            // loaders. At 120Hz that's ~2π/108 rad per tick, encoded as
+            // milliradians to keep the atomic integer-friendly.
+            const TWO_PI_MRAD: u32 = (std::f32::consts::TAU * 1000.0) as u32;
+            const TICKS_PER_REV: u32 = 108;
+            const STEP_MRAD: u32 = TWO_PI_MRAD / TICKS_PER_REV;
+            // Log row fade-in duration. Must match the value used in
+            // `connection_overlay::render_connection_overlay` so the repaint
+            // loop keeps ticking for exactly as long as the transition runs.
+            const LOG_FADE_MS: u128 = 320;
             loop {
                 smol::Timer::after(std::time::Duration::from_micros(8333)).await;
+                let ov = overlay_dirty_pump.lock();
                 // Fold the overlay-side dirty flag (set from non-gpui threads,
                 // e.g. the SSH backend pushing a host-key prompt) into the
                 // view's own needs_repaint flag.
-                if overlay_dirty_pump
-                    .lock()
-                    .dirty
-                    .swap(false, Ordering::AcqRel)
-                {
+                if ov.dirty.swap(false, Ordering::AcqRel) {
+                    dirty_pump.store(true, Ordering::Release);
+                }
+                // While the connecting spinner is on screen, advance its
+                // rotation and keep the view dirty so it repaints every
+                // tick for a smooth spin.
+                let spin = !ov.hidden
+                    && ov.status == RemoteStatus::Connecting
+                    && ov.pending_host_key.is_none();
+                // Also keep repainting while any log row is still
+                // mid-fade-in, so each entry's gpui-animation transition
+                // actually plays out (without this, only the last row of a
+                // batch gets visible animation because earlier rows' redraws
+                // stop before their transition finishes).
+                let now = std::time::Instant::now();
+                let logs_animating = ov
+                    .logs
+                    .iter()
+                    .any(|e| now.duration_since(e.added_at).as_millis() < LOG_FADE_MS);
+                let spinner_rotation = ov.spinner_rotation.clone();
+                drop(ov);
+                if spin {
+                    let prev = spinner_rotation.load(Ordering::Relaxed);
+                    let next = prev.wrapping_add(STEP_MRAD) % TWO_PI_MRAD;
+                    spinner_rotation.store(next, Ordering::Relaxed);
+                    dirty_pump.store(true, Ordering::Release);
+                }
+                if logs_animating {
                     dirty_pump.store(true, Ordering::Release);
                 }
                 if dirty_pump.swap(false, Ordering::AcqRel) {
@@ -554,6 +588,7 @@ impl Render for TerminalView {
         let is_fading_out = ov.is_fading_out();
         let log_entries: Vec<ConnectionLogEntry> = ov.logs.clone();
         let current_status = ov.status;
+        let spinner_rotation_mrad = ov.spinner_rotation.load(Ordering::Relaxed);
         drop(ov);
 
         let is_remote = !self.remote_host.is_empty();
@@ -1159,6 +1194,7 @@ impl Render for TerminalView {
                     current_status,
                     &log_entries,
                     self.count,
+                    spinner_rotation_mrad,
                     Some(on_reconnect),
                 ))
             })
