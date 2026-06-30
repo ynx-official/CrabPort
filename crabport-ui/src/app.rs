@@ -63,6 +63,8 @@ pub struct CrabportApp {
     /// Snippets). Driven by `Tabs::on_change` in `render_panel`.
     pub panel_active_tab: usize,
     pub hosts_view: Entity<crate::views::hosts::HostsView>,
+    /// Snippets management sidebar view (right-click edit/delete).
+    pub snippets_view: Entity<crate::views::snippets::SnippetsView>,
     /// Global alert dialog host. Rendered at the app root so it overlays the
     /// entire window regardless of which view is active. Triggered via
     /// `alert_controller.update(cx, |c, cx| c.show(state, cx))`.
@@ -131,6 +133,7 @@ impl CrabportApp {
             cx.new(|_cx| crate::views::panel::history_command_panel::HistoryCommandPanel::new());
         let app_entity = cx.entity();
         let hosts_view = cx.new(|_cx| crate::views::hosts::HostsView::new(app_entity));
+        let snippets_view = cx.new(|_cx| crate::views::snippets::SnippetsView::new());
         let alert_controller = cx.new(|_cx| AlertController::new());
         let context_menu = cx.new(|_cx| ContextMenuController::new());
 
@@ -174,6 +177,7 @@ impl CrabportApp {
             history_panel,
             panel_active_tab: 0,
             hosts_view,
+            snippets_view,
             alert_controller,
             context_menu,
             wired: false,
@@ -364,6 +368,7 @@ impl CrabportApp {
                     };
                     app.add_ssh_tab(
                         &name,
+                        Some(row_id),
                         &host,
                         port_num,
                         &username,
@@ -466,6 +471,7 @@ impl CrabportApp {
     pub fn add_ssh_tab(
         &mut self,
         name: &str,
+        host_id: Option<i64>,
         host: &str,
         port: u16,
         username: &str,
@@ -523,6 +529,7 @@ impl CrabportApp {
                 cols,
                 rows,
                 format!("{}@{}", username, host),
+                host_id,
                 overlay,
                 Some(info_for_view),
                 id,
@@ -624,6 +631,7 @@ impl CrabportApp {
 
         self.add_ssh_tab(
             &host.name,
+            Some(host_id),
             &host.host,
             host.port,
             &host.username,
@@ -883,6 +891,7 @@ impl Render for CrabportApp {
             &self.history_panel,
             self.panel_active_tab,
             &self.hosts_view,
+            &self.snippets_view,
             &self.alert_controller,
             &self.context_menu,
             _window,

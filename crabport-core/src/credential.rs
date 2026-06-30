@@ -66,3 +66,19 @@ pub enum CredentialKind {
     Password,
     Certificate,
 }
+
+// ---------------------------------------------------------------------------
+// Snippet
+// ---------------------------------------------------------------------------
+
+/// A saved command snippet. Persisted globally (not scoped to a host) so
+/// the user can build a reusable library of commands across connections.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SnippetEntry {
+    pub id: i64,
+    pub name: String,
+    /// Literal command text to insert into the terminal.
+    pub command: String,
+    #[serde(default)]
+    pub created_at: i64,
+}

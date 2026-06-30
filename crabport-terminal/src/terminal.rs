@@ -13,6 +13,8 @@ use alacritty_terminal::{
 use async_broadcast::{
     InactiveReceiver, Receiver as BroadcastReceiver, Sender as BroadcastSender, broadcast,
 };
+use parking_lot::Mutex;
+use std::collections::VecDeque;
 
 #[derive(Debug, Clone)]
 pub enum BackendEvent {
@@ -204,12 +206,30 @@ impl EventListener for EventProxy {
     }
 }
 
+/// Maximum number of commands retained per session. Matches the Store
+/// limit so the in-memory buffer and the persisted table stay in sync.
+/// Older entries are dropped once this limit is exceeded (LRU by most
+/// recent use).
+const MAX_COMMAND_HISTORY: usize = 300;
+
 pub struct TerminalSession {
     backend: Arc<dyn CrabPortTerminal>,
     term: Arc<FairMutex<Term<EventProxy>>>,
     wakeup_tx: BroadcastSender<()>,
     started: AtomicBool,
     _wakeup_rx: InactiveReceiver<()>,
+    /// Command history, most-recent-first. Capped at [`MAX_COMMAND_HISTORY`]
+    /// entries; the oldest is evicted when full.
+    command_history: Arc<Mutex<VecDeque<String>>>,
+    /// In-progress input line being accumulated by [`Self::write`]. Submitted
+    /// to `command_history` on Enter (CR/LF). Backspace deletes the last
+    /// char; other control bytes are ignored.
+    line_buffer: Arc<Mutex<String>>,
+    /// Optional callback invoked whenever a new command is captured. The UI
+    /// layer (TerminalView) uses this to persist the command to the Store
+    /// — TerminalSession itself stays free of any storage dependency.
+    /// Receives the captured command text.
+    on_command: Arc<Mutex<Option<Arc<dyn Fn(&str) + Send + Sync>>>>,
 }
 
 impl TerminalSession {
@@ -229,6 +249,9 @@ impl TerminalSession {
             wakeup_tx,
             started: AtomicBool::new(false),
             _wakeup_rx,
+            command_history: Arc::new(Mutex::new(VecDeque::with_capacity(MAX_COMMAND_HISTORY))),
+            line_buffer: Arc::new(Mutex::new(String::new())),
+            on_command: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -332,7 +355,102 @@ impl TerminalSession {
     }
 
     pub fn write(&self, data: &[u8]) {
+        self.capture_command(data);
         self.backend.write(data);
+    }
+
+    /// Write raw bytes to the backend **without** capturing them into the
+    /// command history. Used by the History panel's "paste" action so
+    /// inserting a historical command into the input line doesn't re-record
+    /// it as a new entry.
+    pub fn write_raw(&self, data: &[u8]) {
+        self.backend.write(data);
+    }
+
+    /// Snapshot of the command history, most-recent-first. Cheap clone —
+    /// the caller typically hands this to a UI panel each render.
+    pub fn command_history(&self) -> Vec<String> {
+        self.command_history.lock().iter().cloned().collect()
+    }
+
+    /// Direct mutable access to the underlying history deque. Used by the
+    /// UI layer to pre-seed the in-memory buffer with persisted history on
+    /// session creation. Returns a guard; caller assigns the whole deque.
+    pub fn command_history_deque(&self) -> parking_lot::MutexGuard<'_, VecDeque<String>> {
+        self.command_history.lock()
+    }
+
+    /// Register a callback invoked whenever a new command is captured
+    /// (submitted via Enter). The UI layer uses this to persist commands
+    /// to the Store — `TerminalSession` itself has no storage dependency.
+    /// Pass `None` to clear a previously-set callback.
+    pub fn set_on_command(&self, cb: Option<Arc<dyn Fn(&str) + Send + Sync>>) {
+        *self.on_command.lock() = cb;
+    }
+
+    /// Best-effort command capture from the raw input stream.
+    ///
+    /// Accumulates printable bytes into `line_buffer`, treats Backspace
+    /// (DEL `0x7f` or BS `0x08`) as a one-char deletion, and submits the
+    /// buffer as a history entry on CR/LF (`0x0d` / `0x0a`). Empty results
+    /// and exact-duplicates of the most recent entry are skipped.
+    ///
+    /// This is intentionally simple — it doesn't parse ANSI escapes or
+    /// track cursor movement, so commands edited with arrow keys / Ctrl-U
+    /// may be captured with noise. For typical typed-and-Enter usage it's
+    /// accurate enough, and the cost (a lock + small alloc) is negligible.
+    fn capture_command(&self, data: &[u8]) {
+        let mut history = self.command_history.lock();
+        let mut buf = self.line_buffer.lock();
+        for &b in data {
+            match b {
+                // CR or LF — submit the line.
+                0x0d | 0x0a => {
+                    let cmd = buf.trim().to_string();
+                    buf.clear();
+                    if cmd.is_empty() {
+                        continue;
+                    }
+                    // LRU dedup: if the command already exists in
+                    // history, remove it from its current position so it
+                    // can be re-inserted at the front (most-recently-used).
+                    // This mirrors the Store's `updated_at` promotion.
+                    if let Some(pos) = history.iter().position(|c| c == &cmd) {
+                        history.remove(pos);
+                    }
+                    if history.len() >= MAX_COMMAND_HISTORY {
+                        history.pop_back();
+                    }
+                    history.push_front(cmd.clone());
+                    // Notify the UI layer so it can persist the command.
+                    // The callback is cloned out of the Mutex to avoid
+                    // calling it while holding the lock.
+                    let cb = self.on_command.lock().clone();
+                    if let Some(cb) = cb {
+                        cb(&cmd);
+                    }
+                }
+                // Backspace / DEL — delete the last char.
+                0x08 | 0x7f => {
+                    buf.pop();
+                }
+                // Other control bytes — ignore (don't pollute the buffer).
+                0x00..=0x1f | 0x7f..=0xff if b != 0x09 => {
+                    // 0x09 (Tab) is technically control but we keep it so
+                    // shell completion entries are captured as-typed.
+                }
+                // Printable ASCII.
+                0x20..=0x7e => {
+                    buf.push(b as char);
+                }
+                // High bytes (UTF-8 continuation / lead) — push raw so
+                // non-ASCII commands aren't lost. We don't validate UTF-8
+                // here; the buffer is only for display, not execution.
+                _ => {
+                    buf.push(b as char);
+                }
+            }
+        }
     }
 
     pub fn resize(&self, cols: u16, rows: u16) {

@@ -76,6 +76,19 @@ hosts:
   delete_title: "Delete Host"
   delete_prompt: 'Are you sure you want to delete "%{name}"? This cannot be undone.'
   delete_confirm: "Delete"
+snippets:
+  new_button: "New"
+  empty: "No saved snippets. Save commands from the History panel."
+  edit: "Edit"
+  delete: "Delete"
+  delete_title: "Delete Snippet"
+  delete_prompt: 'Are you sure you want to delete "%{name}"? This cannot be undone.'
+  delete_confirm: "Delete"
+  edit_title: "Edit Snippet"
+  name: "Name"
+  command: "Command"
+  save: "Save"
+  cancel: "Cancel"
 window:
   about:
     title: "About CrabPort"

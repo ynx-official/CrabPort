@@ -102,6 +102,10 @@ pub struct TerminalView {
     cursor_bounds: Arc<Mutex<Bounds<Pixels>>>,
     overlay: SharedOverlayState,
     remote_host: String,
+    /// Persisted host id for command-history storage. `None` for local
+    /// terminals (their history is in-memory only, not persisted).
+    #[allow(dead_code)]
+    host_id: Option<i64>,
     count: u64,
     ssh_info: Option<SshConnectionInfo>,
     on_backend_closed: Option<Rc<dyn Fn(&mut App)>>,
@@ -147,7 +151,7 @@ impl TerminalView {
     ) -> Self {
         let overlay = Arc::new(Mutex::new(ConnectionOverlayState::new()));
         Self::with_backend_and_host_and_overlay(
-            backend, cols, rows, host, overlay, ssh_info, count, cx,
+            backend, cols, rows, host, None, overlay, ssh_info, count, cx,
         )
     }
 
@@ -156,6 +160,7 @@ impl TerminalView {
         cols: usize,
         rows: usize,
         host: String,
+        host_id: Option<i64>,
         overlay: SharedOverlayState,
         ssh_info: Option<SshConnectionInfo>,
         count: u64,
@@ -168,6 +173,28 @@ impl TerminalView {
 
         let session = Arc::new(TerminalSession::new(backend, cols, rows));
         session.start();
+
+        // Wire command-history persistence: when the session captures a new
+        // command, persist it to the Store for this host (if any). Local
+        // terminals (host_id = None) keep history in-memory only.
+        if let Some(hid) = host_id {
+            let store = crate::app_state::AppState::store(cx);
+            // Pre-load persisted history into the in-memory buffer so the
+            // panel has data before the user types anything new.
+            if let Ok(cmds) = store.lock().commands_for_host(hid) {
+                let mut history = std::collections::VecDeque::new();
+                for c in cmds {
+                    history.push_back(c);
+                }
+                *session.command_history_deque() = history;
+            }
+            // `store` is `Arc<Mutex<Store>>` — clone for the callback so
+            // the original binding stays usable above.
+            let store_for_cb = store.clone();
+            session.set_on_command(Some(std::sync::Arc::new(move |cmd: &str| {
+                let _ = store_for_cb.lock().add_command(hid, cmd);
+            })));
+        }
 
         let needs_repaint = Arc::new(AtomicBool::new(true));
         let is_remote = !host.is_empty();
@@ -398,6 +425,7 @@ impl TerminalView {
             ))),
             overlay,
             remote_host: host,
+            host_id,
             count,
             ssh_info,
             on_backend_closed: None,
@@ -432,6 +460,20 @@ impl TerminalView {
 
     pub fn sftp_upload(&self, local_path: &str, remote_path: &str) {
         self.session.sftp_upload(local_path, remote_path);
+    }
+
+    /// Snapshot of this session's command history, most-recent-first.
+    /// Returns an empty vec for local terminals or sessions without a
+    /// backend that tracks history.
+    pub fn command_history(&self) -> Vec<String> {
+        self.session.command_history()
+    }
+
+    /// Write raw bytes to the terminal **without** capturing them as a
+    /// command. Used by the History panel's "paste" action so inserting a
+    /// historical command into the input line doesn't re-record it.
+    pub fn write_raw(&self, data: &[u8]) {
+        self.session.write_raw(data);
     }
 
     /// Delete a remote file or directory. The backend stats the path to

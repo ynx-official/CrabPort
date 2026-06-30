@@ -67,6 +67,10 @@ impl ConnectionType {
 pub struct CommandView {
     pub open: bool,
     search_state: Option<Entity<InputState>>,
+    /// Current search query, kept in sync via an `InputEvent::Change`
+    /// subscription on `search_state`. Drives the live filtering of the
+    /// sessions list.
+    search_query: String,
     hosts: Vec<ConnectionHost>,
     on_close: Option<Rc<dyn Fn(&mut Window, &mut App) + 'static>>,
     on_select_host: Option<Rc<dyn Fn(usize, &mut Window, &mut App) + 'static>>,
@@ -78,6 +82,7 @@ impl CommandView {
         Self {
             open: false,
             search_state: None,
+            search_query: String::new(),
             hosts: Vec::new(),
             on_close: None,
             on_select_host: None,
@@ -87,10 +92,24 @@ impl CommandView {
 
     pub fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open = true;
-        // Lazy-init search InputState
+        // Lazy-init search InputState + subscribe to changes for live
+        // filtering of the sessions list.
         if self.search_state.is_none() {
-            self.search_state = Some(cx.new(|cx| InputState::new(window, cx)));
+            let entity = cx.new(|cx| InputState::new(window, cx));
+            cx.subscribe(
+                &entity,
+                |this, input, event: &gpui_component::input::InputEvent, cx| {
+                    if let gpui_component::input::InputEvent::Change { .. } = event {
+                        this.search_query = input.read(cx).value().to_string();
+                        cx.notify();
+                    }
+                },
+            )
+            .detach();
+            self.search_state = Some(entity);
         }
+        // Clear any previous query when re-opening.
+        self.search_query.clear();
         cx.notify();
     }
 
@@ -127,11 +146,13 @@ impl Render for CommandView {
         let on_select_host = self.on_select_host.clone();
         let on_new_connection = self.on_new_connection.clone();
         let hosts = self.hosts.clone();
+        let query = self.search_query.clone();
 
         render_overlay(is_open, on_close).child(render_dialog(
             is_open,
             search,
             hosts,
+            query,
             on_select_host,
             on_new_connection,
         ))
@@ -215,6 +236,7 @@ fn render_dialog(
     is_open: bool,
     search: AnyElement,
     hosts: Vec<ConnectionHost>,
+    query: String,
     on_select_host: Option<Rc<dyn Fn(usize, &mut Window, &mut App) + 'static>>,
     on_new_connection: Option<Rc<dyn Fn(ConnectionType, &mut Window, &mut App) + 'static>>,
 ) -> impl IntoElement {
@@ -265,19 +287,37 @@ fn render_dialog(
                 .p_2()
                 .flex()
                 .flex_col()
-                .child(render_hosts_list(hosts, is_open, on_select_host))
+                .child(render_hosts_list(hosts, query, is_open, on_select_host))
                 .child(render_connection_list(is_open, on_new_connection)),
         )
 }
 
 fn render_hosts_list(
     hosts: Vec<ConnectionHost>,
+    query: String,
     is_open: bool,
     on_select_host: Option<Rc<dyn Fn(usize, &mut Window, &mut App) + 'static>>,
 ) -> impl IntoElement {
-    div().when(!hosts.is_empty(), |el| {
-        el.child(group_label(t!("new_connection.hosts")))
-            .children(hosts.into_iter().take(5).enumerate().map(|(i, host)| {
+    // Live-filter sessions by the current search query. Case-insensitive
+    // match on name / host / username. Empty query shows all (capped at 5
+    // for the palette).
+    let q = query.trim().to_lowercase();
+    let filtered: Vec<ConnectionHost> = if q.is_empty() {
+        hosts.into_iter().take(5).collect()
+    } else {
+        hosts
+            .into_iter()
+            .filter(|h| {
+                h.name.to_lowercase().contains(&q)
+                    || h.host.to_lowercase().contains(&q)
+                    || h.username.to_lowercase().contains(&q)
+            })
+            .collect()
+    };
+
+    div().when(!filtered.is_empty(), |el| {
+        el.child(group_label(t!("sidebar.sessions")))
+            .children(filtered.into_iter().enumerate().map(|(i, host)| {
                 let on_select = on_select_host.clone();
                 let is_favorite = host.favorite;
                 command_item(

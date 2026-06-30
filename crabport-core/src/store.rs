@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::credential::{CredentialEntry, CredentialKind, HostEntry, HostKind};
+use crate::credential::{CredentialEntry, CredentialKind, HostEntry, HostKind, SnippetEntry};
 use crate::crypto;
 
 // ---------------------------------------------------------------------------
@@ -154,8 +154,64 @@ impl Store {
                 .map_err(|e| StoreError::Db(e.to_string()))?;
         }
 
+        // Migration 3: command history table. One row per captured
+        // command, scoped to a host (via host_id) so each connection keeps
+        // its own history across app restarts. `created_at` is unix
+        // seconds for ordering (most-recent-first on query).
+        // `updated_at` is bumped when a duplicate command is re-run so the
+        // LRU eviction (by `updated_at`) keeps frequently-used commands.
+        if current < 3 {
+            self.db
+                .execute_batch(
+                    "
+                    CREATE TABLE IF NOT EXISTS command_history (
+                        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                        host_id    INTEGER NOT NULL,
+                        command    TEXT    NOT NULL,
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL DEFAULT 0
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_command_history_host
+                        ON command_history (host_id, id DESC);
+                    ",
+                )
+                .map_err(|e| StoreError::Db(e.to_string()))?;
+        }
+
+        // Migration 4: snippets table. Global code-snippet library — not
+        // scoped to a host. `name` is the user-facing label, `command` is
+        // the literal text to insert into the terminal.
+        if current < 4 {
+            self.db
+                .execute_batch(
+                    "
+                    CREATE TABLE IF NOT EXISTS snippets (
+                        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name       TEXT    NOT NULL,
+                        command    TEXT    NOT NULL,
+                        created_at INTEGER NOT NULL
+                    );
+                    ",
+                )
+                .map_err(|e| StoreError::Db(e.to_string()))?;
+        }
+
+        // Migration 5: add `updated_at` column to `command_history` for
+        // existing databases. New databases already get it from migration 3.
+        // `updated_at` is bumped when a duplicate command is re-run so LRU
+        // eviction keeps frequently-used commands alive.
+        if current < 5 {
+            // ALTER TABLE ... ADD COLUMN is idempotent-safe via try/catch:
+            // if the column already exists (e.g. a fresh DB that ran
+            // migration 3 with the column included), this errors and we
+            // ignore it.
+            let _ = self.db.execute_batch(
+                "ALTER TABLE command_history ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0;",
+            );
+        }
+
         // Record the latest migration version
-        let latest = 2;
+        let latest = 5;
         if current < latest {
             self.db
                 .execute(
@@ -539,6 +595,158 @@ impl Store {
         };
         let cred = self.find_credential(cred_id)?;
         Ok(cred.map(|c| c.secret))
+    }
+
+    // -----------------------------------------------------------------
+    // Command history
+    // -----------------------------------------------------------------
+
+    /// Maximum number of commands retained per host. When the limit is
+    /// exceeded the entries with the oldest `updated_at` (LRU) are evicted.
+    const MAX_COMMAND_HISTORY: usize = 300;
+
+    /// Append a command to the persistent history for `host_id`.
+    ///
+    /// - **Duplicate command exists**: bump that row's `updated_at` to now
+    ///   so it stays alive under LRU eviction and floats to the top of the
+    ///   "most-recently-used" ordering. No new row is inserted.
+    /// - **New command**: insert with `created_at = updated_at = now`.
+    /// - **Over limit**: delete the oldest-by-`updated_at` rows beyond
+    ///   [`MAX_COMMAND_HISTORY`].
+    ///
+    /// The in-memory dedup in `TerminalSession` only skips consecutive
+    /// duplicates; this Store-level dedup handles the non-consecutive case
+    /// (re-running an older command) by promoting it instead of re-inserting.
+    pub fn add_command(&self, host_id: i64, command: &str) -> Result<(), StoreError> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        // If this exact command already exists for this host, bump its
+        // `updated_at` (LRU promotion) instead of inserting a duplicate.
+        let updated = self
+            .db
+            .execute(
+                "UPDATE command_history SET updated_at = ?1 WHERE host_id = ?2 AND command = ?3",
+                params![now, host_id, command],
+            )
+            .map_err(|e| StoreError::Db(e.to_string()))?;
+        if updated > 0 {
+            return Ok(());
+        }
+
+        // New command — insert.
+        self.db
+            .execute(
+                "INSERT INTO command_history (host_id, command, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![host_id, command, now, now],
+            )
+            .map_err(|e| StoreError::Db(e.to_string()))?;
+
+        // LRU eviction: keep the `MAX_COMMAND_HISTORY` most-recently-updated
+        // rows per host, delete the rest.
+        self.db
+            .execute(
+                "DELETE FROM command_history WHERE host_id = ?1 AND id NOT IN (
+                    SELECT id FROM command_history WHERE host_id = ?1
+                    ORDER BY updated_at DESC LIMIT ?2
+                 )",
+                params![host_id, Self::MAX_COMMAND_HISTORY as i64],
+            )
+            .map_err(|e| StoreError::Db(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Load the command history for `host_id`, most-recently-used first
+    /// (ordered by `updated_at` DESC so re-run commands float to the top).
+    pub fn commands_for_host(&self, host_id: i64) -> Result<Vec<String>, StoreError> {
+        let mut stmt = self
+            .db
+            .prepare(
+                "SELECT command FROM command_history WHERE host_id = ?1 ORDER BY updated_at DESC",
+            )
+            .map_err(|e| StoreError::Db(e.to_string()))?;
+        let rows = stmt
+            .query_map(params![host_id], |row| row.get::<_, String>(0))
+            .map_err(|e| StoreError::Db(e.to_string()))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| StoreError::Db(e.to_string()))?);
+        }
+        Ok(out)
+    }
+
+    // -----------------------------------------------------------------
+    // Snippets
+    // -----------------------------------------------------------------
+
+    /// Insert a new snippet. `name` defaults to the command text when empty.
+    pub fn add_snippet(&self, name: &str, command: &str) -> Result<i64, StoreError> {
+        let name = if name.trim().is_empty() {
+            command
+        } else {
+            name
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        self.db
+            .execute(
+                "INSERT INTO snippets (name, command, created_at) VALUES (?1, ?2, ?3)",
+                params![name, command, now],
+            )
+            .map_err(|e| StoreError::Db(e.to_string()))?;
+        Ok(self.db.last_insert_rowid())
+    }
+
+    /// Load all snippets, most-recently-created first.
+    pub fn snippets(&self) -> Result<Vec<SnippetEntry>, StoreError> {
+        let mut stmt = self
+            .db
+            .prepare("SELECT id, name, command, created_at FROM snippets ORDER BY id DESC")
+            .map_err(|e| StoreError::Db(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(SnippetEntry {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    command: row.get(2)?,
+                    created_at: row.get(3)?,
+                })
+            })
+            .map_err(|e| StoreError::Db(e.to_string()))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| StoreError::Db(e.to_string()))?);
+        }
+        Ok(out)
+    }
+
+    /// Delete a snippet by id.
+    pub fn remove_snippet(&self, id: i64) -> Result<(), StoreError> {
+        self.db
+            .execute("DELETE FROM snippets WHERE id = ?1", params![id])
+            .map_err(|e| StoreError::Db(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Update an existing snippet's name + command.
+    pub fn update_snippet(&self, id: i64, name: &str, command: &str) -> Result<(), StoreError> {
+        let name = if name.trim().is_empty() {
+            command
+        } else {
+            name
+        };
+        self.db
+            .execute(
+                "UPDATE snippets SET name = ?1, command = ?2 WHERE id = ?3",
+                params![name, command, id],
+            )
+            .map_err(|e| StoreError::Db(e.to_string()))?;
+        Ok(())
     }
 }
 

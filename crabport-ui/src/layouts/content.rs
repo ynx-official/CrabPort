@@ -33,6 +33,7 @@ pub fn render_content(
     // and passed in to avoid a nested `handle.read_with` during render.
     panel_active_tab: usize,
     hosts_view: &Entity<HostsView>,
+    snippets_view: &Entity<crate::views::snippets::SnippetsView>,
     alert_controller: &Entity<AlertController>,
     context_menu: &Entity<ContextMenuController>,
     window: &mut Window,
@@ -99,7 +100,26 @@ pub fn render_content(
             SidebarItem::Tunnels => {
                 views::tunnels::render_tunnels_view(|_, _| {}).into_any_element()
             }
-            SidebarItem::Snippets => views::snippets::render_snippets_view().into_any_element(),
+            SidebarItem::Snippets => {
+                // Load snippets from the Store and push into the view.
+                let store = crate::app_state::AppState::store(cx);
+                let rows = if let Ok(snippets) = store.lock().snippets() {
+                    snippets
+                        .into_iter()
+                        .map(|s| crate::views::snippets::SnippetRow {
+                            id: s.id,
+                            name: s.name,
+                            command: s.command,
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                };
+                snippets_view.update(cx, |view, cx| {
+                    view.set_state(rows, context_menu.clone(), alert_controller.clone(), cx);
+                });
+                snippets_view.clone().into_any_element()
+            }
             SidebarItem::History => div()
                 .size_full()
                 .flex()
@@ -287,6 +307,81 @@ pub fn render_content(
             window,
             cx,
         );
+    });
+
+    // ---- History-command panel ----
+    //
+    // Read the active terminal's command history + wire a paste callback
+    // that writes a selected command back into the terminal's input line
+    // (via `write_raw`, which bypasses history capture so the pasted
+    // command isn't re-recorded).
+    let (history_commands, history_on_paste): (
+        std::sync::Arc<Vec<crate::views::panel::history_command_panel::HistoryCommand>>,
+        Option<Rc<dyn Fn(String, &mut App)>>,
+    ) = if is_terminal {
+        if let Some(terminal_entity) = active_tab.and_then(|tab| terminal_views.get(&tab.id)) {
+            let cmds = terminal_entity.read_with(cx, |view, _cx| {
+                view.command_history()
+                    .into_iter()
+                    .map(
+                        |c| crate::views::panel::history_command_panel::HistoryCommand {
+                            command: c,
+                            timestamp: None,
+                        },
+                    )
+                    .collect::<Vec<_>>()
+            });
+            let cmds = std::sync::Arc::new(cmds);
+            let term_for_paste = terminal_entity.clone();
+            let on_paste: Rc<dyn Fn(String, &mut App)> =
+                Rc::new(move |cmd: String, cx: &mut App| {
+                    term_for_paste.read_with(cx, |view, _cx| {
+                        view.write_raw(cmd.as_bytes());
+                    });
+                });
+            (cmds, Some(on_paste))
+        } else {
+            (std::sync::Arc::new(Vec::new()), None)
+        }
+    } else {
+        (std::sync::Arc::new(Vec::new()), None)
+    };
+    history_panel.update(cx, |panel, cx| {
+        panel.set_state(history_commands, history_on_paste, window, cx);
+    });
+
+    // ---- Snippets panel ----
+    //
+    // Snippets are global (Store-backed), so we only need to wire the
+    // run + paste callbacks to the active terminal. The panel reloads
+    // its list from the Store inside `set_state`.
+    let (snippets_on_run, snippets_on_paste): (
+        Option<Rc<dyn Fn(String, &mut App)>>,
+        Option<Rc<dyn Fn(String, &mut App)>>,
+    ) = if is_terminal {
+        if let Some(terminal_entity) = active_tab.and_then(|tab| terminal_views.get(&tab.id)) {
+            let term_for_run = terminal_entity.clone();
+            let on_run: Rc<dyn Fn(String, &mut App)> = Rc::new(move |cmd: String, cx: &mut App| {
+                term_for_run.read_with(cx, |view, _cx| {
+                    view.write_raw(format!("{}\r", cmd).as_bytes());
+                });
+            });
+            let term_for_paste = terminal_entity.clone();
+            let on_paste: Rc<dyn Fn(String, &mut App)> =
+                Rc::new(move |cmd: String, cx: &mut App| {
+                    term_for_paste.read_with(cx, |view, _cx| {
+                        view.write_raw(cmd.as_bytes());
+                    });
+                });
+            (Some(on_run), Some(on_paste))
+        } else {
+            (None, None)
+        }
+    } else {
+        (None, None)
+    };
+    snippets_panel.update(cx, |panel, cx| {
+        panel.set_state(snippets_on_run, snippets_on_paste, window, cx);
     });
 
     // ---- Host-key prompt ----

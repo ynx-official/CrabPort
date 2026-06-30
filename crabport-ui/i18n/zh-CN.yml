@@ -76,6 +76,19 @@ hosts:
   delete_title: "删除主机"
   delete_prompt: "确定要删除「%{name}」吗？此操作无法撤销。"
   delete_confirm: "删除"
+snippets:
+  new_button: "新建"
+  empty: "暂无保存的代码片段，可从历史记录面板保存命令。"
+  edit: "编辑"
+  delete: "删除"
+  delete_title: "删除代码片段"
+  delete_prompt: "确定要删除「%{name}」吗？此操作无法撤销。"
+  delete_confirm: "删除"
+  edit_title: "编辑代码片段"
+  name: "名称"
+  command: "命令"
+  save: "保存"
+  cancel: "取消"
 window:
   about:
     title: "关于 CrabPort"
