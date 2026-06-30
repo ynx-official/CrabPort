@@ -17,6 +17,14 @@ name: release
 #   - Linux   → `.tar.gz` (+ best-effort AppImage via linuxdeploy)
 #   - Windows → `.zip` (+ best-effort MSI via cargo-wix)
 #
+# Job structure:
+#   - `build`   matrix: compiles + packages each platform, uploads as workflow
+#     artifact. Never touches the GitHub Release.
+#   - `publish` runs after `build`: downloads every artifact, creates a single
+#     GitHub Release with all files attached + auto-generated notes. This
+#     avoids the duplicated "What's Changed" body that happens when multiple
+#     jobs each call action-gh-release in parallel.
+#
 # No app icon yet — bundles ship without one. When an icon exists, add it
 # to the macOS Info.plist / .icns, the Linux .desktop, and the Windows
 # .rc/.wx step.
@@ -45,6 +53,10 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             name: windows-x86_64
+            bin: CrabPort.exe
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            name: windows-aarch64
             bin: CrabPort.exe
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
@@ -112,7 +124,6 @@ jobs:
 
           install -Dm755 target/${{ matrix.target }}/release/${{ matrix.bin }} AppDir/usr/bin/${{ matrix.bin }}
 
-          # Minimal .desktop file so AppImage has a launcher entry.
           mkdir -p AppDir/usr/share/applications
           cat > AppDir/usr/share/applications/crabport.desktop <<EOF
           [Desktop Entry]
@@ -136,17 +147,12 @@ jobs:
           STAGE="CrabPort-${VERSION}-${{ matrix.name }}"
 
           if [ "${{ runner.os }}" = "macOS" ]; then
-            # ── Build a proper .app bundle ──────────────────────────────
-            # Without a bundle macOS opens raw binaries in Terminal.app and
-            # never shows a Dock icon. Assemble by hand to avoid depending
-            # on `cargo bundle`'s dmg step (which can be finicky).
             APP="CrabPort.app"
             CONTENTS="$APP/Contents"
             mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources"
 
             cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "$CONTENTS/MacOS/"
 
-            # Minimal Info.plist. Identifier from Cargo.toml [package.metadata.bundle].
             VERSION_NUM="${VERSION#v}"
             cat > "$CONTENTS/Info.plist" <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
@@ -165,17 +171,9 @@ jobs:
           </plist>
           EOF
 
-            # Ad-hoc code-sign the assembled bundle. The release profile
-            # strips the binary (Cargo.toml: strip = true), which invalidates
-            # the linker's automatic ad-hoc signature — on Apple Silicon that
-            # makes the OS refuse to launch it ("app is damaged"). Re-signing
-            # restores a valid ad-hoc signature, turning the fatal "damaged"
-            # error into the normal "unidentified developer" prompt.
             codesign --force --deep --sign - "$APP"
             codesign --verify --verbose "$APP"
 
-            # `ditto` preserves the bundle's signature + metadata. Plain
-            # `zip` mangles them and re-breaks the signature.
             ditto -c -k --keepParent "$APP" "${STAGE}.zip"
             echo "ASSET=${STAGE}.zip" >> "$GITHUB_ENV"
 
@@ -187,7 +185,6 @@ jobs:
             echo "ASSET=${STAGE}.zip" >> "$GITHUB_ENV"
 
           else
-            # Linux
             mkdir "$STAGE"
             cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "$STAGE/"
             cp README.md README.en.md "$STAGE/" 2>/dev/null || true
@@ -209,8 +206,8 @@ jobs:
           cargo wix --no-build --nocapture --target ${{ matrix.target }} --output "CrabPort-$VERSION-windows-x86_64.msi"
           echo "MSI=CrabPort-$VERSION-windows-x86_64.msi" >> $env:GITHUB_ENV
 
-      # ---- Upload workflow artifacts (always, even on manual dispatch) --
-      - name: Upload workflow artifact
+      # ---- Upload workflow artifacts (consumed by the publish job) -----
+      - name: Upload primary artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
@@ -230,24 +227,33 @@ jobs:
           name: windows-x86_64-msi
           path: ${{ env.MSI }}
 
-      # ---- Attach to GitHub Release (only on tag push) -----------------
-      - name: Attach to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: ${{ env.ASSET }}
-          fail_on_unmatched_files: true
+  # ---------------------------------------------------------------------
+  # publish: runs after all build jobs succeed. Downloads every artifact
+  # into one folder and creates a single GitHub Release with all files
+  # attached. This is the only step that calls action-gh-release, so the
+  # auto-generated "What's Changed" notes are produced exactly once.
+  # ---------------------------------------------------------------------
+  publish:
+    name: Publish Release
+    runs-on: ubuntu-latest
+    needs: build
+    # Only publish on tag push. On workflow_dispatch we just keep the
+    # workflow artifacts (already uploaded above) for inspection.
+    if: startsWith(github.ref, 'refs/tags/')
 
-      - name: Attach AppImage to GitHub Release
-        if: matrix.name == 'linux-x86_64' && env.APPIMAGE != '' && startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
         with:
-          files: ${{ env.APPIMAGE }}
-          fail_on_unmatched_files: true
+          path: artifacts
+          merge-multiple: true
 
-      - name: Attach MSI to GitHub Release
-        if: matrix.name == 'windows-x86_64' && env.MSI != '' && startsWith(github.ref, 'refs/tags/')
+      - name: List artifacts
+        run: find artifacts -type f -maxdepth 1 | sort
+
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ env.MSI }}
-          fail_on_unmatched_files: false
+          files: artifacts/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
