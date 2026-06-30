@@ -1,17 +1,23 @@
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_animation::{animation::TransitionExt, transition::general::EaseInOutCubic};
 
 use crate::color::*;
 use crate::components::tabs::{TabPane, Tabs};
+use crate::views::panel::history_command_panel::HistoryCommandPanel;
 use crate::views::panel::sftp::SftpPanel;
+use crate::views::panel::snippets_panel::SnippetsPanel;
 
-const PANEL_WIDTH: f32 = 220.0;
+pub const PANEL_WIDTH: f32 = 220.0;
 
 pub fn render_panel(
     show: bool,
     active_tab: usize,
     has_sftp: bool,
     sftp_panel: Entity<SftpPanel>,
+    snippets_panel: Entity<SnippetsPanel>,
+    history_panel: Entity<HistoryCommandPanel>,
+    on_change: Option<std::rc::Rc<dyn Fn(usize, &mut Window, &mut App) + 'static>>,
 ) -> impl IntoElement {
     let visible = show && has_sftp;
 
@@ -49,12 +55,14 @@ pub fn render_panel(
                 .bg(rgb(BG_SIDEBAR))
                 .child(
                     Tabs::new("panel-tabs")
-                        .ctrl_style(|s| s.bg(rgb(BG_SIDEBAR)).rounded_none().p_0())
+                        .ctrl_style(|s| s.rounded_none())
                         .active(active_tab)
-                        .pane(TabPane::new("SFTP", sftp_panel))
-                        // Future tabs:
-                        // .pane(TabPane::new("History", render_history_panel()))
-                        // .pane(TabPane::new("Snippets", render_snippets_panel()))
+                        .when_some(on_change, |tabs, cb| {
+                            tabs.on_change(move |idx, w, cx| cb(idx, w, cx))
+                        })
+                        .pane(TabPane::new("", sftp_panel).icon("icons/folder.svg"))
+                        .pane(TabPane::new("", history_panel).icon("icons/clock.svg"))
+                        .pane(TabPane::new("", snippets_panel).icon("icons/braces.svg"))
                         .h_full(),
                 ),
         )

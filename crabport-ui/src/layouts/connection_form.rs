@@ -11,7 +11,6 @@ use crate::app::CrabportApp;
 use crate::color::*;
 use crate::components::button::Button;
 use crate::components::input::{StyledInput, StyledPasswordInput};
-use crate::components::segmented_control::{Segment, SegmentedControl};
 use crate::components::tabs::{TabPane, Tabs};
 use with_certificate::WithCertificateForm;
 
@@ -311,6 +310,12 @@ fn render_dialog(
         AuthKind::Certificate => 1,
     };
 
+    let active_type_index = match kind {
+        ConnectionKind::SSH => 0,
+        ConnectionKind::Telnet => 1,
+        ConnectionKind::Serial => 2,
+    };
+
     div()
         .id(dialog_id.clone())
         .w(px(420.0))
@@ -354,54 +359,110 @@ fn render_dialog(
                     .focused(name_focused),
             ),
         )
-        // Type selector
-        .child(render_type_selector(kind, app.clone()))
-        // Host + Port row
-        .child(render_host_port_row(
-            host_input,
-            port_input,
-            host_focused,
-            port_focused,
-        ))
-        // Username (shared across auth types)
+        // Connection-type tabs: SSH has the full form, Telnet/Serial are
+        // placeholders until their backends land. The tab's `on_change`
+        // writes `form.kind` so the connect button / save flow know which
+        // kind to create.
         .child(
-            div().child(
-                StyledInput::new("username", user_input)
-                    .label(t!("connection_form.username").to_string())
-                    .focused(user_focused),
-            ),
-        )
-        // Auth tabs (Password / Certificate)
-        .child(
-            Tabs::new("conn-auth-tabs")
-                .h(px(240.0))
-                .active(auth_active_index)
+            Tabs::new("conn-type-tabs")
+                // `Tabs` needs an explicit height: its panel track uses
+                // `h_full` + absolute positioning, so without a bounded
+                // height the whole strip collapses to 0 and the SSH form
+                // vanishes. 450px fits host/port + username + the 240px
+                // auth tabs below.
+                .h(px(450.0))
+                .active(active_type_index)
                 .pane(TabPane::new(
-                    t!("connection_form.auth_password").to_string(),
-                    div().flex().flex_col().gap_4().child(
-                        StyledPasswordInput::new("password", pass_input.clone())
-                            .label(t!("connection_form.password").to_string())
-                            .focused(pass_focused)
-                            .on_toggle(|_, _| {}),
-                    ),
+                    t!("new_connection.ssh").to_string(),
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_4()
+                        // Host + Port row
+                        .child(render_host_port_row(
+                            host_input,
+                            port_input,
+                            host_focused,
+                            port_focused,
+                        ))
+                        // Username (shared across auth types)
+                        .child(
+                            div().child(
+                                StyledInput::new("username", user_input)
+                                    .label(t!("connection_form.username").to_string())
+                                    .focused(user_focused),
+                            ),
+                        )
+                        // Auth tabs (Password / Certificate)
+                        .child(
+                            Tabs::new("conn-auth-tabs")
+                                .h(px(240.0))
+                                .active(auth_active_index)
+                                .pane(TabPane::new(
+                                    t!("connection_form.auth_password").to_string(),
+                                    div().flex().flex_col().gap_4().child(
+                                        StyledPasswordInput::new("password", pass_input.clone())
+                                            .label(t!("connection_form.password").to_string())
+                                            .focused(pass_focused)
+                                            .on_toggle(|_, _| {}),
+                                    ),
+                                ))
+                                .pane(TabPane::new(
+                                    t!("connection_form.auth_certificate").to_string(),
+                                    WithCertificateForm {
+                                        passphrase_input,
+                                        private_key_input,
+                                        passphrase_focused,
+                                        private_key_focused,
+                                    },
+                                ))
+                                .on_change({
+                                    let app = app.clone();
+                                    move |index, _w, cx| {
+                                        app.update(cx, |app, cx| {
+                                            if let Some(ref mut form) = app.connection_form {
+                                                form.auth_kind = match index {
+                                                    0 => AuthKind::Password,
+                                                    _ => AuthKind::Certificate,
+                                                };
+                                                cx.notify();
+                                            }
+                                        });
+                                    }
+                                }),
+                        ),
                 ))
                 .pane(TabPane::new(
-                    t!("connection_form.auth_certificate").to_string(),
-                    WithCertificateForm {
-                        passphrase_input,
-                        private_key_input,
-                        passphrase_focused,
-                        private_key_focused,
-                    },
+                    t!("new_connection.telnet").to_string(),
+                    div()
+                        .h(px(240.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_sm()
+                        .text_color(rgb(TEXT_MUTED))
+                        .child(t!("connection_form.coming_soon").to_string()),
+                ))
+                .pane(TabPane::new(
+                    t!("new_connection.serial").to_string(),
+                    div()
+                        .h(px(240.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_sm()
+                        .text_color(rgb(TEXT_MUTED))
+                        .child(t!("connection_form.coming_soon").to_string()),
                 ))
                 .on_change({
                     let app = app.clone();
                     move |index, _w, cx| {
                         app.update(cx, |app, cx| {
                             if let Some(ref mut form) = app.connection_form {
-                                form.auth_kind = match index {
-                                    0 => AuthKind::Password,
-                                    _ => AuthKind::Certificate,
+                                form.kind = match index {
+                                    0 => ConnectionKind::SSH,
+                                    1 => ConnectionKind::Telnet,
+                                    _ => ConnectionKind::Serial,
                                 };
                                 cx.notify();
                             }
@@ -411,50 +472,6 @@ fn render_dialog(
         )
         // Buttons
         .child(render_buttons(editing, kind, on_close, on_connect))
-}
-
-fn render_type_selector(kind: ConnectionKind, app: Entity<CrabportApp>) -> impl IntoElement {
-    let active_index = match kind {
-        ConnectionKind::SSH => 0,
-        ConnectionKind::Telnet => 1,
-        ConnectionKind::Serial => 2,
-    };
-
-    SegmentedControl::new("conn-type-selector")
-        .active(active_index)
-        .segment(Segment::new(t!("new_connection.ssh")).on_select({
-            let app = app.clone();
-            move |_w, cx| {
-                app.update(cx, |app, cx| {
-                    if let Some(ref mut form) = app.connection_form {
-                        form.kind = ConnectionKind::SSH;
-                        cx.notify();
-                    }
-                });
-            }
-        }))
-        .segment(Segment::new(t!("new_connection.telnet")).on_select({
-            let app = app.clone();
-            move |_w, cx| {
-                app.update(cx, |app, cx| {
-                    if let Some(ref mut form) = app.connection_form {
-                        form.kind = ConnectionKind::Telnet;
-                        cx.notify();
-                    }
-                });
-            }
-        }))
-        .segment(Segment::new(t!("new_connection.serial")).on_select({
-            let app = app.clone();
-            move |_w, cx| {
-                app.update(cx, |app, cx| {
-                    if let Some(ref mut form) = app.connection_form {
-                        form.kind = ConnectionKind::Serial;
-                        cx.notify();
-                    }
-                });
-            }
-        }))
 }
 
 fn render_host_port_row(

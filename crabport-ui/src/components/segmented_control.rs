@@ -6,16 +6,39 @@ use std::rc::Rc;
 use std::time::Duration;
 
 pub struct Segment {
-    pub label: SharedString,
+    pub label: AnyElement,
+    /// Optional icon path (e.g. `"icons/folder.svg"`). When set, the
+    /// SegmentedControl renders an `svg` alongside `label` and drives its
+    /// `text_color` transition itself — GPUI's `svg` element does NOT
+    /// inherit `text_color` from the parent div, so a svg passed via
+    /// `label` alone can't animate color with the tab's active/hover
+    /// state. Keeping the icon as a first-class field lets the control
+    /// attach its own transition to the svg.
+    pub icon: Option<SharedString>,
     pub on_select: Option<Rc<dyn Fn(&mut Window, &mut App) + 'static>>,
 }
 
 impl Segment {
-    pub fn new(label: impl Into<SharedString>) -> Self {
+    /// `label` accepts any element. Pass a `&str` / `SharedString` for a
+    /// plain text tab, or an `svg()` / `div()` for a composite tab.
+    ///
+    /// For an icon-only tab whose color animates with active/hover state,
+    /// prefer `.new("", ...).icon("icons/folder.svg")` — see `icon`.
+    pub fn new(label: impl IntoElement + 'static) -> Self {
         Self {
-            label: label.into(),
+            label: label.into_any_element(),
+            icon: None,
             on_select: None,
         }
+    }
+
+    /// Attach an icon to this segment. The svg's `text_color` is driven by
+    /// the SegmentedControl (animated between `TEXT_PRIMARY` when active /
+    /// hovered and `TEXT_MUTED` otherwise), so pass an empty label if you
+    /// want an icon-only tab.
+    pub fn icon(mut self, path: impl Into<SharedString>) -> Self {
+        self.icon = Some(path.into());
+        self
     }
 
     pub fn on_select(mut self, f: impl Fn(&mut Window, &mut App) + 'static) -> Self {
@@ -144,40 +167,55 @@ impl RenderOnce for SegmentedControl {
                 let on_select = seg.on_select.clone();
 
                 let tab_id: ElementId = ElementId::Name(format!("{}-tab-{}", self.id, i).into());
+                let icon_path = seg.icon.clone();
 
-                // Animate text color transitions for both active state changes and
-                // hover so that all color changes feel smooth rather than instant.
-                let tab = div()
+                // Background-hover easing: default bg is fully transparent so
+                // the tab blends with the SegmentedControl's own bg. On hover
+                // we ease into a semi-transparent SURFACE_HOVER (alpha ~0.5)
+                // for a subtle wash rather than a solid block. Active state is
+                // signalled by the sliding indicator, not bg.
+                let mut tab = div()
                     .id(tab_id.clone())
                     .flex_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_1p5()
                     .px_3()
                     .py_1()
                     .rounded_sm()
                     .text_sm()
-                    .text_color(rgb(TEXT_MUTED))
-                    .text_center()
+                    .text_color(rgb(if is_active { TEXT_PRIMARY } else { TEXT_MUTED }))
+                    .bg(rgba(0x24273a00))
                     .with_transition(tab_id)
-                    // Active state: animate between primary and muted text color.
-                    .transition_when_else(
-                        is_active,
-                        Duration::from_millis(200),
-                        EaseInOutQuad,
-                        |state| state.text_color(rgb(TEXT_PRIMARY)),
-                        |state| state.text_color(rgb(TEXT_MUTED)),
-                    )
-                    // Hover: brighten inactive tabs toward primary color.
                     .transition_on_hover(
                         Duration::from_millis(150),
                         EaseInOutQuad,
                         move |hovered, state| {
-                            if *hovered && !is_active {
-                                state.text_color(rgb(TEXT_PRIMARY))
+                            if *hovered {
+                                state.bg(rgba(0x24273a80))
                             } else {
-                                state
+                                state.bg(rgba(0x24273a00))
                             }
                         },
-                    )
-                    .child(seg.label);
+                    );
+
+                // Optional icon. Color is static (GPUI svg can't animate
+                // text_color via gpui-animation — `TransitionExt` requires
+                // `ParentElement`). The hover background above provides the
+                // visual feedback instead.
+                if let Some(path) = icon_path {
+                    let icon_color = if is_active { TEXT_PRIMARY } else { TEXT_MUTED };
+                    tab = tab.child(
+                        svg()
+                            .path(path)
+                            .size_4()
+                            .flex_shrink_0()
+                            .text_color(rgb(icon_color)),
+                    );
+                }
+
+                tab = tab.child(seg.label);
 
                 if let Some(cb) = on_select {
                     tab.on_click(move |_e, w, cx| {

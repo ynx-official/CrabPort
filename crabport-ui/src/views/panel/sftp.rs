@@ -5,7 +5,8 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_animation::{animation::TransitionExt, transition::general::Linear};
 use gpui_component::input::InputState;
-use gpui_component::scroll::ScrollableElement;
+use gpui_component::scroll::Scrollbar;
+use gpui_component::{VirtualListScrollHandle, v_virtual_list};
 use rust_i18n::t;
 use rustc_hash::FxHashSet;
 
@@ -63,6 +64,10 @@ pub struct SftpPanel {
     /// Delete callback — invoked with the remote path to remove. The
     /// backend stats the path to decide between file/dir removal.
     on_delete: Option<Rc<dyn Fn(String, &mut App)>>,
+    /// Scroll handle for the virtual list. Doubles as the handle for the
+    /// custom `Scrollbar::vertical` overlay so the scrollbar style stays
+    /// consistent with the rest of the app.
+    scroll_handle: VirtualListScrollHandle,
 }
 
 impl SftpPanel {
@@ -81,6 +86,7 @@ impl SftpPanel {
             on_download: None,
             on_upload: None,
             on_delete: None,
+            scroll_handle: VirtualListScrollHandle::new(),
         }
     }
 
@@ -242,14 +248,7 @@ impl Render for SftpPanel {
         let mut all_entries: Vec<(String, bool)> = vec![("..".into(), true)];
         all_entries.extend(sorted);
 
-        let cwd = self.cwd.clone();
-        let on_navigate = self.on_navigate.clone();
-        let on_download = self.on_download.clone();
-        let on_upload = self.on_upload.clone();
-        let on_delete = self.on_delete.clone();
         let path_input = self.path_input.clone();
-        let context_menu = self.context_menu.clone();
-        let alert_controller = self.alert_controller.clone();
         let entity = _cx.entity().downgrade();
 
         // If the global context menu is no longer active, clear the
@@ -262,15 +261,35 @@ impl Render for SftpPanel {
         if !menu_active {
             self.context_menu_entry = None;
         }
-        let context_menu_entry = self.context_menu_entry.clone();
-        let hovered_entry = self.hovered_entry.clone();
-        // Snapshot the selection so the row closure can read membership
-        // without borrowing `self`. We rebuild this each render — same pattern
-        // as the other snapshot clones above.
-        let selected = self.selected.clone();
+
+        // Pre-compute item sizes for the virtual list. All rows share a
+        // fixed height (26px); width is left at 0 so VirtualList uses the
+        // container width. This satisfies the "precompute item sizes"
+        // best practice — the list never has to measure rows at runtime.
+        let item_sizes = Rc::new(
+            all_entries
+                .iter()
+                .map(|_| Size {
+                    width: px(0.0),
+                    height: px(26.0),
+                })
+                .collect::<Vec<_>>(),
+        );
+        let all_entries = Rc::new(all_entries);
+        let scroll_handle = self.scroll_handle.clone();
+
+        // Clone the action-button callbacks out of `self` so the button
+        // row closures (built below) can capture them by move. The virtual
+        // list's render closure reads `self` directly via its `&mut SftpPanel`
+        // argument, so it doesn't need these snapshots.
+        let cwd = self.cwd.clone();
+        let on_navigate = self.on_navigate.clone();
+        let on_download = self.on_download.clone();
+        let on_upload = self.on_upload.clone();
 
         div()
             .h_full()
+            .w_full()
             .min_h_0()
             .overflow_hidden()
             .flex()
@@ -360,393 +379,427 @@ impl Render for SftpPanel {
                     )),
             )
             .child(
+                // List + scrollbar. The scrollbar is absolutely positioned
+                // (Scrollbar's own layout is `position: absolute`), so we use
+                // a relative wrapper and give the list right-padding equal to
+                // the scrollbar width. That way the rows' right-side rounded
+                // corners land to the left of the scrollbar track instead of
+                // being painted over by it.
                 div()
+                    .relative()
                     .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .flex_col()
-                    .gap_0p5()
-                    .overflow_y_scrollbar()
-                    .children(all_entries.iter().map(|(name, is_dir)| {
-                        let icon_path = if *is_dir {
-                            "icons/folder.svg"
-                        } else {
-                            "icons/file.svg"
-                        };
-
-                        // Build target path for navigation
-                        let cwd_ref = cwd.as_ref().map(|s| s.as_str()).unwrap_or("/");
-                        let target_path = if name == "." {
-                            cwd_ref.to_string()
-                        } else if name == ".." {
-                            let mut parts: Vec<&str> =
-                                cwd_ref.split('/').filter(|s| !s.is_empty()).collect();
-                            parts.pop();
-                            if parts.is_empty() {
-                                "/".to_string()
-                            } else {
-                                format!("/{}", parts.join("/"))
-                            }
-                        } else if cwd_ref.ends_with('/') {
-                            format!("{}{}", cwd_ref, name)
-                        } else {
-                            format!("{}/{}", cwd_ref, name)
-                        };
-
-                        let on_navigate = on_navigate.clone();
-                        let on_download = on_download.clone();
-                        let context_menu = context_menu.clone();
-                        let entity = _cx.entity().downgrade();
-                        let is_hovered = hovered_entry.as_deref() == Some(name.as_str());
-                        let force_highlight = context_menu_entry.as_deref() == Some(name.as_str());
-                        let is_selected = selected.contains(name.as_str()) && name != "..";
-                        let is_highlighted = is_hovered || force_highlight;
-                        let row_id = ElementId::Name(format!("sftp-{}", name).into());
-                        let row_id_for_transition = row_id.clone();
-
-                        div()
-                            .id(row_id.clone())
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_1p5()
-                            .px_2()
-                            .py_1()
-                            .rounded(px(4.0))
-                            // Left-click drives both navigation (double-click on
-                            // a dir) and multi-selection (cmd/ctrl-click on
-                            // any selectable row). `.` and `..` are excluded
-                            // from selection because they're navigation
-                            // helpers, not real entries.
-                            .on_mouse_down(MouseButton::Left, {
-                                let name = name.clone();
-                                let is_dir = *is_dir;
-                                let on_navigate = on_navigate.clone();
-                                let target = target_path.clone();
-                                let entity = entity.clone();
-                                move |event, _w, cx| {
-                                    // Double-click on a directory still
-                                    // navigates regardless of modifiers.
-                                    if is_dir && event.click_count == 2 {
-                                        if let Some(ref cb) = on_navigate {
-                                            cb(target.clone(), cx);
-                                        }
-                                        return;
-                                    }
-                                    if name == ".." || name == "." {
-                                        return;
-                                    }
-                                    let _ = entity.update(cx, |view, cx| {
-                                        // `secondary` is cmd on macOS, ctrl
-                                        // elsewhere — the conventional
-                                        // "add to selection" modifier.
-                                        if event.modifiers.secondary() {
-                                            if view.selected.contains(name.as_str()) {
-                                                view.selected.remove(name.as_str());
-                                            } else {
-                                                view.selected.insert(name.clone());
-                                            }
+                    .h_full()
+                    .overflow_hidden()
+                    .child(
+                        v_virtual_list(
+                            _cx.entity(),
+                            "sftp-entries",
+                            item_sizes.clone(),
+                            move |this, range, _window, cx| {
+                                let all_entries = &all_entries;
+                                range
+                                    .map(|i| {
+                                        let (name, is_dir) = &all_entries[i];
+                                        let name = name.clone();
+                                        let is_dir = *is_dir;
+                                        let icon_path = if is_dir {
+                                            "icons/folder.svg"
                                         } else {
-                                            view.selected.clear();
-                                            view.selected.insert(name.clone());
-                                        }
-                                        cx.notify();
-                                    });
-                                }
-                            })
-                            .on_mouse_down(MouseButton::Right, {
-                                let name = name.clone();
-                                let target_path = target_path.clone();
-                                let on_navigate = on_navigate.clone();
-                                let on_download = on_download.clone();
-                                let on_delete = on_delete.clone();
-                                let entity = entity.clone();
-                                let alert_controller = alert_controller.clone();
-                                move |event, _w, cx| {
-                                    let Some(ref cm) = context_menu else {
-                                        return;
-                                    };
-                                    // Decide which entries this menu acts on.
-                                    // If the right-clicked row is already part
-                                    // of the multi-selection, the menu applies
-                                    // to the whole selection; otherwise the
-                                    // selection snaps to just this row (the
-                                    // standard Finder/Explorer behaviour).
-                                    let pos = event.position;
-                                    let menu_entries = entity
-                                        .update(cx, |view, cx| -> Vec<(String, bool, String)> {
-                                            if !view.selected.contains(name.as_str()) {
-                                                view.selected.clear();
-                                                if name != ".." && name != "." {
-                                                    view.selected.insert(name.clone());
-                                                }
-                                            }
-                                            // Mark this entry as the menu-
-                                            // triggering entry so it keeps the
-                                            // hover background.
-                                            view.context_menu_entry = Some(name.clone());
-                                            cx.notify();
-                                            // Build the list of (name, is_dir,
-                                            // remote_path) the menu will act
-                                            // on. We resolve from the current
-                                            // listing so the paths are fresh.
-                                            let cwd_str = view
-                                                .cwd
-                                                .as_ref()
-                                                .map(|s| s.as_str())
-                                                .unwrap_or("/");
-                                            view.entries
-                                                .iter()
-                                                .filter(|(n, _)| {
-                                                    n != "."
-                                                        && n != ".."
-                                                        && view.selected.contains(n.as_str())
-                                                })
-                                                .map(|(n, d)| {
-                                                    let p = if cwd_str.ends_with('/') {
-                                                        format!("{}{}", cwd_str, n)
-                                                    } else {
-                                                        format!("{}/{}", cwd_str, n)
-                                                    };
-                                                    (n.clone(), *d, p)
-                                                })
-                                                .collect()
-                                        })
-                                        .unwrap_or_default();
-
-                                    // Build the menu items. The rules:
-                                    //   - A single directory selected → prepend "Enter"
-                                    //     (navigate into it).
-                                    //   - One or more selectable entries → "Download"
-                                    //     (or "Download (N)" for multi-select).
-                                    //   - Right-click on `..` with no selection →
-                                    //     just "Enter" to navigate to parent.
-                                    let mut items: Vec<ContextMenuItem> = Vec::new();
-
-                                    // "Enter" (navigate) — only when exactly one
-                                    // directory is selected.
-                                    if menu_entries.len() == 1 && menu_entries[0].1 {
-                                        let target = menu_entries[0].2.clone();
-                                        let on_navigate = on_navigate.clone();
-                                        items.push(ContextMenuItem::new(
-                                            t!("sftp.enter").to_string(),
-                                            move |_w, cx| {
-                                                if let Some(ref cb) = on_navigate {
-                                                    cb(target.clone(), cx);
-                                                }
-                                            },
-                                        ));
-                                    }
-
-                                    // "Download" — available whenever there's at
-                                    // least one selectable entry. The backend's
-                                    // `sftp_download` dispatches between file
-                                    // and directory downloads internally (via
-                                    // `stat`), so we don't branch on `is_dir`.
-                                    if !menu_entries.is_empty() {
-                                        let count = menu_entries.len();
-                                        let label = if count == 1 {
-                                            t!("sftp.download").to_string()
-                                        } else {
-                                            t!("sftp.download_n", count = count).to_string()
+                                            "icons/file.svg"
                                         };
-                                        let to_download = menu_entries.clone();
-                                        let on_download = on_download.clone();
-                                        let entity_for_clear = entity.clone();
-                                        items.push(ContextMenuItem::new(label, move |_w, cx| {
-                                            if to_download.is_empty() {
-                                                return;
-                                            }
-                                            // Clear the multi-selection once the
-                                            // download is dispatched — the user
-                                            // has committed to the batch and
-                                            // lingering highlights would just
-                                            // obscure the next interaction.
-                                            let _ = entity_for_clear.update(cx, |view, cx| {
-                                                view.selected.clear();
-                                                cx.notify();
-                                            });
-                                            trigger_batch_download(
-                                                to_download.clone(),
-                                                on_download.as_ref(),
-                                                cx,
-                                            );
-                                        }));
-                                    }
 
-                                    // Fallback: right-click on `..` (or `.`)
-                                    // with no selectable entries — offer
-                                    // navigation only.
-                                    if items.is_empty() {
-                                        let target = target_path.clone();
-                                        let on_navigate = on_navigate.clone();
-                                        items.push(ContextMenuItem::new(
-                                            t!("sftp.enter").to_string(),
-                                            move |_w, cx| {
-                                                if let Some(ref cb) = on_navigate {
-                                                    cb(target.clone(), cx);
+                                        // Build target path for navigation
+                                        let cwd_ref = this.cwd.as_ref().map(|s| s.as_str()).unwrap_or("/");
+                                        let target_path = if name == "." {
+                                            cwd_ref.to_string()
+                                        } else if name == ".." {
+                                            let mut parts: Vec<&str> =
+                                                cwd_ref.split('/').filter(|s| !s.is_empty()).collect();
+                                            parts.pop();
+                                            if parts.is_empty() {
+                                                "/".to_string()
+                                            } else {
+                                                format!("/{}", parts.join("/"))
+                                            }
+                                        } else if cwd_ref.ends_with('/') {
+                                            format!("{}{}", cwd_ref, name)
+                                        } else {
+                                            format!("{}/{}", cwd_ref, name)
+                                        };
+
+                                        let on_navigate = this.on_navigate.clone();
+                                        let on_download = this.on_download.clone();
+                                        let on_delete = this.on_delete.clone();
+                                        let context_menu = this.context_menu.clone();
+                                        let alert_controller = this.alert_controller.clone();
+                                        let entity = cx.entity().downgrade();
+                                        let is_hovered = this.hovered_entry.as_deref() == Some(name.as_str());
+                                        let force_highlight =
+                                            this.context_menu_entry.as_deref() == Some(name.as_str());
+                                        let is_selected = this.selected.contains(name.as_str()) && name != "..";
+                                        let is_highlighted = is_hovered || force_highlight;
+                                        let row_id = ElementId::Name(format!("sftp-{i}").into());
+                                        let row_id_for_transition = row_id.clone();
+
+                                        div()
+                                            .id(row_id.clone())
+                                            .h(px(26.0))
+                                            .w_full()
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap_1p5()
+                                            .px_2()
+                                            .rounded(px(4.0))
+                                            // Left-click drives both navigation (double-click on
+                                            // a dir) and multi-selection (cmd/ctrl-click on
+                                            // any selectable row). `.` and `..` are excluded
+                                            // from selection because they're navigation
+                                            // helpers, not real entries.
+                                            .on_mouse_down(MouseButton::Left, {
+                                                let name = name.clone();
+                                                let is_dir = is_dir;
+                                                let on_navigate = on_navigate.clone();
+                                                let target = target_path.clone();
+                                                let entity = entity.clone();
+                                                move |event, _w, cx| {
+                                                    // Double-click on a directory still
+                                                    // navigates regardless of modifiers.
+                                                    if is_dir && event.click_count == 2 {
+                                                        if let Some(ref cb) = on_navigate {
+                                                            cb(target.clone(), cx);
+                                                        }
+                                                        return;
+                                                    }
+                                                    if name == ".." || name == "." {
+                                                        return;
+                                                    }
+                                                    let _ = entity.update(cx, |view, cx| {
+                                                        // `secondary` is cmd on macOS, ctrl
+                                                        // elsewhere — the conventional
+                                                        // "add to selection" modifier.
+                                                        if event.modifiers.secondary() {
+                                                            if view.selected.contains(name.as_str()) {
+                                                                view.selected.remove(name.as_str());
+                                                            } else {
+                                                                view.selected.insert(name.clone());
+                                                            }
+                                                        } else {
+                                                            view.selected.clear();
+                                                            view.selected.insert(name.clone());
+                                                        }
+                                                        cx.notify();
+                                                    });
                                                 }
-                                            },
-                                        ));
-                                    }
-                                    // Add a "Delete" item for everything
-                                    // except the ".." parent-navigation entry.
-                                    if name != ".." {
-                                        items.push(
-                                            ContextMenuItem::new(t!("sftp.delete").to_string(), {
-                                                let alert_controller = alert_controller.clone();
+                                            })
+                                            .on_mouse_down(MouseButton::Right, {
                                                 let name = name.clone();
                                                 let target_path = target_path.clone();
+                                                let on_navigate = on_navigate.clone();
+                                                let on_download = on_download.clone();
                                                 let on_delete = on_delete.clone();
-                                                let entity_for_clear = entity.clone();
-                                                move |_w, cx| {
-                                                    let Some(ref ac) = alert_controller else {
+                                                let entity = entity.clone();
+                                                let alert_controller = alert_controller.clone();
+                                                move |event, _w, cx| {
+                                                    let Some(ref cm) = context_menu else {
                                                         return;
                                                     };
-                                                    let target_path = target_path.clone();
-                                                    let on_delete = on_delete.clone();
-                                                    let entity_for_clear = entity_for_clear.clone();
-                                                    ac.update(cx, |c, cx| {
+                                                    // Decide which entries this menu acts on.
+                                                    // If the right-clicked row is already part
+                                                    // of the multi-selection, the menu applies
+                                                    // to the whole selection; otherwise the
+                                                    // selection snaps to just this row (the
+                                                    // standard Finder/Explorer behaviour).
+                                                    let pos = event.position;
+                                                    let menu_entries = entity
+                                                        .update(cx, |view, cx| -> Vec<(String, bool, String)> {
+                                                            if !view.selected.contains(name.as_str()) {
+                                                                view.selected.clear();
+                                                                if name != ".." && name != "." {
+                                                                    view.selected.insert(name.clone());
+                                                                }
+                                                            }
+                                                            // Mark this entry as the menu-
+                                                            // triggering entry so it keeps the
+                                                            // hover background.
+                                                            view.context_menu_entry = Some(name.clone());
+                                                            cx.notify();
+                                                            // Build the list of (name, is_dir,
+                                                            // remote_path) the menu will act
+                                                            // on. We resolve from the current
+                                                            // listing so the paths are fresh.
+                                                            let cwd_str = view
+                                                                .cwd
+                                                                .as_ref()
+                                                                .map(|s| s.as_str())
+                                                                .unwrap_or("/");
+                                                            view.entries
+                                                                .iter()
+                                                                .filter(|(n, _)| {
+                                                                    n != "."
+                                                                        && n != ".."
+                                                                        && view.selected.contains(n.as_str())
+                                                                })
+                                                                .map(|(n, d)| {
+                                                                    let p = if cwd_str.ends_with('/') {
+                                                                        format!("{}{}", cwd_str, n)
+                                                                    } else {
+                                                                        format!("{}/{}", cwd_str, n)
+                                                                    };
+                                                                    (n.clone(), *d, p)
+                                                                })
+                                                                .collect()
+                                                        })
+                                                        .unwrap_or_default();
+
+                                                    // Build the menu items. The rules:
+                                                    //   - A single directory selected → prepend "Enter"
+                                                    //     (navigate into it).
+                                                    //   - One or more selectable entries → "Download"
+                                                    //     (or "Download (N)" for multi-select).
+                                                    //   - Right-click on `..` with no selection →
+                                                    //     just "Enter" to navigate to parent.
+                                                    let mut items: Vec<ContextMenuItem> = Vec::new();
+
+                                                    // "Enter" (navigate) — only when exactly one
+                                                    // directory is selected.
+                                                    if menu_entries.len() == 1 && menu_entries[0].1 {
+                                                        let target = menu_entries[0].2.clone();
+                                                        let on_navigate = on_navigate.clone();
+                                                        items.push(ContextMenuItem::new(
+                                                            t!("sftp.enter").to_string(),
+                                                            move |_w, cx| {
+                                                                if let Some(ref cb) = on_navigate {
+                                                                    cb(target.clone(), cx);
+                                                                }
+                                                            },
+                                                        ));
+                                                    }
+
+                                                    // "Download" — available whenever there's at
+                                                    // least one selectable entry. The backend's
+                                                    // `sftp_download` dispatches between file
+                                                    // and directory downloads internally (via
+                                                    // `stat`), so we don't branch on `is_dir`.
+                                                    if !menu_entries.is_empty() {
+                                                        let count = menu_entries.len();
+                                                        let label = if count == 1 {
+                                                            t!("sftp.download").to_string()
+                                                        } else {
+                                                            t!("sftp.download_n", count = count).to_string()
+                                                        };
+                                                        let to_download = menu_entries.clone();
+                                                        let on_download = on_download.clone();
+                                                        let entity_for_clear = entity.clone();
+                                                        items.push(ContextMenuItem::new(label, move |_w, cx| {
+                                                            if to_download.is_empty() {
+                                                                return;
+                                                            }
+                                                            // Clear the multi-selection once the
+                                                            // download is dispatched — the user
+                                                            // has committed to the batch and
+                                                            // lingering highlights would just
+                                                            // obscure the next interaction.
+                                                            let _ = entity_for_clear.update(cx, |view, cx| {
+                                                                view.selected.clear();
+                                                                cx.notify();
+                                                            });
+                                                            trigger_batch_download(
+                                                                to_download.clone(),
+                                                                on_download.as_ref(),
+                                                                cx,
+                                                            );
+                                                        }));
+                                                    }
+
+                                                    // Fallback: right-click on `..` (or `.`)
+                                                    // with no selectable entries — offer
+                                                    // navigation only.
+                                                    if items.is_empty() {
+                                                        let target = target_path.clone();
+                                                        let on_navigate = on_navigate.clone();
+                                                        items.push(ContextMenuItem::new(
+                                                            t!("sftp.enter").to_string(),
+                                                            move |_w, cx| {
+                                                                if let Some(ref cb) = on_navigate {
+                                                                    cb(target.clone(), cx);
+                                                                }
+                                                            },
+                                                        ));
+                                                    }
+                                                    // Add a "Delete" item for everything
+                                                    // except the ".." parent-navigation entry.
+                                                    if name != ".." {
+                                                        items.push(
+                                                            ContextMenuItem::new(t!("sftp.delete").to_string(), {
+                                                                let alert_controller = alert_controller.clone();
+                                                                let name = name.clone();
+                                                                let target_path = target_path.clone();
+                                                                let on_delete = on_delete.clone();
+                                                                let entity_for_clear = entity.clone();
+                                                                move |_w, cx| {
+                                                                    let Some(ref ac) = alert_controller else {
+                                                                        return;
+                                                                    };
+                                                                    let target_path = target_path.clone();
+                                                                    let on_delete = on_delete.clone();
+                                                                    let entity_for_clear = entity_for_clear.clone();
+                                                                    ac.update(cx, |c, cx| {
+                                                                        c.show(
+                                                                            AlertState {
+                                                                                severity: AlertSeverity::Danger,
+                                                                                title: t!("sftp.delete_title")
+                                                                                    .to_string()
+                                                                                    .into(),
+                                                                                description: Some(
+                                                                                    t!(
+                                                                                        "sftp.delete_prompt",
+                                                                                        name = name.as_str()
+                                                                                    )
+                                                                                    .to_string()
+                                                                                    .into(),
+                                                                                ),
+                                                                                confirm_label: t!(
+                                                                                    "sftp.delete_confirm"
+                                                                                )
+                                                                                .to_string()
+                                                                                .into(),
+                                                                                cancel_label: t!(
+                                                                                    "terminal.host_key_cancel"
+                                                                                )
+                                                                                .to_string()
+                                                                                .into(),
+                                                                                on_confirm: Some(Rc::new(
+                                                                                    move |_w, cx| {
+                                                                                        // Dispatch the actual delete. The
+                                                                                        // backend stats the path to decide
+                                                                                        // between remove_file / remove_dir.
+                                                                                        if let Some(ref cb) =
+                                                                                            on_delete
+                                                                                        {
+                                                                                            cb(
+                                                                                                target_path.clone(),
+                                                                                                cx,
+                                                                                            );
+                                                                                        }
+                                                                                        // Clear the selection so the
+                                                                                        // deleted row's highlight doesn't
+                                                                                        // linger — the listing will refresh
+                                                                                        // when the backend re-reads the dir.
+                                                                                        let _ = entity_for_clear
+                                                                                            .update(
+                                                                                                cx,
+                                                                                                |view, cx| {
+                                                                                                    view.selected
+                                                                                                        .clear();
+                                                                                                    cx.notify();
+                                                                                                },
+                                                                                            );
+                                                                                    },
+                                                                                )),
+                                                                                ..AlertState::default()
+                                                                            },
+                                                                            cx,
+                                                                        );
+                                                                    });
+                                                                }
+                                                            })
+                                                            .danger(true),
+                                                        );
+                                                    }
+                                                    cm.update(cx, |c, cx| {
                                                         c.show(
-                                                            AlertState {
-                                                                severity: AlertSeverity::Danger,
-                                                                title: t!("sftp.delete_title")
-                                                                    .to_string()
-                                                                    .into(),
-                                                                description: Some(
-                                                                    t!(
-                                                                        "sftp.delete_prompt",
-                                                                        name = name.as_str()
-                                                                    )
-                                                                    .to_string()
-                                                                    .into(),
-                                                                ),
-                                                                confirm_label: t!(
-                                                                    "sftp.delete_confirm"
-                                                                )
-                                                                .to_string()
-                                                                .into(),
-                                                                cancel_label: t!(
-                                                                    "terminal.host_key_cancel"
-                                                                )
-                                                                .to_string()
-                                                                .into(),
-                                                                on_confirm: Some(Rc::new(
-                                                                    move |_w, cx| {
-                                                                        // Dispatch the actual delete. The
-                                                                        // backend stats the path to decide
-                                                                        // between remove_file / remove_dir.
-                                                                        if let Some(ref cb) =
-                                                                            on_delete
-                                                                        {
-                                                                            cb(
-                                                                                target_path.clone(),
-                                                                                cx,
-                                                                            );
-                                                                        }
-                                                                        // Clear the selection so the
-                                                                        // deleted row's highlight doesn't
-                                                                        // linger — the listing will refresh
-                                                                        // when the backend re-reads the dir.
-                                                                        let _ = entity_for_clear
-                                                                            .update(
-                                                                                cx,
-                                                                                |view, cx| {
-                                                                                    view.selected
-                                                                                        .clear();
-                                                                                    cx.notify();
-                                                                                },
-                                                                            );
-                                                                    },
-                                                                )),
-                                                                ..AlertState::default()
+                                                            ContextMenuState {
+                                                                position: pos,
+                                                                items,
+                                                                ..ContextMenuState::default()
                                                             },
                                                             cx,
                                                         );
                                                     });
                                                 }
                                             })
-                                            .danger(true),
-                                        );
-                                    }
-                                    cm.update(cx, |c, cx| {
-                                        c.show(
-                                            ContextMenuState {
-                                                position: pos,
-                                                items,
-                                                ..ContextMenuState::default()
-                                            },
-                                            cx,
-                                        );
-                                    });
-                                }
-                            })
-                            // Smooth hover color transition. Uses
-                            // `transition_when_else` (not `transition_on_hover`)
-                            // so we can also force the highlight on when a
-                            // context menu triggered by this row is open.
-                            .with_transition(row_id_for_transition)
-                            .on_hover({
-                                let name = name.clone();
-                                move |hovered, _w, cx| {
-                                    let _ = entity.update(cx, |view, cx| {
-                                        if *hovered {
-                                            view.hovered_entry = Some(name.clone());
-                                        } else if view.hovered_entry.as_deref()
-                                            == Some(name.as_str())
-                                        {
-                                            view.hovered_entry = None;
-                                        }
-                                        cx.notify();
-                                    });
-                                }
-                            })
-                            .transition_when_else(
-                                is_highlighted,
-                                std::time::Duration::from_millis(120),
-                                Linear,
-                                |el| el.bg(rgba((SURFACE_HOVER << 8) | 0xFF)),
-                                |el| el.bg(rgba((SURFACE_HOVER << 8) | 0x00)),
-                            )
-                            // Selected rows get a persistent blue accent bar
-                            // on the left edge plus a subtle blue tint so the
-                            // selection reads even when not hovered. We render
-                            // this as an absolutely-positioned stripe inside
-                            // the row so it doesn't affect the flex layout.
-                            // The tint is applied only when not highlighted so
-                            // the hover/menu colour takes precedence visually
-                            // when the user is interacting with the row.
-                            .when(is_selected, |el| {
-                                el.relative().child(
-                                    div()
-                                        .absolute()
-                                        .top(px(2.0))
-                                        .bottom(px(2.0))
-                                        .left_0()
-                                        .w(px(2.0))
-                                        .rounded(px(1.0))
-                                        .bg(rgb(BTN_PRIMARY_BG)),
-                                )
-                            })
-                            .when(is_selected && !is_highlighted, |el| {
-                                el.bg(rgba(INPUT_SELECTION))
-                            })
-                            .child(
-                                svg()
-                                    .path(icon_path)
-                                    .size(px(14.0))
-                                    .flex_shrink_0()
-                                    .text_color(rgb(TEXT_MUTED)),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(TEXT_PRIMARY))
-                                    .whitespace_nowrap()
-                                    .overflow_hidden()
-                                    .child(name.clone()),
-                            )
-                    })),
+                                            // Smooth hover color transition. Uses
+                                            // `transition_when_else` (not `transition_on_hover`)
+                                            // so we can also force the highlight on when a
+                                            // context menu triggered by this row is open.
+                                            .with_transition(row_id_for_transition)
+                                            .on_hover({
+                                                let name = name.clone();
+                                                move |hovered, _w, cx| {
+                                                    let _ = entity.update(cx, |view, cx| {
+                                                        if *hovered {
+                                                            view.hovered_entry = Some(name.clone());
+                                                        } else if view.hovered_entry.as_deref()
+                                                            == Some(name.as_str())
+                                                        {
+                                                            view.hovered_entry = None;
+                                                        }
+                                                        cx.notify();
+                                                    });
+                                                }
+                                            })
+                                            .transition_when_else(
+                                                is_highlighted,
+                                                std::time::Duration::from_millis(120),
+                                                Linear,
+                                                |el| el.bg(rgba((SURFACE_HOVER << 8) | 0xFF)),
+                                                |el| el.bg(rgba((SURFACE_HOVER << 8) | 0x00)),
+                                            )
+                                            // Selected rows get a persistent blue accent bar
+                                            // on the left edge plus a subtle blue tint so the
+                                            // selection reads even when not hovered. We render
+                                            // this as an absolutely-positioned stripe inside
+                                            // the row so it doesn't affect the flex layout.
+                                            // The tint is applied only when not highlighted so
+                                            // the hover/menu colour takes precedence visually
+                                            // when the user is interacting with the row.
+                                            .when(is_selected, |el| {
+                                                el.relative().child(
+                                                    div()
+                                                        .absolute()
+                                                        .top(px(2.0))
+                                                        .bottom(px(2.0))
+                                                        .left_0()
+                                                        .w(px(2.0))
+                                                        .rounded(px(1.0))
+                                                        .bg(rgb(BTN_PRIMARY_BG)),
+                                                )
+                                            })
+                                            .when(is_selected && !is_highlighted, |el| {
+                                                el.bg(rgba(INPUT_SELECTION))
+                                            })
+                                            .child(
+                                                svg()
+                                                    .path(icon_path)
+                                                    .size(px(14.0))
+                                                    .flex_shrink_0()
+                                                    .text_color(rgb(TEXT_MUTED)),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(rgb(TEXT_PRIMARY))
+                                                    .whitespace_nowrap()
+                                                    .overflow_hidden()
+                                                    .child(name.clone()),
+                                            )
+                                    })
+                                    .collect::<Vec<_>>()
+                            },
+                        )
+                        .track_scroll(&scroll_handle)
+                        .pr(px(10.0)),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .right_0()
+                            .bottom_0()
+                            .w(px(12.0))
+                            .child(Scrollbar::vertical(&scroll_handle)),
+                    ),
             )
     }
 }

@@ -57,6 +57,11 @@ pub struct CrabportApp {
     pub connection_form: Option<ConnectionFormState>,
     pub command_palette: Entity<CommandView>,
     pub sftp_panel: Entity<crate::views::panel::sftp::SftpPanel>,
+    pub snippets_panel: Entity<crate::views::panel::snippets_panel::SnippetsPanel>,
+    pub history_panel: Entity<crate::views::panel::history_command_panel::HistoryCommandPanel>,
+    /// Active index of the right-hand panel's tab strip (SFTP / History /
+    /// Snippets). Driven by `Tabs::on_change` in `render_panel`.
+    pub panel_active_tab: usize,
     pub hosts_view: Entity<crate::views::hosts::HostsView>,
     /// Global alert dialog host. Rendered at the app root so it overlays the
     /// entire window regardless of which view is active. Triggered via
@@ -120,6 +125,10 @@ impl CrabportApp {
 
         let command_palette = cx.new(|cx| CommandView::new(window, cx));
         let sftp_panel = cx.new(|_cx| crate::views::panel::sftp::SftpPanel::new());
+        let snippets_panel =
+            cx.new(|_cx| crate::views::panel::snippets_panel::SnippetsPanel::new());
+        let history_panel =
+            cx.new(|_cx| crate::views::panel::history_command_panel::HistoryCommandPanel::new());
         let app_entity = cx.entity();
         let hosts_view = cx.new(|_cx| crate::views::hosts::HostsView::new(app_entity));
         let alert_controller = cx.new(|_cx| AlertController::new());
@@ -161,6 +170,9 @@ impl CrabportApp {
             connection_form: None,
             command_palette,
             sftp_panel,
+            snippets_panel,
+            history_panel,
+            panel_active_tab: 0,
             hosts_view,
             alert_controller,
             context_menu,
@@ -867,6 +879,9 @@ impl Render for CrabportApp {
             &self.hosts,
             self.connection_form.as_ref(),
             &self.sftp_panel,
+            &self.snippets_panel,
+            &self.history_panel,
+            self.panel_active_tab,
             &self.hosts_view,
             &self.alert_controller,
             &self.context_menu,

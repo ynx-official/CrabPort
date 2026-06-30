@@ -26,6 +26,12 @@ pub fn render_content(
     hosts: &[ConnectionHost],
     form_entity: Option<&ConnectionFormState>,
     sftp_panel: &Entity<SftpPanel>,
+    snippets_panel: &Entity<crate::views::panel::snippets_panel::SnippetsPanel>,
+    history_panel: &Entity<crate::views::panel::history_command_panel::HistoryCommandPanel>,
+    // Active index of the right-hand panel tab strip (SFTP / History /
+    // Snippets). Read by the caller (which owns the `CrabportApp` borrow)
+    // and passed in to avoid a nested `handle.read_with` during render.
+    panel_active_tab: usize,
     hosts_view: &Entity<HostsView>,
     alert_controller: &Entity<AlertController>,
     context_menu: &Entity<ContextMenuController>,
@@ -371,7 +377,23 @@ pub fn render_content(
                 .flex_row()
                 .overflow_hidden()
                 .child(view)
-                .child(render_panel(is_terminal, 0, has_sftp, sftp_panel.clone())),
+                .child({
+                    let handle_for_panel = handle.clone();
+                    render_panel(
+                        is_terminal,
+                        panel_active_tab,
+                        has_sftp,
+                        sftp_panel.clone(),
+                        snippets_panel.clone(),
+                        history_panel.clone(),
+                        Some(std::rc::Rc::new(move |idx, _w, cx| {
+                            handle_for_panel.update(cx, |app, cx| {
+                                app.panel_active_tab = idx;
+                                cx.notify();
+                            });
+                        })),
+                    )
+                }),
         )
         .child(render_terminal_toolbar(
             is_terminal,

@@ -79,6 +79,10 @@ hosts:
 window:
   about:
     title: "About CrabPort"
+    tab:
+      version: "Version"
+      license: "License"
+    dependencies: "Dependencies"
   settings:
     title: "Settings"
     placeholder: "Settings UI is under construction."

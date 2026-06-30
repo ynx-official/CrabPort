@@ -18,16 +18,31 @@ use std::time::Duration;
 // TabPane
 // ---------------------------------------------------------------------------
 pub struct TabPane {
-    pub label: SharedString,
+    pub label: AnyElement,
+    /// Optional icon path forwarded to the segment so the SegmentedControl
+    /// can drive the svg's color transition itself.
+    pub icon: Option<SharedString>,
     pub content: AnyElement,
 }
 
 impl TabPane {
-    pub fn new(label: impl Into<SharedString>, content: impl IntoElement + 'static) -> Self {
+    /// `label` accepts any element. Pass a `&str` / `SharedString` for a
+    /// plain text tab, or an `svg()` for a composite tab.
+    ///
+    /// For an icon-only tab whose color animates with active/hover, use
+    /// `.new("", content).icon("icons/folder.svg")`.
+    pub fn new(label: impl IntoElement + 'static, content: impl IntoElement + 'static) -> Self {
         Self {
-            label: label.into(),
+            label: label.into_any_element(),
+            icon: None,
             content: content.into_any_element(),
         }
+    }
+
+    /// Attach an icon to this pane's tab. See [`Segment::icon`].
+    pub fn icon(mut self, path: impl Into<SharedString>) -> Self {
+        self.icon = Some(path.into());
+        self
     }
 }
 
@@ -120,28 +135,31 @@ impl RenderOnce for Tabs {
             .active(active);
         ctrl.style().refine(&self.ctrl_style);
 
-        for (i, pane) in self.panes.iter().enumerate() {
+        let track_id = ElementId::Name(format!("{}-slide-track", self.id).into());
+        let panel_w = DefiniteLength::Fraction(1.0_f32 / count as f32);
+
+        // Decompose panes into (segment, panel_element) pairs in one pass.
+        // `AnyElement` isn't `Clone`, so we can't share labels/contents
+        // across two separate loops — we move them once here and feed the
+        // two halves into SegmentedControl / panels below.
+        let mut segments: Vec<Segment> = Vec::new();
+        let mut panels: Vec<AnyElement> = Vec::new();
+        for (i, pane) in self.panes.into_iter().enumerate() {
             let cb = on_change_rc.clone();
-            let seg = Segment::new(pane.label.clone()).on_select(move |w, cx| {
+            let is_active = i == active;
+            let panel_id = ElementId::Name(format!("{}-panel-{}", self.id, i).into());
+
+            let icon = pane.icon;
+            let mut seg = Segment::new(pane.label).on_select(move |w, cx| {
                 if let Some(f) = &cb {
                     f(i, w, cx);
                 }
             });
-            ctrl = ctrl.segment(seg);
-        }
-
-        let track_id = ElementId::Name(format!("{}-slide-track", self.id).into());
-
-        let panel_w = DefiniteLength::Fraction(1.0_f32 / count as f32);
-
-        let panels: Vec<AnyElement> = self
-            .panes
-            .into_iter()
-            .enumerate()
-            .map(|(i, pane)| {
-                let is_active = i == active;
-                let panel_id = ElementId::Name(format!("{}-panel-{}", self.id, i).into());
-
+            if let Some(path) = icon {
+                seg = seg.icon(path);
+            }
+            segments.push(seg);
+            panels.push(
                 div()
                     .id(panel_id.clone())
                     .flex_none()
@@ -158,9 +176,12 @@ impl RenderOnce for Tabs {
                         |state| state.opacity(0.),
                     )
                     .child(pane.content)
-                    .into_any_element()
-            })
-            .collect();
+                    .into_any_element(),
+            );
+        }
+        for seg in segments {
+            ctrl = ctrl.segment(seg);
+        }
 
         let mut track = div()
             .id(track_id.clone())

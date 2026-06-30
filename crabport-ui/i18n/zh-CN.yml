@@ -79,6 +79,10 @@ hosts:
 window:
   about:
     title: "关于 CrabPort"
+    tab:
+      version: "版本"
+      license: "许可证"
+    dependencies: "依赖"
   settings:
     title: "设置"
     placeholder: "设置界面建设中。"

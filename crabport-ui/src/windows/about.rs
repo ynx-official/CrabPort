@@ -1,19 +1,62 @@
 //! "About CrabPort" window.
 //!
-//! Shows the application name, version, and build metadata. Kept deliberately
-//! simple — no settings, no persistence. Opened via [`AboutWindow::open`] or
-//! the global [`focus_or_open`] helper.
+//! Layout mirrors the main app: a narrow sidebar of tab buttons on the left
+//! and a content pane on the right. Two tabs are exposed:
+//!
+//! - **Version** — application name + version, centered.
+//! - **License** — the full Apache-2.0 LICENSE text (embedded at compile
+//!   time from `LICENSE` via `include_str!`) followed by a scrollable list
+//!   of third-party dependencies, generated at build time from
+//!   `Cargo.lock` by `crabport-ui/build.rs` (`OUT_DIR/about_dependencies.rs`).
+//!
+//! Opened via [`AboutWindow::open`] or the global [`focus_or_open`] helper.
 
 use gpui::*;
+use gpui_component::label::Label;
 use rust_i18n::t;
 
 use crate::color::*;
+use crate::components::button::Button;
+
+// Embed the workspace LICENSE file at compile time. Path is relative to this
+// source file: `crabport-ui/src/windows/about.rs` -> workspace root `LICENSE`.
+// Currently unused: the License tab only shows the dependency list because
+// rendering the full Apache-2.0 text as a single `StyledText` caused repaint
+// jank. Will be re-enabled once we virtualize it line-by-line.
+#[allow(dead_code)]
+const LICENSE_TEXT: &str = include_str!("../../../LICENSE");
+
+// Build-time-generated dependency table. See `crabport-ui/build.rs`.
+include!(concat!(env!("OUT_DIR"), "/about_dependencies.rs"));
+
+/// Which tab is currently selected in the About window's sidebar.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AboutTab {
+    Version,
+    License,
+}
+
+impl AboutTab {
+    fn all() -> [AboutTab; 2] {
+        [AboutTab::Version, AboutTab::License]
+    }
+
+    fn label(self) -> SharedString {
+        match self {
+            AboutTab::Version => t!("window.about.tab.version").into(),
+            AboutTab::License => t!("window.about.tab.license").into(),
+        }
+    }
+}
 
 /// Root view for the About window.
 pub struct AboutWindow {
     /// Cached app version string. Read once at construction time so renders
     /// are pure and don't re-query cargo metadata.
     version: SharedString,
+    /// Active sidebar tab. Defaults to `Version` so the window opens on the
+    /// most commonly-needed pane.
+    tab: AboutTab,
 }
 
 impl AboutWindow {
@@ -21,8 +64,10 @@ impl AboutWindow {
     /// should normally go through [`crate::windows::focus_or_open`] for the
     /// singleton check).
     pub fn open(cx: &mut App) -> WindowHandle<gpui_component::Root> {
+        // Slightly taller than the original single-pane About so the License
+        // tab has room for a scrollable text block + dependency list.
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::centered(size(px(420.0), px(320.0)), cx)),
+            window_bounds: Some(WindowBounds::centered(size(px(640.0), px(480.0)), cx)),
             titlebar: Some(TitlebarOptions {
                 title: Some(t!("window.about.title").to_string().into()),
                 appears_transparent: true,
@@ -30,8 +75,8 @@ impl AboutWindow {
                 ..Default::default()
             }),
             window_min_size: Some(Size {
-                width: px(360.0),
-                height: px(280.0),
+                width: px(520.0),
+                height: px(360.0),
             }),
             ..Default::default()
         };
@@ -40,7 +85,10 @@ impl AboutWindow {
 
         cx.open_window(options, |window, cx| {
             cx.new(|cx| {
-                let view = cx.new(|_cx| AboutWindow { version });
+                let view = cx.new(|_cx| AboutWindow {
+                    version,
+                    tab: AboutTab::Version,
+                });
                 gpui_component::Root::new(view, window, cx)
             })
         })
@@ -48,11 +96,43 @@ impl AboutWindow {
     }
 }
 
-impl Render for AboutWindow {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+impl AboutWindow {
+    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let handle = cx.entity().clone();
+        div()
+            .h_full()
+            .w(px(160.0))
+            .flex_shrink_0()
+            .border_r_1()
+            .border_color(rgb(BORDER))
+            .bg(rgb(BG_SIDEBAR))
+            .flex()
+            .flex_col()
+            .pt_11()
+            .px_2()
+            .gap_2()
+            .children(AboutTab::all().map(|item| {
+                let is_selected = item == self.tab;
+                let h = handle.clone();
+                Button::new(ElementId::Name(format!("about-tab-{item:?}").into()))
+                    .tab()
+                    .selected(is_selected)
+                    .child(item.label())
+                    .on_click(move |_e, _w, cx| {
+                        h.update(cx, |view, _| {
+                            view.tab = item;
+                        });
+                    })
+                    .h_9()
+                    .border_0()
+                    .px_2()
+                    .text_sm()
+            }))
+    }
+
+    fn render_version_pane(&self) -> impl IntoElement {
         div()
             .size_full()
-            .bg(rgb(BG_BASE))
             .flex()
             .flex_col()
             .items_center()
@@ -69,6 +149,90 @@ impl Render for AboutWindow {
                     .text_sm()
                     .text_color(rgb(TEXT_MUTED))
                     .child(format!("v{}", self.version)),
+            )
+    }
+
+    fn render_license_pane(&self) -> impl IntoElement {
+        // The LICENSE text block is currently disabled — rendering the full
+        // Apache-2.0 text (a single large `StyledText`) caused noticeable
+        // jank on every repaint. It will come back once we virtualize it
+        // line-by-line via `uniform_list` (the dependency list below uses
+        // the same technique and stays smooth with ~700 entries).
+        //
+        // The dependency list is rendered with `uniform_list` so only the
+        // visible rows are laid out / painted, regardless of total count.
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .p_4()
+            .gap_3()
+            .overflow_hidden()
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(TEXT_PRIMARY))
+                    .child(t!("window.about.dependencies").to_string()),
+            )
+            .child(
+                uniform_list(
+                    "about-deps-list",
+                    ABOUT_DEPENDENCIES.len(),
+                    |range, _window, _cx| {
+                        ABOUT_DEPENDENCIES[range]
+                            .iter()
+                            .enumerate()
+                            .map(|(i, (name, ver))| {
+                                div()
+                                    .id(ElementId::Name(format!("about-dep-{}", i).into()))
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_2()
+                                    .px_3()
+                                    .h_6()
+                                    .text_xs()
+                                    .text_color(rgb(TEXT_PRIMARY))
+                                    .child(Label::new((*name).to_string()))
+                                    .child(
+                                        div()
+                                            .text_color(rgb(TEXT_MUTED))
+                                            .child(Label::new((*ver).to_string())),
+                                    )
+                            })
+                            .collect()
+                    },
+                )
+                .flex_1()
+                .min_h_0()
+                .border_1()
+                .border_color(rgb(BORDER))
+                .bg(rgb(BG_TAB_BAR))
+                .rounded_md(),
+            )
+    }
+}
+
+impl Render for AboutWindow {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let content: AnyElement = match self.tab {
+            AboutTab::Version => self.render_version_pane().into_any_element(),
+            AboutTab::License => self.render_license_pane().into_any_element(),
+        };
+
+        div()
+            .size_full()
+            .bg(rgb(BG_BASE))
+            .flex()
+            .flex_row()
+            .child(self.render_sidebar(cx))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .overflow_hidden()
+                    .child(content),
             )
     }
 }
