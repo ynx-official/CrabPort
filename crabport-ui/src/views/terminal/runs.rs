@@ -46,9 +46,19 @@ pub(crate) fn build_runs(cells: &[CellSnap], num_cols: usize) -> (String, Vec<Te
     let mut cur_inverse = false;
 
     for (ci, cell) in cells.iter().enumerate() {
-        if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
-            continue;
-        }
+        // Note: we intentionally do NOT skip `WIDE_CHAR_SPACER` /
+        // `LEADING_WIDE_CHAR_SPACER` cells here. Those cells hold a space
+        // and exist in the grid to mark the second column occupied by a
+        // wide (CJK) glyph. Skipping them would collapse the shaped text
+        // by one character per wide char, breaking the 1-glyph-per-cell
+        // invariant that `force_width` (passed in the paint closure in
+        // terminal.rs) relies on to place each glyph at
+        // `index * cell_width`. With the spacer included, a wide char
+        // (1 glyph at column N) plus its spacer (1 space glyph at column
+        // N+1) maps cleanly: the wide glyph renders at its natural width
+        // (~1.7-1.8x cell_width) starting at column N, fitting inside the
+        // 2-cell slot, and the invisible space at column N+1 reserves
+        // the slot so the following glyph lands at column N+2.
         let ef = cell.fg;
         let eb = cell.bg;
         let is_b = cell.flags.contains(Flags::BOLD);

@@ -1,3 +1,4 @@
+use std::ops::Range;
 use std::rc::Rc;
 use std::sync::{
     Arc,
@@ -90,6 +91,15 @@ pub struct TerminalView {
     scrollbar_dragging: Arc<std::sync::atomic::AtomicBool>,
     /// Y offset (in px) from the thumb top to the mouse cursor at drag start.
     scrollbar_drag_offset: Arc<Mutex<f32>>,
+    /// Current IME marked (preedit) text, if any. Set by the platform's IME
+    /// system via [`EntityInputHandler::replace_and_mark_text_in_range`] and
+    /// committed (written to the PTY) via `replace_text_in_range`. Rendered
+    /// inline at the cursor so the user sees live composition feedback.
+    marked_text: Arc<Mutex<Option<String>>>,
+    /// Latest terminal cursor bounds in window coordinates, refreshed each
+    /// paint. Used by [`EntityInputHandler::bounds_for_range`] to position the
+    /// IME candidate window near the cursor.
+    cursor_bounds: Arc<Mutex<Bounds<Pixels>>>,
     overlay: SharedOverlayState,
     remote_host: String,
     count: u64,
@@ -381,6 +391,11 @@ impl TerminalView {
             visible_rows: Arc::new(std::sync::atomic::AtomicI32::new(0)),
             scrollbar_dragging: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             scrollbar_drag_offset: Arc::new(Mutex::new(0.0)),
+            marked_text: Arc::new(Mutex::new(None)),
+            cursor_bounds: Arc::new(Mutex::new(Bounds::new(
+                point(px(0.0), px(0.0)),
+                size(px(0.0), px(0.0)),
+            ))),
             overlay,
             remote_host: host,
             count,
@@ -645,14 +660,16 @@ impl TerminalView {
         if let Some(action) = keybind::resolve(keystroke, bindings) {
             return Some(action.clone());
         }
-        let m = &keystroke.modifiers;
-        if !m.control && !m.platform && !m.alt {
-            if let Some(key_char) = &keystroke.key_char {
-                if !key_char.is_empty() {
-                    return Some(KeyAction::Bytes(key_char.as_bytes().to_vec()));
-                }
-            }
-        }
+        // NOTE: plain printable characters (no modifiers) are intentionally
+        // NOT converted to `KeyAction::Bytes` here. They are delivered to the
+        // PTY via the IME input handler (`EntityInputHandler::replace_text_in_range`)
+        // instead, which is the only way to make CJK IME composition work on
+        // macOS: the platform intercepts the keydown and routes it through
+        // `NSTextInputClient`, calling `setMarkedText:` while composing and
+        // `insertText:` on commit. If we wrote the raw `key_char` here we
+        // would (a) double-write on plain English key-repeat and (b) break
+        // IME composition entirely because the key would never reach the
+        // input context.
         None
     }
 
@@ -660,33 +677,28 @@ impl TerminalView {
         session.with_term(|term| {
             let grid = term.grid();
             let num_cols = grid.columns();
-            let num_lines = grid.screen_lines() as i32;
-            let display_offset = grid.display_offset() as i32;
-            // Selection rows are grid lines. Clamp to visible viewport range.
+            // Selection rows are stored as absolute grid lines, so they stay
+            // anchored to the text regardless of the current display_offset.
+            // We must NOT clamp them to the visible viewport: a selection that
+            // spans into scrollback (or that the user scrolled away from after
+            // selecting) still refers to valid grid rows and must be copied in
+            // full. The grid's ring-buffer storage covers the entire scrollback,
+            // so indexing by absolute line is always valid.
             let (sr, er, sc, ec) = sel.range();
-            // Visible grid lines: from -(display_offset) to (num_lines-1-display_offset).
-            let vp_top = -display_offset;
-            let vp_bottom = num_lines - 1 - display_offset;
-            let sr = sr.max(vp_top);
-            let er = er.min(vp_bottom);
-            if sr > er {
-                return String::new();
-            }
             let mut result = String::new();
             for row in sr..=er {
                 if row > sr {
                     result.push('\n');
                 }
                 let li = alacritty_terminal::index::Line(row);
-                let (cs, ce) = if sel.start_row <= sel.end_row {
-                    let cs = if row == sr { sc } else { 0 };
-                    let ce = if row == er { ec + 1 } else { num_cols };
-                    (cs, ce)
-                } else {
-                    let cs = if row == sr { ec } else { 0 };
-                    let ce = if row == er { sc + 1 } else { num_cols };
-                    (cs, ce)
-                };
+                // `range()` normalizes sr<=er and returns (sc, ec) such that
+                // the first grid row (sr) starts at column `sc` and the last
+                // grid row (er) ends at column `ec` (inclusive), matching the
+                // visual highlight painted in the render loop. This holds for
+                // both top-down and bottom-up selections, so the column
+                // trimming logic is the same in both cases.
+                let cs = if row == sr { sc } else { 0 };
+                let ce = if row == er { ec + 1 } else { num_cols };
                 let mut line_text = String::new();
                 for col in cs..ce.min(num_cols) {
                     let cell = &grid[li][alacritty_terminal::index::Column(col)];
@@ -767,6 +779,30 @@ impl Render for TerminalView {
         let display_offset_sb = self.display_offset.clone();
         let scrollbar_dragging = self.scrollbar_dragging.clone();
         let scrollbar_drag_offset = self.scrollbar_drag_offset.clone();
+        // Clones used by the paint closure to register global mouse capture
+        // while the scrollbar thumb is being dragged. Registering via
+        // `window.on_mouse_event` (instead of a child overlay div) means the
+        // drag keeps receiving move/up events even when the cursor leaves the
+        // terminal bounds — so dragging the scrollbar and moving the mouse
+        // over the tab bar or SFTP panel no longer aborts the drag or loses
+        // focus.
+        let scrollbar_dragging_paint = self.scrollbar_dragging.clone();
+        let scrollbar_drag_offset_paint = self.scrollbar_drag_offset.clone();
+        let last_bounds_paint = self.last_bounds.clone();
+        let session_paint = self.session.clone();
+        let needs_repaint_paint = self.needs_repaint.clone();
+        let display_offset_paint = self.display_offset.clone();
+        let history_size_paint = self.history_size.clone();
+        let visible_rows_paint = self.visible_rows.clone();
+        // Clones used by the paint closure to (a) register the IME input
+        // handler so the platform can route composition events (Chinese /
+        // Japanese / Korean input) to the terminal, and (b) refresh the
+        // cached cursor bounds each frame so `bounds_for_range` can position
+        // the IME candidate window.
+        let marked_text_paint = self.marked_text.clone();
+        let cursor_bounds_paint = self.cursor_bounds.clone();
+        let entity_input = cx.entity();
+        let focus_handle_input = self.focus_handle.clone();
 
         let ov = self.overlay.lock();
         let overlay_visible = ov.is_visible();
@@ -813,6 +849,12 @@ impl Render for TerminalView {
                         this.session.write(&bytes);
                         this.session.scroll_to_bottom();
                         cx.notify();
+                        // Stop propagation so the platform's IME input context
+                        // doesn't also receive this keydown. These Bytes come
+                        // from keybind matches (Enter, Tab, Backspace, arrows,
+                        // Ctrl-sequences) — i.e. control sequences, not text —
+                        // and we don't want the IME to swallow or echo them.
+                        cx.stop_propagation();
                     }
                     None => {}
                 }
@@ -948,6 +990,77 @@ impl Render for TerminalView {
                         // cursor is Option<(Point, CursorShape)>
                         let text_system = window.text_system().clone();
 
+                        // While the scrollbar thumb is being dragged, register
+                        // global (window-level) capture-phase listeners for
+                        // mouse-move and mouse-up. These fire regardless of
+                        // which element is currently under the cursor, so the
+                        // drag continues smoothly even if the mouse leaves the
+                        // terminal area. The listeners are registered per-frame
+                        // and only while dragging, so there is zero overhead in
+                        // the common (non-dragging) case.
+                        if scrollbar_dragging_paint.load(Ordering::Acquire)
+                            && history_size_paint.load(Ordering::Relaxed) > 0
+                        {
+                            window.on_mouse_event({
+                                let dragging = scrollbar_dragging_paint.clone();
+                                let drag_offset = scrollbar_drag_offset_paint.clone();
+                                let last_bounds = last_bounds_paint.clone();
+                                let session = session_paint.clone();
+                                let needs_repaint = needs_repaint_paint.clone();
+                                let display_offset_atomic = display_offset_paint.clone();
+                                let history = history_size_paint.clone();
+                                let visible = visible_rows_paint.clone();
+                                move |event: &MouseMoveEvent, phase, _window, _cx| {
+                                    if phase != DispatchPhase::Capture
+                                        || !dragging.load(Ordering::Acquire)
+                                    {
+                                        return;
+                                    }
+                                    let Some(bounds) = *last_bounds.lock() else {
+                                        return;
+                                    };
+                                    let history = history.load(Ordering::Relaxed) as f32;
+                                    let visible = visible.load(Ordering::Relaxed) as f32;
+                                    if history <= 0.0 {
+                                        return;
+                                    }
+                                    let drag_offset = *drag_offset.lock();
+                                    let track_h = (f32::from(bounds.size.height) - 4.0).max(0.0);
+                                    let thumb_h = track_h * (visible / (history + visible));
+                                    let new_thumb_top = ((f32::from(event.position.y)
+                                        - f32::from(bounds.origin.y))
+                                        - drag_offset)
+                                        .clamp(0.0, (track_h - thumb_h).max(0.0));
+                                    let new_y_frac = if track_h > 0.0 {
+                                        new_thumb_top / track_h
+                                    } else {
+                                        0.0
+                                    };
+                                    let total = history + visible;
+                                    let new_offset = (history - new_y_frac * total).round() as i32;
+                                    let cur_offset = display_offset_atomic.load(Ordering::Relaxed);
+                                    let delta = new_offset - cur_offset;
+                                    if delta != 0 {
+                                        // Immediately update the atomic so the
+                                        // next move event sees the new offset,
+                                        // preventing repeated scrolls with a
+                                        // stale cur_offset.
+                                        display_offset_atomic.store(new_offset, Ordering::Relaxed);
+                                        session.scroll(delta);
+                                        needs_repaint.store(true, Ordering::Release);
+                                    }
+                                }
+                            });
+                            window.on_mouse_event({
+                                let dragging = scrollbar_dragging_paint.clone();
+                                move |_event: &MouseUpEvent, phase, _window, _cx| {
+                                    if phase == DispatchPhase::Capture {
+                                        dragging.store(false, Ordering::Release);
+                                    }
+                                }
+                            });
+                        }
+
                         let sel_guard = selection.lock();
                         let sel: Option<Selection> = sel_guard.clone();
                         drop(sel_guard);
@@ -1047,6 +1160,26 @@ impl Render for TerminalView {
                             }
 
                             // Text layer: hash-keyed LRU; reshape only on miss.
+                            //
+                            // We pass `force_width = Some(cell_width)` so every
+                            // glyph is laid out on a strict monospace grid
+                            // where glyph N sits at x = N * cell_width. This is
+                            // essential for CJK characters: alacritty gives a
+                            // wide char two grid columns + a WIDE_CHAR_SPACER
+                            // (so the cell grid treats it as 2 cells wide),
+                            // but the underlying font's natural advance for
+                            // that glyph is typically ~1.7-1.8x the ASCII
+                            // advance rather than exactly 2x. Without forcing,
+                            // the shaped line's natural width drifts relative
+                            // to the cell grid, so backgrounds, the cursor,
+                            // selection rects, and following glyphs all end up
+                            // misaligned by a growing offset. `force_width`
+                            // repositions each glyph to its grid slot based on
+                            // its index in the shaped run, so a wide CJK char
+                            // (1 glyph spanning 2 cells) lands exactly at
+                            // 2 * cell_width. ASCII chars (1 glyph = 1 cell)
+                            // are unaffected since their natural advance is
+                            // already cell_width.
                             let hash = row.hash;
                             if cache.shaped.peek(&hash).is_none() {
                                 let (line_text, runs) =
@@ -1056,7 +1189,7 @@ impl Render for TerminalView {
                                         line_text.into(),
                                         font_size,
                                         &runs,
-                                        None,
+                                        Some(cell_width),
                                     );
                                     cache.shaped.put(hash, shaped);
                                 }
@@ -1083,6 +1216,11 @@ impl Render for TerminalView {
                                 let cx_x =
                                     bounds.origin.x + cursor_point.column.0 as f32 * cell_width;
                                 let cx_y = bounds.origin.y + cursor_vp_row as f32 * line_height;
+                                // Cache the cursor's window-space bounds so the
+                                // IME input handler can position the candidate
+                                // window there via `bounds_for_range`.
+                                *cursor_bounds_paint.lock() =
+                                    Bounds::new(point(cx_x, cx_y), size(cell_width, line_height));
                                 paint_cursor(
                                     cursor_shape,
                                     cx_x,
@@ -1093,6 +1231,46 @@ impl Render for TerminalView {
                                 );
                             }
                         }
+
+                        // Render IME preedit (marked) text inline at the cursor
+                        // so the user sees live composition feedback while typing
+                        // Chinese/Japanese/Korean. The text is drawn at the
+                        // terminal cursor position with a subtle underline so it
+                        // reads as in-progress input rather than committed text.
+                        let marked = marked_text_paint.lock().clone();
+                        if let Some(text) = marked
+                            && !text.is_empty()
+                        {
+                            let cb = *cursor_bounds_paint.lock();
+                            let preedit_run = crate::views::terminal::runs::make_run(
+                                text.len(),
+                                false,
+                                false,
+                                TERM_FG,
+                                false,
+                                0,
+                                true,
+                            );
+                            let runs = vec![preedit_run];
+                            let shaped =
+                                text_system.shape_line(text.clone().into(), font_size, &runs, None);
+                            let _ = shaped.paint(
+                                point(cb.origin.x, cb.origin.y),
+                                line_height,
+                                window,
+                                cx,
+                            );
+                        }
+
+                        // Register the IME input handler so the platform routes
+                        // composition events (Chinese/Japanese/Korean input) to
+                        // this terminal view. `handle_input` is a no-op when the
+                        // view is not focused, so this is safe to call every frame.
+                        window.handle_input(
+                            &focus_handle_input,
+                            gpui::ElementInputHandler::new(bounds, entity_input.clone()),
+                            cx,
+                        );
 
                         // Scrollbar is rendered as an interactive overlay div outside
                         // the canvas; nothing to paint here.
@@ -1292,74 +1470,6 @@ impl Render for TerminalView {
                         ),
                 )
             })
-            // Drag capture overlay: a full-size transparent div rendered ONLY
-            // while the scrollbar thumb is being dragged. It captures mouse
-            // move/up so the drag never loses events, and has zero cost when
-            // not dragging (the div doesn't exist in the tree).
-            .when(scrollbar_dragging.load(Ordering::Acquire), |el| {
-                let scrollbar_dragging_c = scrollbar_dragging.clone();
-                let scrollbar_drag_offset_c = scrollbar_drag_offset.clone();
-                let last_bounds_sb = last_bounds_c.clone();
-                let session_sb = session_c.clone();
-                let needs_repaint_sb = needs_repaint.clone();
-                let display_offset_sb_move = display_offset_sb.clone();
-                let history_sb_move = history_size_sb.clone();
-                let visible_sb_move = visible_rows_sb.clone();
-                el.child(
-                    div()
-                        .id("terminal-scrollbar-drag")
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .size_full()
-                        .cursor_pointer()
-                        .on_mouse_move({
-                            let scrollbar_dragging_c = scrollbar_dragging_c.clone();
-                            move |event, _window, _cx| {
-                                if !scrollbar_dragging_c.load(Ordering::Acquire) {
-                                    return;
-                                }
-                                if let Some(bounds) = *last_bounds_sb.lock() {
-                                    let history = history_sb_move.load(Ordering::Relaxed) as f32;
-                                    let visible = visible_sb_move.load(Ordering::Relaxed) as f32;
-                                    if history <= 0.0 {
-                                        return;
-                                    }
-                                    let drag_offset = *scrollbar_drag_offset_c.lock();
-                                    let track_h = (bounds.size.height - px(4.0)) / px(1.0);
-                                    let thumb_h = track_h * (visible / (history + visible));
-                                    let new_thumb_top = ((event.position.y - bounds.origin.y)
-                                        / px(1.0)
-                                        - drag_offset)
-                                        .clamp(0.0, (track_h - thumb_h).max(0.0));
-                                    let new_y_frac = if track_h > 0.0 {
-                                        new_thumb_top / track_h
-                                    } else {
-                                        0.0
-                                    };
-                                    let total = history + visible;
-                                    let new_offset = (history - new_y_frac * total).round() as i32;
-                                    let cur_offset = display_offset_sb_move.load(Ordering::Relaxed);
-                                    let delta = new_offset - cur_offset;
-                                    if delta != 0 {
-                                        // Immediately update the atomic so the next
-                                        // move event sees the new offset, preventing
-                                        // repeated scrolls with stale cur_offset.
-                                        display_offset_sb_move.store(new_offset, Ordering::Relaxed);
-                                        session_sb.scroll(delta);
-                                        needs_repaint_sb.store(true, Ordering::Release);
-                                    }
-                                }
-                            }
-                        })
-                        .on_mouse_up(MouseButton::Left, {
-                            let scrollbar_dragging_c = scrollbar_dragging_c.clone();
-                            move |_event, _window, _cx| {
-                                scrollbar_dragging_c.store(false, Ordering::Release);
-                            }
-                        }),
-                )
-            })
             // Connection overlay (remote sessions only).
             //
             // Note: the host-key confirmation prompt is no longer rendered
@@ -1395,6 +1505,162 @@ impl Focusable for TerminalView {
 impl CrabPortTab for TerminalView {
     fn close(&mut self) {
         self.session.close();
+    }
+}
+
+/// IME / text input integration.
+///
+/// The terminal is modeled as a virtual document whose only content is the
+/// current IME preedit (marked) text, with the cursor at the end. Committed
+/// text is written straight to the PTY — there is no editable buffer to
+/// update, so the range arguments from the platform are effectively ignored.
+/// This is the same approach terminal emulators like Alacritty use for IME.
+impl EntityInputHandler for TerminalView {
+    fn text_for_range(
+        &mut self,
+        range: Range<usize>,
+        _adjusted_range: &mut Option<Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<String> {
+        // The only "document" text we expose is the current preedit text.
+        let marked = self.marked_text.lock().clone().unwrap_or_default();
+        let end = range.end.min(marked.len());
+        if range.start >= end {
+            Some(String::new())
+        } else {
+            Some(marked[range.start..end].to_string())
+        }
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        // Report a zero-length selection at the end of the (virtual) document
+        // so the platform positions IME composition at the cursor. Length is
+        // the current preedit text length in UTF-16 units.
+        let marked_len = self
+            .marked_text
+            .lock()
+            .as_ref()
+            .map(|s| s.encode_utf16().count())
+            .unwrap_or(0);
+        Some(UTF16Selection {
+            range: marked_len..marked_len,
+            reversed: false,
+        })
+    }
+
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
+        // Marked range covers the entire preedit text, expressed in UTF-16
+        // units (the platform convention for NSTextInputClient ranges).
+        self.marked_text.lock().as_ref().map(|s| {
+            let len = s.encode_utf16().count();
+            0..len
+        })
+    }
+
+    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let changed = self.marked_text.lock().take().is_some();
+        if changed {
+            self.needs_repaint.store(true, Ordering::Release);
+            cx.notify();
+        }
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        _range: Option<Range<usize>>,
+        text: &str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Commit: write the final text to the PTY and clear any preedit.
+        // The range is ignored — the terminal has no editable buffer, so we
+        // always insert at the cursor regardless of what the platform passes.
+        if !text.is_empty() {
+            self.session.write(text.as_bytes());
+            self.session.scroll_to_bottom();
+        }
+        let had_marked = self.marked_text.lock().take().is_some();
+        if had_marked || !text.is_empty() {
+            self.needs_repaint.store(true, Ordering::Release);
+            cx.notify();
+        }
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _range: Option<Range<usize>>,
+        new_text: &str,
+        _new_selected_range: Option<Range<usize>>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Update the live preedit text. We do NOT write to the PTY here —
+        // the text is only sent once the IME commits via `replace_text_in_range`.
+        // An empty `new_text` cancels the composition (clears preedit).
+        let new = if new_text.is_empty() {
+            None
+        } else {
+            Some(new_text.to_string())
+        };
+        let changed = *self.marked_text.lock() != new;
+        if changed {
+            *self.marked_text.lock() = new;
+            self.needs_repaint.store(true, Ordering::Release);
+            cx.notify();
+        }
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        _range_utf16: Range<usize>,
+        _element_bounds: Bounds<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        // Position the IME candidate window just past the end of any in-flight
+        // preedit text so it doesn't overlap the composition itself; if there
+        // is no preedit, anchor at the terminal cursor. We approximate the
+        // preedit width as (char count * cell_width) which is accurate for
+        // ASCII pinyin and CJK wide chars (each 2 cells) — close enough for
+        // popup anchoring, the platform reflows the candidate window anyway.
+        let cb = *self.cursor_bounds.lock();
+        let mut origin_x = cb.origin.x;
+        if let Some(marked) = self.marked_text.lock().as_ref() {
+            // Count display columns: wide CJK chars take 2 cells, others 1.
+            let cols: usize = marked
+                .chars()
+                .map(|c| if c.is_ascii() { 1 } else { 2 })
+                .sum();
+            origin_x = cb.origin.x + self.cell_width * cols as f32;
+        }
+        Some(Bounds::new(
+            point(origin_x, cb.origin.y),
+            size(self.cell_width, self.line_height),
+        ))
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _point: Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        // The terminal has no hit-testable character grid from the IME's
+        // perspective; returning the end of the document is a safe default.
+        self.marked_text
+            .lock()
+            .as_ref()
+            .map(|s| s.encode_utf16().count())
     }
 }
 
