@@ -82,6 +82,7 @@ window:
     tab:
       version: "Version"
       license: "License"
+    license: "License"
     dependencies: "Dependencies"
   settings:
     title: "Settings"

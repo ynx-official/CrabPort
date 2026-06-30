@@ -11,20 +11,22 @@
 //!
 //! Opened via [`AboutWindow::open`] or the global [`focus_or_open`] helper.
 
+use std::rc::Rc;
+
 use gpui::*;
 use gpui_component::label::Label;
+use gpui_component::scroll::Scrollbar;
+use gpui_component::{VirtualListScrollHandle, v_virtual_list};
 use rust_i18n::t;
 
 use crate::color::*;
 use crate::components::button::Button;
 
-// Embed the workspace LICENSE file at compile time. Path is relative to this
-// source file: `crabport-ui/src/windows/about.rs` -> workspace root `LICENSE`.
-// Currently unused: the License tab only shows the dependency list because
-// rendering the full Apache-2.0 text as a single `StyledText` caused repaint
-// jank. Will be re-enabled once we virtualize it line-by-line.
-#[allow(dead_code)]
-const LICENSE_TEXT: &str = include_str!("../../../LICENSE");
+// The project is licensed under Apache 2.0. We show the license name as
+// plain text rather than embedding the full LICENSE text (200+ lines) —
+// keeps the About window lean and avoids the rendering cost of a long
+// text block. Anyone needing the full text can find it in the source tree.
+const LICENSE_NAME: &str = "Apache License 2.0";
 
 // Build-time-generated dependency table. See `crabport-ui/build.rs`.
 include!(concat!(env!("OUT_DIR"), "/about_dependencies.rs"));
@@ -57,6 +59,8 @@ pub struct AboutWindow {
     /// Active sidebar tab. Defaults to `Version` so the window opens on the
     /// most commonly-needed pane.
     tab: AboutTab,
+    /// Scroll handle for the dependency list virtual list.
+    deps_scroll: VirtualListScrollHandle,
 }
 
 impl AboutWindow {
@@ -88,6 +92,7 @@ impl AboutWindow {
                 let view = cx.new(|_cx| AboutWindow {
                     version,
                     tab: AboutTab::Version,
+                    deps_scroll: VirtualListScrollHandle::new(),
                 });
                 gpui_component::Root::new(view, window, cx)
             })
@@ -152,15 +157,54 @@ impl AboutWindow {
             )
     }
 
-    fn render_license_pane(&self) -> impl IntoElement {
-        // The LICENSE text block is currently disabled — rendering the full
-        // Apache-2.0 text (a single large `StyledText`) caused noticeable
-        // jank on every repaint. It will come back once we virtualize it
-        // line-by-line via `uniform_list` (the dependency list below uses
-        // the same technique and stays smooth with ~700 entries).
-        //
-        // The dependency list is rendered with `uniform_list` so only the
-        // visible rows are laid out / painted, regardless of total count.
+    fn render_license_pane(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        // License is shown as a single static line (the license name) —
+        // no need to embed the full Apache-2.0 text. The dependency list
+        // below uses `v_virtual_list` so only visible rows are laid out.
+
+        // --- Dependency rows ---
+        let deps_count = ABOUT_DEPENDENCIES.len();
+        let deps_item_sizes = Rc::new(
+            (0..deps_count)
+                .map(|_| Size {
+                    width: px(0.0),
+                    height: px(24.0),
+                })
+                .collect::<Vec<_>>(),
+        );
+        let deps_scroll = self.deps_scroll.clone();
+        let deps_list = v_virtual_list(
+            cx.entity(),
+            "about-deps-list",
+            deps_item_sizes,
+            move |_this, range, _window, _cx| {
+                range
+                    .map(|i| {
+                        let (name, ver) = ABOUT_DEPENDENCIES[i];
+                        div()
+                            .id(ElementId::Name(format!("about-dep-{}", i).into()))
+                            .h(px(24.0))
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .px_3()
+                            .text_xs()
+                            .text_color(rgb(TEXT_PRIMARY))
+                            .child(Label::new(name.to_string()))
+                            .child(
+                                div()
+                                    .text_color(rgb(TEXT_MUTED))
+                                    .child(Label::new(ver.to_string())),
+                            )
+                    })
+                    .collect::<Vec<_>>()
+            },
+        )
+        .track_scroll(&deps_scroll)
+        .pr(px(12.0));
+
         div()
             .size_full()
             .flex()
@@ -168,6 +212,27 @@ impl AboutWindow {
             .p_4()
             .gap_3()
             .overflow_hidden()
+            // --- License block ---
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(TEXT_PRIMARY))
+                            .child(t!("window.about.license").to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(TEXT_MUTED))
+                            .child(LICENSE_NAME),
+                    ),
+            )
+            // --- Dependencies block ---
             .child(
                 div()
                     .text_sm()
@@ -175,40 +240,25 @@ impl AboutWindow {
                     .child(t!("window.about.dependencies").to_string()),
             )
             .child(
-                uniform_list(
-                    "about-deps-list",
-                    ABOUT_DEPENDENCIES.len(),
-                    |range, _window, _cx| {
-                        ABOUT_DEPENDENCIES[range]
-                            .iter()
-                            .enumerate()
-                            .map(|(i, (name, ver))| {
-                                div()
-                                    .id(ElementId::Name(format!("about-dep-{}", i).into()))
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .gap_2()
-                                    .px_3()
-                                    .h_6()
-                                    .text_xs()
-                                    .text_color(rgb(TEXT_PRIMARY))
-                                    .child(Label::new((*name).to_string()))
-                                    .child(
-                                        div()
-                                            .text_color(rgb(TEXT_MUTED))
-                                            .child(Label::new((*ver).to_string())),
-                                    )
-                            })
-                            .collect()
-                    },
-                )
-                .flex_1()
-                .min_h_0()
-                .border_1()
-                .border_color(rgb(BORDER))
-                .bg(rgb(BG_TAB_BAR))
-                .rounded_md(),
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .bg(rgb(BG_TAB_BAR))
+                    .rounded_md()
+                    .overflow_hidden()
+                    .child(deps_list)
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .right_0()
+                            .bottom_0()
+                            .w(px(12.0))
+                            .child(Scrollbar::vertical(&deps_scroll)),
+                    ),
             )
     }
 }
@@ -217,7 +267,7 @@ impl Render for AboutWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let content: AnyElement = match self.tab {
             AboutTab::Version => self.render_version_pane().into_any_element(),
-            AboutTab::License => self.render_license_pane().into_any_element(),
+            AboutTab::License => self.render_license_pane(cx).into_any_element(),
         };
 
         div()

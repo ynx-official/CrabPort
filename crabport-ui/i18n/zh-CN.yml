@@ -82,6 +82,7 @@ window:
     tab:
       version: "版本"
       license: "许可证"
+    license: "许可证"
     dependencies: "依赖"
   settings:
     title: "设置"
