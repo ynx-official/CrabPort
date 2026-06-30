@@ -187,9 +187,9 @@ Contains:
 | Language | Rust 2024 Edition |
 | UI framework | [GPUI](https://github.com/zed-industries/zed) |
 | Component library | [gpui-component](https://github.com/longbridge/gpui-component) |
-| Animation | [gpui-animation](https://github.com/longbridge/gpui-animation) |
-| SSH protocol | [russh](https://github.com/warp-tech/russh) |
-| SFTP protocol | [russh-sftp](https://github.com/warp-tech/russh-sftp) |
+| Animation | [gpui-animation](https://github.com/chi11321/gpui-animation) |
+| SSH protocol | [russh](https://github.com/Eugeny/russh) |
+| SFTP protocol | [russh-sftp](https://github.com/AspectUnk/russh-sftp) |
 | Terminal emulator | [alacritty_terminal](https://github.com/alacritty/alacritty) |
 | Database | [rusqlite](https://github.com/rusqlite/rusqlite) (SQLite) |
 | Crypto | [aes-gcm](https://github.com/RustCrypto/AEADs) (AES-256-GCM) |

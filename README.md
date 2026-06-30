@@ -187,9 +187,9 @@ CrabPort/
 | 语言 | Rust 2024 Edition |
 | UI 框架 | [GPUI](https://github.com/zed-industries/zed) |
 | UI 组件库 | [gpui-component](https://github.com/longbridge/gpui-component) |
-| 动画 | [gpui-animation](https://github.com/longbridge/gpui-animation) |
-| SSH 协议 | [russh](https://github.com/warp-tech/russh) |
-| SFTP 协议 | [russh-sftp](https://github.com/warp-tech/russh-sftp) |
+| 动画 | [gpui-animation](https://github.com/chi11321/gpui-animation) |
+| SSH 协议 | [russh](https://github.com/Eugeny/russh) |
+| SFTP 协议 | [russh-sftp](https://github.com/AspectUnk/russh-sftp) |
 | 终端模拟 | [alacritty_terminal](https://github.com/alacritty/alacritty) |
 | 数据库 | [rusqlite](https://github.com/rusqlite/rusqlite) (SQLite) |
 | 加密 | [aes-gcm](https://github.com/RustCrypto/AEADs) (AES-256-GCM) |
