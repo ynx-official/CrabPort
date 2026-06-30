@@ -3,11 +3,12 @@ use std::sync::{Arc, LazyLock};
 
 use async_broadcast::{InactiveReceiver, Sender as BroadcastSender, broadcast};
 use async_channel::{Sender as MpscSender, unbounded};
-use parking_lot::RwLock;
+use parking_lot::{Mutex as PlMutex, RwLock};
 use russh::{
     Channel, ChannelMsg,
     client::{self, Msg},
 };
+use tokio::task::AbortHandle;
 use tokio::{runtime::Runtime, select, sync::Mutex as TokioMutex};
 
 use crabport_sftp::CrabPortSftp;
@@ -79,6 +80,16 @@ pub struct SshBackend {
     /// one) on every `sftp_navigate` call. Lazily (re)connected if `None`,
     /// e.g. after the server closes the channel or on first use.
     pub(crate) sftp_session: Arc<TokioMutex<Option<crabport_sftp::SftpBackend>>>,
+    /// Abort handles for in-flight SFTP transfer tasks (download / upload /
+    /// delete) spawned via `TOKIO.spawn` in the `CrabPortTerminal` impl.
+    /// Tracked so that `Command::Close` can cancel them instead of letting
+    /// them outlive the terminal: a transfer task holds its own
+    /// `SftpTransferHandle` (with `Arc` clones of the SSH handle + SFTP
+    /// session cache + event sink), so without explicit cancellation the
+    /// underlying SSH connection would stay alive — and keep streaming
+    /// bytes / opening new SFTP channels — until the transfer finished on
+    /// its own, even after the user closed the terminal tab.
+    pub(crate) transfer_tasks: Arc<PlMutex<Vec<AbortHandle>>>,
 }
 
 impl SshBackend {
@@ -108,6 +119,8 @@ impl SshBackend {
         let sftp_session: Arc<TokioMutex<Option<crabport_sftp::SftpBackend>>> =
             Arc::new(TokioMutex::new(None));
         let sftp_session2 = sftp_session.clone();
+        let transfer_tasks: Arc<PlMutex<Vec<AbortHandle>>> = Arc::new(PlMutex::new(Vec::new()));
+        let transfer_tasks_close = transfer_tasks.clone();
 
         let event_tx2 = event_tx.clone();
         let monitor2 = monitor.clone();
@@ -410,11 +423,40 @@ impl SshBackend {
                                 }
                             }
                             Ok(Command::Close) | Err(_) => {
+                                // Abort any in-flight SFTP transfer tasks before
+                                // tearing down the channel. Each transfer task
+                                // holds its own `SftpTransferHandle` (with `Arc`
+                                // clones of the SSH handle + SFTP session cache),
+                                // so without aborting them the SSH connection
+                                // would stay alive — and the transfers would
+                                // keep streaming / opening new SFTP channels —
+                                // until they finished on their own, even though
+                                // the user closed the terminal. Aborting drops
+                                // those `Arc` clones at the next `.await` point,
+                                // letting the SSH handle actually be released.
+                                let aborted = {
+                                    let mut tasks = transfer_tasks_close.lock();
+                                    let v = tasks.drain(..).collect::<Vec<_>>();
+                                    v
+                                };
+                                #[cfg(debug_assertions)]
+                                tracing::info!(
+                                    "SSH: close — aborting {} in-flight transfer task(s)",
+                                    aborted.len()
+                                );
+                                for handle in aborted {
+                                    handle.abort();
+                                }
                                 let _ = channel.eof().await;
                                 // Close the cached SFTP session (if any) so the
                                 // server-side channel is torn down cleanly
                                 // rather than lingering until the SSH
-                                // connection itself drops.
+                                // connection itself drops. Note: a transfer
+                                // task that already `take`-or-opened the cached
+                                // session may still hold a live session; that's
+                                // fine — it'll be dropped (and its channel
+                                // closed) when the aborted task's future is
+                                // dropped along with its `SftpTransferHandle`.
                                 if let Some(sftp) = sftp_session2.lock().await.take() {
                                     let _ = sftp.close().await;
                                 }
@@ -441,6 +483,7 @@ impl SshBackend {
             sftp_entries,
             sftp_cwd,
             sftp_session,
+            transfer_tasks,
         }
     }
 
@@ -490,5 +533,34 @@ impl SshBackend {
             event_tx: Some(self.event_tx.clone()),
         };
         crate::transfer::sftp_upload_impl(&backend, local_path, remote_path).await
+    }
+
+    // -----------------------------------------------------------------------
+    // In-flight transfer task tracking
+    // -----------------------------------------------------------------------
+
+    /// Spawn a transfer task (download / upload / delete) on the shared
+    /// `TOKIO` runtime and track its [`AbortHandle`] so that `Command::Close`
+    /// can cancel it.
+    ///
+    /// Each transfer task holds its own [`SftpTransferHandle`] (with `Arc`
+    /// clones of the SSH handle + SFTP session cache + event sink), so without
+    /// explicit cancellation the SSH connection would stay alive — and the
+    /// transfers would keep streaming / opening new SFTP channels — until they
+    /// finished on their own, even after the user closed the terminal.
+    ///
+    /// Tracked handles are aborted (a no-op if the task already completed) and
+    /// drained in the `Command::Close` arm of the SSH event loop. We don't
+    /// auto-unregister on natural completion because `AbortHandle` exposes no
+    /// `is_finished` check; this is fine in practice since the vec is bounded
+    /// by the number of transfers a session kicks off (typically small) and is
+    /// fully cleared on close.
+    pub(crate) fn spawn_transfer<F>(&self, future: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let join = TOKIO.spawn(future);
+        let abort = join.abort_handle();
+        self.transfer_tasks.lock().push(abort);
     }
 }

@@ -111,7 +111,7 @@ impl CrabPortTerminal for SshBackend {
         let event_tx = self.event_tx.clone();
         let remote_path = remote_path.to_string();
         let local_path = local_path.to_string();
-        TOKIO.spawn(async move {
+        self.spawn_transfer(async move {
             let result =
                 crate::transfer::sftp_download_impl(&backend, &remote_path, &local_path).await;
             let (success, message) = match &result {
@@ -137,7 +137,7 @@ impl CrabPortTerminal for SshBackend {
         let event_tx = self.event_tx.clone();
         let remote_path = remote_path.to_string();
         let local_path = local_path.to_string();
-        TOKIO.spawn(async move {
+        self.spawn_transfer(async move {
             let result =
                 crate::transfer::sftp_upload_impl(&backend, &local_path, &remote_path).await;
             let (success, message) = match result {
@@ -167,7 +167,7 @@ impl CrabPortTerminal for SshBackend {
         };
         let event_tx = self.event_tx.clone();
         let remote_path = remote_path.to_string();
-        TOKIO.spawn(async move {
+        self.spawn_transfer(async move {
             let result = crate::transfer::sftp_delete_impl(&backend, &remote_path).await;
             let (success, message) = match result {
                 Ok(()) => (true, format!("deleted {remote_path}")),
