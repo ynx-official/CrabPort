@@ -1,20 +1,44 @@
+//! Local PTY backend.
+//!
+//! Fully implemented on Unix (`#[cfg(unix)]`) where `alacritty_terminal`'s
+//! `tty::Pty` exposes `file()` / `child()` and we can drive `ioctl(TIOCSWINSZ)`
+//! + `waitpid` directly.
+//!
+//! On Windows (`#[cfg(windows)]`) this module compiles but is a **stub**:
+//! `PtyBackend::new` always returns an error. The alacritty `Pty` API on
+//! Windows differs significantly (ConPTY, no `file()`/`child()` accessors,
+//! resize goes through the `OnResize` trait) and is not wired up here. Callers
+//! that hit this path on Windows will surface the error — remote SSH sessions
+//! (the app's primary use case) are unaffected since they use `SshBackend`.
+
+// Imports used only by the Unix implementation. Everything shared across
+// platforms (struct fields, trait impls) is imported unconditionally below.
+#[cfg(unix)]
 use std::{
     io::{Read, Write},
     os::fd::AsRawFd,
-    sync::Arc,
-    sync::atomic::{AtomicU64, Ordering as AtomicOrdering},
     thread,
     time::Duration,
 };
 
+// Shared across platforms — struct fields and the CrabPortMonitor impl use these.
+use std::{
+    sync::Arc,
+    sync::atomic::{AtomicU64, Ordering as AtomicOrdering},
+};
+
+#[cfg(unix)]
 use alacritty_terminal::{
     event::WindowSize,
     tty::{self, Options, Pty},
 };
-use async_broadcast::{
-    InactiveReceiver, Receiver as BroadcastReceiver, Sender as BroadcastSender, broadcast,
-};
+#[cfg(unix)]
+use async_broadcast::broadcast;
+// `BroadcastReceiver` is the return type of `CrabPortTerminal::subscribe`,
+// which is implemented for all platforms (including the Windows stub).
+use async_broadcast::Receiver as BroadcastReceiver;
 use async_channel::{Sender as MpscSender, unbounded};
+#[cfg(unix)]
 use libc::{TIOCSWINSZ, ioctl, winsize};
 use parking_lot::{Mutex, RwLock};
 
@@ -24,10 +48,12 @@ use crate::terminal::{
 };
 
 pub struct PtyBackend {
+    #[cfg(unix)]
     _pty: Arc<Mutex<Pty>>,
     command_tx: MpscSender<Command>,
-    event_tx: BroadcastSender<BackendEvent>,
-    _event_rx: InactiveReceiver<BackendEvent>,
+    event_tx: async_broadcast::Sender<BackendEvent>,
+    #[cfg(unix)]
+    _event_rx: async_broadcast::InactiveReceiver<BackendEvent>,
     sys: RwLock<sysinfo::System>,
     networks: RwLock<sysinfo::Networks>,
     /// Monotonic millis of the last sysinfo refresh.
@@ -46,6 +72,7 @@ enum Command {
 }
 
 impl PtyBackend {
+    #[cfg(unix)]
     pub fn new(cols: u16, rows: u16) -> std::io::Result<Self> {
         tty::setup_env();
 
@@ -170,6 +197,16 @@ impl PtyBackend {
             prev_net_sent: AtomicU64::new(0),
             prev_net_recv: AtomicU64::new(0),
         })
+    }
+
+    /// Windows stub: local PTY is not supported on Windows. Remote SSH
+    /// sessions are unaffected (they use `SshBackend`, not `PtyBackend`).
+    #[cfg(not(unix))]
+    pub fn new(_cols: u16, _rows: u16) -> std::io::Result<Self> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "local PTY backend is not supported on Windows; use a remote SSH session instead",
+        ))
     }
 }
 

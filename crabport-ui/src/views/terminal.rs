@@ -124,7 +124,8 @@ impl TerminalView {
         let cols: usize = 80;
         let rows: usize = 24;
         let backend = Arc::new(
-            PtyBackend::new(cols as u16, rows as u16).expect("failed to create pty backend"),
+            PtyBackend::new(cols as u16, rows as u16)
+                .expect("failed to create pty backend (local PTY is not supported on Windows)"),
         );
         Self::with_backend(backend, cols, rows, None, count, cx)
     }
