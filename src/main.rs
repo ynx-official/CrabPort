@@ -1,7 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-use crabport_ui::CrabportApp;
-use crabport_ui::app::{TerminalShiftTab, TerminalTab};
+use crabport_ui::app::{TerminalShiftTab, TerminalTab, open_main_window};
+use crabport_ui::app_state::AppState;
 use crabport_ui::assets::CrabportAssets;
+use crabport_ui::menus::{Hide, Minimize, OpenAbout, OpenSettings, Quit, Zoom};
+use crabport_ui::windows::AuxWindowKind;
 use gpui::*;
 
 fn main() {
@@ -16,38 +18,64 @@ fn main() {
             // Force dark theme regardless of system appearance.
             gpui_component::theme::Theme::change(gpui_component::theme::ThemeMode::Dark, None, cx);
 
+            // Set the active locale early so the menu bar (built below) and
+            // every window picks up the right translations. Hard-coded to
+            // zh-CN for now; will follow a user setting once Settings exists.
+            crabport_ui::set_locale("zh-CN");
+
             cx.bind_keys([
                 KeyBinding::new("tab", TerminalTab, Some("CrabPortTerminal")),
                 KeyBinding::new("shift-tab", TerminalShiftTab, Some("CrabPortTerminal")),
+                // macOS-standard shortcuts for the app menu items.
+                KeyBinding::new("cmd-q", Quit, None),
+                KeyBinding::new("cmd-h", Hide, None),
+                KeyBinding::new("cmd-,", OpenSettings, None),
+                KeyBinding::new("cmd-m", Minimize, None),
             ]);
 
-            let options = WindowOptions {
-                window_bounds: Some(WindowBounds::centered(size(px(1200.0), px(800.0)), cx)),
-                #[cfg(target_os = "macos")]
-                titlebar: Some(TitlebarOptions {
-                    title: None,
-                    appears_transparent: true,
-                    traffic_light_position: Some(point(px(12.0), px(14.0))),
-                    ..Default::default()
-                }),
-                window_min_size: Some(Size {
-                    width: px(480.0),
-                    height: px(340.0),
-                }),
-                ..Default::default()
-            };
+            // Initialize process-wide shared state (store, window registry)
+            // before opening any window. `CrabportApp::new` reads from this
+            // global, so it must be ready first.
+            AppState::init(cx);
 
-            cx.open_window(options, |_window, cx| {
-                cx.new(|cx| {
-                    let app = cx.new(|cx| CrabportApp::new(_window, cx));
-                    app.update(cx, |app, cx| app.wire(cx));
-                    gpui_component::Root::new(app, _window, cx)
-                })
-            })
-            .expect("Failed to open window");
+            // Global actions for opening secondary windows. These are app-
+            // level (no window context required) so they work from any
+            // focused window.
+            cx.on_action::<OpenSettings>(|_a, cx| {
+                AppState::focus_or_open(AuxWindowKind::Settings, cx);
+            });
+            cx.on_action::<OpenAbout>(|_a, cx| {
+                AppState::focus_or_open(AuxWindowKind::About, cx);
+            });
 
-            std::mem::forget(cx.on_window_closed(|_cx| {
-                std::process::exit(0);
-            }));
+            // Menu-bar actions backed by App-level platform calls.
+            cx.on_action::<Quit>(|_a, cx| cx.quit());
+            cx.on_action::<Hide>(|_a, cx| cx.hide());
+
+            // Window menu: act on the currently-focused window. Menu actions
+            // dispatch globally, so we resolve the active window handle here
+            // and run the platform call inside its window context.
+            cx.on_action::<Minimize>(|_a, cx| {
+                if let Some(handle) = cx.active_window() {
+                    let _ = handle.update(cx, |_, window, _cx| window.minimize_window());
+                }
+            });
+            cx.on_action::<Zoom>(|_a, cx| {
+                if let Some(handle) = cx.active_window() {
+                    let _ = handle.update(cx, |_, window, _cx| window.zoom_window());
+                }
+            });
+
+            // Install the macOS menu bar. On non-macOS platforms this is a
+            // no-op / ignored, but the call is harmless.
+            cx.set_menus(crabport_ui::menus::app_menus());
+
+            open_main_window(cx);
+
+            // NOTE: Previously the app called `std::process::exit(0)` on any
+            // window close. That is incompatible with multi-window support
+            // (closing a secondary window would kill the whole app). GPUI's
+            // default behavior is to exit the process once the last window is
+            // closed, which is what we want now.
         });
 }

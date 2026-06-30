@@ -76,3 +76,26 @@ hosts:
   delete_title: "Delete Host"
   delete_prompt: 'Are you sure you want to delete "%{name}"? This cannot be undone.'
   delete_confirm: "Delete"
+window:
+  about:
+    title: "About CrabPort"
+  settings:
+    title: "Settings"
+    placeholder: "Settings UI is under construction."
+menu:
+  app_name: "CrabPort"
+  about: "About CrabPort"
+  settings: "Settings…"
+  services: "Services"
+  hide: "Hide CrabPort"
+  quit: "Quit CrabPort"
+  edit: "Edit"
+  undo: "Undo"
+  redo: "Redo"
+  cut: "Cut"
+  copy: "Copy"
+  paste: "Paste"
+  select_all: "Select All"
+  window: "Window"
+  minimize: "Minimize"
+  zoom: "Zoom"

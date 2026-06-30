@@ -17,9 +17,10 @@ use crate::views::terminal::TerminalView;
 use crabport_core::credential::{
     CredentialEntry, CredentialKind as CoreCredentialKind, HostEntry, HostKind as CoreHostKind,
 };
-use crabport_core::store::Store;
 use crabport_ssh::backend::SshBackend;
 use crabport_ssh::session::SshConnectionInfo;
+
+use crate::app_state::AppState;
 
 // ---- CrabPortTab trait ----
 
@@ -64,7 +65,6 @@ pub struct CrabportApp {
     /// Global context menu host. Triggered via
     /// `context_menu.update(cx, |c, cx| c.show(state, cx))`.
     pub context_menu: Entity<ContextMenuController>,
-    store: Store,
     wired: bool,
     /// Tab id that currently holds focus. Used to focus the terminal only on
     /// actual tab switches instead of every render (which would steal focus
@@ -111,7 +111,6 @@ impl SidebarItem {
 
 impl CrabportApp {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        rust_i18n::set_locale("zh-CN");
         let home_tab = Tab {
             id: 0,
             title: "Home".into(),
@@ -126,9 +125,11 @@ impl CrabportApp {
         let alert_controller = cx.new(|_cx| AlertController::new());
         let context_menu = cx.new(|_cx| ContextMenuController::new());
 
-        // Open store and load persisted data
-        let store = Store::open().expect("failed to open store");
+        // Read persisted data through the shared global store. The global
+        // is initialized in `main` before any window is opened.
+        let store = AppState::store(cx);
         let hosts: Vec<ConnectionHost> = store
+            .lock()
             .hosts()
             .unwrap_or_default()
             .into_iter()
@@ -163,7 +164,6 @@ impl CrabportApp {
             hosts_view,
             alert_controller,
             context_menu,
-            store,
             wired: false,
             last_focused_tab_id: None,
         }
@@ -305,7 +305,10 @@ impl CrabportApp {
                         public_key: String::new(),
                         certificate: String::new(),
                     };
-                    let cred_id = app.store.add_credential(&cred).unwrap_or(0);
+                    let cred_id = AppState::store(cx)
+                        .lock()
+                        .add_credential(&cred)
+                        .unwrap_or(0);
 
                     // Persist host with linked credential
                     let entry = HostEntry {
@@ -319,7 +322,7 @@ impl CrabportApp {
                         last_login: None,
                         favorite: false,
                     };
-                    let row_id = app.store.add_host(&entry).unwrap_or(0);
+                    let row_id = AppState::store(cx).lock().add_host(&entry).unwrap_or(0);
 
                     app.hosts.push(ConnectionHost {
                         id: row_id,
@@ -553,8 +556,8 @@ impl CrabportApp {
         };
 
         // Update last_login timestamp
-        let _ = self.store.touch_host_login(host_id);
-        if let Ok(all) = self.store.hosts() {
+        let _ = AppState::store(cx).lock().touch_host_login(host_id);
+        if let Ok(all) = AppState::store(cx).lock().hosts() {
             self.hosts = all
                 .into_iter()
                 .map(|h| ConnectionHost {
@@ -580,9 +583,13 @@ impl CrabportApp {
         }
 
         // Try to resolve password and private key from linked credential
-        let cred = host
-            .credential_id
-            .and_then(|cid| self.store.find_credential(cid).ok().flatten());
+        let cred = host.credential_id.and_then(|cid| {
+            AppState::store(cx)
+                .lock()
+                .find_credential(cid)
+                .ok()
+                .flatten()
+        });
 
         // Resolve password / passphrase based on credential kind
         let (password, private_key, passphrase) = match cred.as_ref() {
@@ -623,10 +630,10 @@ impl CrabportApp {
         let host = self.hosts.iter().find(|h| h.id == host_id);
         if let Some(h) = host {
             if let Some(cred_id) = h.credential_id {
-                let _ = self.store.remove_credential(cred_id);
+                let _ = AppState::store(cx).lock().remove_credential(cred_id);
             }
         }
-        let _ = self.store.remove_host(host_id);
+        let _ = AppState::store(cx).lock().remove_host(host_id);
         self.hosts.retain(|h| h.id != host_id);
         cx.notify();
     }
@@ -640,9 +647,13 @@ impl CrabportApp {
         }
         let h = host.unwrap();
 
-        let cred = h
-            .credential_id
-            .and_then(|cid| self.store.find_credential(cid).ok().flatten());
+        let cred = h.credential_id.and_then(|cid| {
+            AppState::store(cx)
+                .lock()
+                .find_credential(cid)
+                .ok()
+                .flatten()
+        });
 
         let mut form = ConnectionFormState::new(window, cx);
 
@@ -725,7 +736,7 @@ impl CrabportApp {
                     };
 
                     if let Some(old_cred_id) = editing_cred_id {
-                        let _ = app.store.remove_credential(old_cred_id);
+                        let _ = AppState::store(cx).lock().remove_credential(old_cred_id);
                     }
 
                     let cred = CredentialEntry {
@@ -738,7 +749,10 @@ impl CrabportApp {
                         public_key: String::new(),
                         certificate: String::new(),
                     };
-                    let new_cred_id = app.store.add_credential(&cred).unwrap_or(0);
+                    let new_cred_id = AppState::store(cx)
+                        .lock()
+                        .add_credential(&cred)
+                        .unwrap_or(0);
 
                     let entry = HostEntry {
                         id: editing_host_id,
@@ -751,7 +765,7 @@ impl CrabportApp {
                         last_login: None,
                         favorite: false,
                     };
-                    let _ = app.store.update_host(&entry);
+                    let _ = AppState::store(cx).lock().update_host(&entry);
 
                     if let Some(h) = app.hosts.iter_mut().find(|h| h.id == editing_host_id) {
                         h.name = name.clone();
@@ -893,4 +907,45 @@ impl Render for CrabportApp {
             // -- Global context menu --
             .child(self.context_menu.clone())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Main window construction
+// ---------------------------------------------------------------------------
+
+/// Open the main terminal window.
+///
+/// This is the heavy window — owns the `CrabportApp` root view (tabs,
+/// terminals, SFTP, command palette, etc.). Constructed directly here rather
+/// than going through `crate::windows::focus_or_open`, because the main
+/// window is neither singleton-managed nor lightweight.
+///
+/// Cross-window sharing still happens via `App`-level globals: `AppState`
+/// for the persistent store, `WindowRegistry` for singleton auxiliary
+/// windows.
+pub fn open_main_window(cx: &mut App) {
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::centered(size(px(1200.0), px(800.0)), cx)),
+        #[cfg(target_os = "macos")]
+        titlebar: Some(TitlebarOptions {
+            title: None,
+            appears_transparent: true,
+            traffic_light_position: Some(point(px(12.0), px(14.0))),
+            ..Default::default()
+        }),
+        window_min_size: Some(Size {
+            width: px(480.0),
+            height: px(340.0),
+        }),
+        ..Default::default()
+    };
+
+    cx.open_window(options, |_window, cx| {
+        cx.new(|cx| {
+            let app = cx.new(|cx| CrabportApp::new(_window, cx));
+            app.update(cx, |app, cx| app.wire(cx));
+            gpui_component::Root::new(app, _window, cx)
+        })
+    })
+    .expect("Failed to open main window");
 }
