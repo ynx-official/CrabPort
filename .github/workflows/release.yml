@@ -13,10 +13,10 @@ name: release
 # Pushing the tag triggers this workflow; the resulting GitHub Release is
 # attached to that tag.
 #
-# Same build matrix as `dev.yml`. Packaging:
-#   - macOS  → `cargo bundle --format osx`  → zipped `.app` bundle
-#   - Linux   → `cargo build --release`      → raw executable
-#   - Windows → `cargo build --release`      → raw `.exe`
+# Packaging strategy — every platform uses `cargo bundle`:
+#   - macOS  → `--format dmg`       → `.dmg` disk image
+#   - Linux   → `--format appimage` → `.AppImage`
+#   - Windows → `--format msi`      → `.msi` installer
 
 on:
   push:
@@ -47,32 +47,38 @@ jobs:
             arch: x86_64
             target: x86_64-apple-darwin
             runner: macos-13
-            bundle: "true"
+            bundle_format: dmg
+            artifact_ext: dmg
           - os: macos
             arch: aarch64
             target: aarch64-apple-darwin
             runner: macos-14
-            bundle: "true"
+            bundle_format: dmg
+            artifact_ext: dmg
           - os: linux
             arch: x86_64
             target: x86_64-unknown-linux-gnu
             runner: ubuntu-22.04
-            bundle: "false"
+            bundle_format: appimage
+            artifact_ext: AppImage
           - os: linux
             arch: aarch64
             target: aarch64-unknown-linux-gnu
             runner: ubuntu-22.04-arm
-            bundle: "false"
+            bundle_format: appimage
+            artifact_ext: AppImage
           - os: windows
             arch: x86_64
             target: x86_64-pc-windows-msvc
             runner: windows-2022
-            bundle: "false"
+            bundle_format: msi
+            artifact_ext: msi
           - os: windows
             arch: aarch64
             target: aarch64-pc-windows-msvc
             runner: windows-2022
-            bundle: "false"
+            bundle_format: msi
+            artifact_ext: msi
 
     steps:
       - name: Checkout
@@ -94,16 +100,12 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.target }}
 
-      - name: Install cargo-bundle (macOS only)
-        if: matrix.bundle == 'true'
+      - name: Install cargo-bundle
         run: cargo install cargo-bundle --locked
 
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
         run: |
-          # Enable universe (libxcb-cursor-dev lives there) — GitHub's
-          # ubuntu runners enable it by default, but be explicit so a future
-          # image change can't silently break us.
           sudo add-apt-repository -y universe || true
           sudo apt-get update
           sudo apt-get install -y \
@@ -115,7 +117,8 @@ jobs:
             libgl1-mesa-dev libegl1-mesa-dev libvulkan-dev \
             libfontconfig1-dev libfreetype6-dev \
             libasound2-dev libpulse-dev libdbus-1-dev \
-            libssl-dev pkg-config
+            libssl-dev pkg-config \
+            squashfs-tools
 
       - name: Cache cargo registry + target
         uses: actions/cache@v4
@@ -130,42 +133,37 @@ jobs:
 
       # ---- Build --------------------------------------------------------
 
-      - name: Build macOS .app bundle
-        if: matrix.bundle == 'true'
-        run: cargo bundle --release --target ${{ matrix.target }} --format osx
+      - name: Build bundle (non-Windows)
+        if: runner.os != 'Windows'
+        run: cargo bundle --release --target ${{ matrix.target }} --format ${{ matrix.bundle_format }}
 
-      - name: Build binary (Linux / Windows)
-        if: matrix.bundle == 'false'
-        run: cargo build --release --target ${{ matrix.target }}
+      - name: Build bundle (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: cargo bundle --release --target ${{ matrix.target }} --format ${{ matrix.bundle_format }}
 
       # ---- Stage artifacts to a predictable path ------------------------
 
-      - name: Stage macOS artifact
-        if: matrix.bundle == 'true'
+      - name: Stage artifact (non-Windows)
+        if: runner.os != 'Windows'
         run: |
           set -e
-          app_path="$(find target/${{ matrix.target }}/release/bundle/osx -maxdepth 1 -name '*.app' | head -n1)"
+          bundle_dir="target/${{ matrix.target }}/release/bundle/${{ matrix.bundle_format }}"
           tag="${{ steps.tag.outputs.name }}"
-          name="CrabPort-${tag}-macos-${{ matrix.arch }}.app"
-          (cd "$(dirname "$app_path")" && ditto -c -k --keepParent "$(basename "$app_path")" "$RUNNER_TEMP/${name}.zip")
-          echo "artifact=$RUNNER_TEMP/${name}.zip" >> $GITHUB_ENV
+          name="CrabPort-${tag}-${{ matrix.os }}-${{ matrix.arch }}.${{ matrix.artifact_ext }}"
+          artifact_path="$(find "$bundle_dir" -maxdepth 2 -type f -name '*.${{ matrix.artifact_ext }}' | head -n1)"
+          cp "$artifact_path" "$RUNNER_TEMP/$name"
+          echo "artifact=$RUNNER_TEMP/$name" >> $GITHUB_ENV
 
-      - name: Stage Linux artifact
-        if: runner.os == 'Linux' && matrix.bundle == 'false'
-        run: |
-          set -e
-          tag="${{ steps.tag.outputs.name }}"
-          name="CrabPort-${tag}-linux-${{ matrix.arch }}"
-          cp "target/${{ matrix.target }}/release/CrabPort" "$RUNNER_TEMP/${name}"
-          echo "artifact=$RUNNER_TEMP/${name}" >> $GITHUB_ENV
-
-      - name: Stage Windows artifact
-        if: runner.os == 'Windows' && matrix.bundle == 'false'
+      - name: Stage artifact (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          $bundleDir = "target\${{ matrix.target }}\release\bundle\${{ matrix.bundle_format }}"
+          $artifact = Get-ChildItem -Path $bundleDir -Recurse -File -Filter *.${{ matrix.artifact_ext }} | Select-Object -First 1
           $tag = "${{ steps.tag.outputs.name }}"
-          $name = "CrabPort-$tag-windows-${{ matrix.arch }}.exe"
-          Copy-Item "target\${{ matrix.target }}\release\CrabPort.exe" "$env:RUNNER_TEMP\$name"
+          $name = "CrabPort-$tag-windows-${{ matrix.arch }}.${{ matrix.artifact_ext }}"
+          Copy-Item $artifact.FullName "$env:RUNNER_TEMP\$name"
           "artifact=$env:RUNNER_TEMP\$name" >> $env:GITHUB_ENV
 
       # ---- Publish to the GitHub Release for this tag ------------------

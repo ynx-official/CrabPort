@@ -46,31 +46,16 @@ CrabPort 是一个原生跨平台的 SSH 终端与 SFTP 文件管理客户端，
 
 | 平台 | 下载文件 | 说明 |
 |------|----------|------|
-| macOS (Apple Silicon) | `CrabPort-v*-macos-aarch64.app.zip` | 解压后拖入 `/Applications` |
-| macOS (Intel) | `CrabPort-v*-macos-x86_64.app.zip` | 解压后拖入 `/Applications` |
-| Linux (x64) | `CrabPort-v*-linux-x86_64` | 直接运行，需安装运行时依赖见下文 |
-| Linux (arm64) | `CrabPort-v*-linux-aarch64` | 直接运行，需安装运行时依赖见下文 |
-| Windows (x64) | `CrabPort-v*-windows-x86_64.exe` | 直接运行 |
-| Windows (arm64) | `CrabPort-v*-windows-aarch64.exe` | 直接运行 |
+| macOS (Apple Silicon) | `CrabPort-v*-macos-aarch64.dmg` | 打开后拖入 `/Applications` |
+| macOS (Intel) | `CrabPort-v*-macos-x86_64.dmg` | 打开后拖入 `/Applications` |
+| Linux (x64) | `CrabPort-v*-linux-x86_64.AppImage` | `chmod +x` 后双击运行，无需安装依赖 |
+| Linux (arm64) | `CrabPort-v*-linux-aarch64.AppImage` | `chmod +x` 后双击运行，无需安装依赖 |
+| Windows (x64) | `CrabPort-v*-windows-x86_64.msi` | 双击安装 |
+| Windows (arm64) | `CrabPort-v*-windows-aarch64.msi` | 双击安装 |
 
 **macOS 提示**：首次打开可能会提示"无法验证开发者"。右键点击应用 → 选择"打开"即可绕过限制，或在终端执行：
 ```bash
 xattr -cr /Applications/CrabPort.app
-```
-
-**Linux 运行时依赖**：Linux 版本为裸二进制，需要自行安装以下运行库：
-```bash
-# Debian / Ubuntu
-sudo apt-get install -y \
-  libx11-6 libxcb1 libxkbcommon0 libwayland-client0 \
-  libgl1 libegl1 libvulkan1 libfontconfig1 libfreetype6 \
-  libasound2 libpulse0 libdbus-1-3 libssl3
-
-# Fedora / RHEL
-sudo dnf install -y \
-  libX11 libxcb libxkbcommon wayland \
-  mesa-libGL mesa-libEGL vulkan fontconfig freetype \
-  alsa-lib pulseaudio-libs dbus openssl
 ```
 
 ### 从源码构建
@@ -116,9 +101,9 @@ cargo run
 # Release 模式编译
 cargo build --release
 
-# macOS 打包为 .app
+# macOS 打包为 .dmg
 cargo install cargo-bundle
-cargo bundle --release --format osx
+cargo bundle --release --format dmg
 ```
 
 ## 项目结构
