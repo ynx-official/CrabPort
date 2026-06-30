@@ -24,14 +24,12 @@ CrabPort is a native cross-platform SSH terminal and SFTP file-management client
 ### Key Features
 
 - **Multi-tab SSH terminal** — Built on `russh` + `alacritty_terminal`, with multi-session support, tab switching, and full ANSI color rendering
-- **SFTP file management** — Visual directory browsing, file/directory upload & download, multi-select batch operations, resumable transfers
+- **SFTP file management** — Visual directory browsing, file/directory upload & download, multi-select batch operations
 - **Secure credential storage** — Keys and passwords encrypted with AES-256-GCM; the encryption key is a locally generated random file
 - **Command history** — Automatically captures terminal command history with search, save-as-snippet, and one-click paste/run
 - **Snippet management** — Globally saved common commands with real-time search and quick execution
-- **Host management** — Persistent connection profiles with favorites and last-login timestamps
-- **SSH host-key verification** — Prompts for confirmation on first connect, then auto-verifies on subsequent connects to prevent man-in-the-middle attacks
-- **Dark theme** — Default dark UI tuned for developer aesthetics
-- **Internationalization** — Built-in Chinese (zh-CN) and English (en) support
+- **Host management** — Persistent connection profiles with favorites and sorting by last login
+- **SSH host-key verification** — Prompts for confirmation on first connect, then auto-verifies on subsequent connects
 - **Cross-platform** — Native support for macOS / Linux / Windows on both x64 and arm64 architectures
 
 ## Screenshots
