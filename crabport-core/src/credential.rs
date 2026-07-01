@@ -82,10 +82,27 @@ impl ProxyConfig {
         }
     }
 
-    /// Detect a proxy from the standard environment variables
-    /// (`ALL_PROXY` / `all_proxy`, then `HTTPS_PROXY` / `https_proxy`, then
-    /// `HTTP_PROXY` / `http_proxy`). Returns `None` if nothing is set or the
-    /// value can't be parsed.
+    /// Detect a proxy from the environment, then (on macOS) from the
+    /// system network preferences.
+    ///
+    /// Lookup order:
+    /// 1. Environment variables — `ALL_PROXY` / `all_proxy`, then
+    ///    `HTTPS_PROXY` / `https_proxy`, then `HTTP_PROXY` /
+    ///    `http_proxy`. This matches the convention used by curl, git,
+    ///    and most CLI tools, so an explicit env var always wins over
+    ///    the OS network preferences.
+    /// 2. (macOS only) System network preferences via `networksetup` —
+    ///    i.e. the proxy configured in "System Settings → Network →
+    ///    Proxies". The default network service is resolved from the
+    ///    primary route's interface (`route -n get default`) and mapped
+    ///    to its network-service name via `networksetup
+    ///    -listallhardwareports`. If that resolution fails, every
+    ///    non-disabled service is probed in order and the first enabled
+    ///    proxy wins. Within a service, SOCKS is preferred over HTTPS,
+    ///    which is preferred over HTTP — SOCKS5 tunnels any TCP, so it's
+    ///    the most generally usable for SSH.
+    ///
+    /// Returns `None` if nothing is set or the value can't be parsed.
     pub fn from_system() -> Option<Self> {
         for key in [
             "ALL_PROXY",
@@ -101,8 +118,222 @@ impl ProxyConfig {
                 }
             }
         }
+
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(cfg) = from_macos_networksetup() {
+                return Some(cfg);
+            }
+        }
+
         None
     }
+}
+
+// ---------------------------------------------------------------------------
+// macOS system proxy (networksetup)
+// ---------------------------------------------------------------------------
+//
+// Reads the proxy configured in "System Settings → Network → Proxies" via
+// the `networksetup` CLI. We shell out instead of linking against
+// `system-configuration` to keep `crabport-core` free of platform-only
+// native deps and to stay buildable on Linux/Windows without conditional
+// linking.
+//
+// The lookup mirrors what browsers and curl-on-macOS do: SOCKS wins over
+// HTTPS over HTTP within the *primary* network service (the one backing
+// the default route). If the primary service can't be determined, every
+// non-disabled service is probed in `listallnetworkservices` order and the
+// first enabled proxy wins. Credentials aren't exposed by `networksetup`,
+// so the returned `ProxyConfig` is always anonymous — callers needing auth
+// should use the Custom proxy mode instead.
+#[cfg(target_os = "macos")]
+fn from_macos_networksetup() -> Option<ProxyConfig> {
+    use std::process::Command;
+
+    /// Probe a single `networksetup -get<target>` subcommand for a service.
+    /// Returns a `ProxyConfig` when the proxy is enabled and the host/port
+    /// parse cleanly; `None` otherwise (disabled / unparseable).
+    ///
+    /// Output shape (with `\n` line endings):
+    ///   ```text
+    ///   Enabled: Yes
+    ///   Server: 127.0.0.1
+    ///   Port: 7897
+    ///   Authenticated Proxy Enabled: 0
+    ///   ```
+    fn probe(subcmd: &str, kind: ProxyKind, service: &str) -> Option<ProxyConfig> {
+        let out = Command::new("networksetup")
+            .args([format!("-get{subcmd}"), service.to_string()])
+            .output()
+            .ok()?;
+        let s = String::from_utf8_lossy(&out.stdout);
+        if field(&s, "Enabled:") != "Yes" {
+            return None;
+        }
+        let host = field(&s, "Server:");
+        if host.is_empty() {
+            return None;
+        }
+        let port: u16 = field(&s, "Port:").parse().ok()?;
+        if port == 0 {
+            return None;
+        }
+        Some(ProxyConfig {
+            kind,
+            host: host.to_string(),
+            port,
+            username: None,
+            password: None,
+        })
+    }
+
+    /// Extract the value following `key:` on its own line, trimmed.
+    fn field<'a>(output: &'a str, key: &str) -> &'a str {
+        for line in output.lines() {
+            let line = line.trim();
+            if let Some(rest) = line.strip_prefix(key) {
+                return rest.trim();
+            }
+        }
+        ""
+    }
+
+    /// Resolve the network service name backing the default route.
+    ///
+    /// `route -n get default` → interface (e.g. `en0`) →
+    /// `networksetup -listallhardwareports` maps device → service name.
+    /// Falls back to scanning every non-disabled service listed by
+    /// `networksetup -listallnetworkservices` if the route can't be
+    /// resolved (e.g. no default route, or interface not found).
+    fn primary_service() -> Option<String> {
+        if let Some(dev) = default_interface() {
+            if let Some(svc) = service_for_device(&dev) {
+                return Some(svc);
+            }
+        }
+        first_listed_service()
+    }
+
+    /// `route -n get default` → `interface: en0` → `en0`.
+    fn default_interface() -> Option<String> {
+        let out = Command::new("route")
+            .args(["-n", "get", "default"])
+            .output()
+            .ok()?;
+        let s = String::from_utf8_lossy(&out.stdout);
+        for line in s.lines() {
+            let line = line.trim();
+            if let Some(rest) = line.strip_prefix("interface:") {
+                let v = rest.trim();
+                if !v.is_empty() {
+                    return Some(v.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    /// Walk `networksetup -listallhardwareports` to map a device name
+    /// (e.g. `en0`) to its service name (e.g. `Wi-Fi`).
+    ///
+    /// Each block looks like:
+    ///   ```text
+    ///   Hardware Port: Wi-Fi
+    ///   Device: en0
+    ///   Ethernet Address: ...
+    ///   ```
+    fn service_for_device(device: &str) -> Option<String> {
+        let out = Command::new("networksetup")
+            .arg("-listallhardwareports")
+            .output()
+            .ok()?;
+        let s = String::from_utf8_lossy(&out.stdout);
+        let mut current_hw: Option<String> = None;
+        for line in s.lines() {
+            let line = line.trim();
+            if let Some(rest) = line.strip_prefix("Hardware Port:") {
+                current_hw = Some(rest.trim().to_string());
+            } else if let Some(rest) = line.strip_prefix("Device:") {
+                if rest.trim() == device {
+                    return current_hw.take();
+                }
+            }
+        }
+        None
+    }
+
+    /// First non-disabled service from `networksetup -listallnetworkservices`.
+    /// The first line of that output is a banner; lines starting with `*`
+    /// denote disabled services and are skipped.
+    fn first_listed_service() -> Option<String> {
+        let out = Command::new("networksetup")
+            .arg("-listallnetworkservices")
+            .output()
+            .ok()?;
+        let s = String::from_utf8_lossy(&out.stdout);
+        let mut lines = s.lines();
+        lines.next(); // banner
+        for line in lines {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('*') {
+                continue;
+            }
+            return Some(line.to_string());
+        }
+        None
+    }
+
+    /// All non-disabled services from `networksetup -listallnetworkservices`,
+    /// used when the primary service can't be resolved.
+    fn all_services() -> Vec<String> {
+        let out = Command::new("networksetup")
+            .arg("-listallnetworkservices")
+            .output()
+            .ok();
+        let s = match out {
+            Some(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
+            None => return Vec::new(),
+        };
+        let mut lines = s.lines();
+        lines.next(); // banner
+        lines
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty() && !l.starts_with('*'))
+            .map(|l| l.to_string())
+            .collect()
+    }
+
+    // Prefer SOCKS → HTTPS → HTTP, mirroring how a SOCKS-capable proxy is
+    // the most generally usable for tunneling arbitrary TCP (SSH).
+    const PROBES: &[(&str, ProxyKind)] = &[
+        ("socksfirewallproxy", ProxyKind::Socks5),
+        ("securewebproxy", ProxyKind::Https),
+        ("webproxy", ProxyKind::Http),
+    ];
+
+    // Try the primary service first, then fall back to scanning every
+    // non-disabled service. The primary-service fast path avoids probing
+    // 3 subcommands × N services on every connect.
+    let mut services = Vec::new();
+    if let Some(svc) = primary_service() {
+        services.push(svc);
+    }
+    for s in all_services() {
+        if !services.contains(&s) {
+            services.push(s);
+        }
+    }
+
+    for service in &services {
+        for (subcmd, kind) in PROBES {
+            if let Some(cfg) = probe(subcmd, *kind, service) {
+                return Some(cfg);
+            }
+        }
+    }
+
+    None
 }
 
 /// Parse a proxy URL string into a `ProxyConfig`.

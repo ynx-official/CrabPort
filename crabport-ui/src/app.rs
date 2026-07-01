@@ -1114,7 +1114,7 @@ pub fn open_main_window(cx: &mut App) {
             ..Default::default()
         }),
         window_min_size: Some(Size {
-            width: px(480.0),
+            width: px(560.0),
             height: px(340.0),
         }),
         ..Default::default()
