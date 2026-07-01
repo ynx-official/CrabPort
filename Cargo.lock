@@ -1383,6 +1383,7 @@ dependencies = [
  "crabport-proxy",
  "crabport-sftp",
  "crabport-terminal",
+ "crabport-tunnel",
  "dirs 6.0.0",
  "parking_lot",
  "russh",
@@ -1408,7 +1409,8 @@ dependencies = [
 name = "crabport-tunnel"
 version = "0.1.0"
 dependencies = [
- "anyhow",
+ "crabport-core",
+ "parking_lot",
 ]
 
 [[package]]

@@ -13,7 +13,7 @@ use crate::color::*;
 use crate::components::button::Button;
 use crate::components::context_menu::{ContextMenuController, ContextMenuItem, ContextMenuState};
 use crate::components::dialog::{AlertController, AlertSeverity, AlertState};
-use crate::layouts::connection_form::{ConnectionFormState, ConnectionFormView};
+use crate::views::connection_form::{ConnectionFormState, ConnectionFormView};
 
 /// A saved connection host entry.
 #[derive(Clone)]
@@ -23,7 +23,7 @@ pub struct ConnectionHost {
     pub host: String,
     pub port: u16,
     pub username: String,
-    pub kind: crate::layouts::connection_form::ConnectionKind,
+    pub kind: crate::views::connection_form::ConnectionKind,
     pub credential_id: Option<i64>,
     pub last_login: Option<i64>,
     pub favorite: bool,

@@ -533,3 +533,77 @@ pub struct SnippetEntry {
     #[serde(default)]
     pub created_at: i64,
 }
+
+// ---------------------------------------------------------------------------
+// Tunnel
+// ---------------------------------------------------------------------------
+
+/// Which kind of SSH port forwarding a tunnel represents.
+/// Mirrors `ssh -L` (Local), `ssh -R` (Remote), `ssh -D` (Dynamic/SOCKS).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TunnelKind {
+    #[default]
+    Local,
+    Remote,
+    Dynamic,
+}
+
+impl TunnelKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TunnelKind::Local => "local",
+            TunnelKind::Remote => "remote",
+            TunnelKind::Dynamic => "dynamic",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s.to_ascii_lowercase().as_str() {
+            "remote" => TunnelKind::Remote,
+            "dynamic" => TunnelKind::Dynamic,
+            _ => TunnelKind::Local,
+        }
+    }
+}
+
+/// A persisted tunnel configuration. Bound to a host via `host_id`.
+/// The actual SSH connection is established at start time — either a fresh
+/// independent connection (started from Tunnels page) or by borrowing an
+/// already-connected tab's session (started from a terminal panel).
+///
+/// Field semantics by kind (matches `ssh -L/-R/-D`):
+/// - **Local** (`-L bind_addr:bind_port:target_host:target_port`): listen
+///   locally on `bind_addr:bind_port`, forward to `target_host:target_port`
+///   via the SSH server.
+/// - **Remote** (`-R bind_addr:bind_port:target_host:target_port`): listen on
+///   the SSH server at `bind_addr:bind_port`, forward to
+///   `target_host:target_port` on the local machine.
+/// - **Dynamic** (`-D bind_addr:bind_port`): listen locally on
+///   `bind_addr:bind_port` as a SOCKS5 proxy; `target_host`/`target_port`
+///   unused.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TunnelEntry {
+    pub id: i64,
+    pub name: String,
+    /// FK -> hosts.id
+    pub host_id: i64,
+    pub kind: TunnelKind,
+    /// Local/Remote: the host side bind address. Empty = all interfaces
+    /// (0.0.0.0). Dynamic: the local SOCKS bind address.
+    #[serde(default)]
+    pub bind_addr: String,
+    /// Local/Remote: the host side port (local listen for Local, remote
+    /// listen for Remote). Dynamic: the local SOCKS listen port.
+    #[serde(default)]
+    pub bind_port: u16,
+    /// Local/Remote only: the target host to forward to. For Local this is
+    /// reachable from the SSH server; for Remote this is reachable from the
+    /// local machine. Empty for Dynamic.
+    #[serde(default)]
+    pub target_host: String,
+    /// Local/Remote only: the target port. 0 for Dynamic.
+    #[serde(default)]
+    pub target_port: u16,
+    #[serde(default)]
+    pub created_at: i64,
+}

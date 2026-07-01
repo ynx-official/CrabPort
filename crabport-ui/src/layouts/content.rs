@@ -8,11 +8,10 @@ use crate::app::{CrabportApp, SidebarItem, Tab, TabKind};
 use crate::color::*;
 use crate::components::context_menu::ContextMenuController;
 use crate::components::dialog::{AlertController, AlertSeverity, AlertState};
-use crate::layouts::connection_form::ConnectionFormState;
 use crate::layouts::panel::render_panel;
 use crate::layouts::tabbar::render_tab_bar;
 use crate::layouts::terminal_toolbar::render_terminal_toolbar;
-use crate::views;
+use crate::views::connection_form::ConnectionFormState;
 use crate::views::hosts::{ConnectionHost, HostsView};
 use crate::views::panel::sftp::SftpPanel;
 use crate::views::terminal::TerminalView;
@@ -34,6 +33,12 @@ pub fn render_content(
     panel_active_tab: usize,
     hosts_view: &Entity<HostsView>,
     snippets_view: &Entity<crate::views::snippets::SnippetsView>,
+    tunnels_view: &Entity<crate::views::tunnels::TunnelsView>,
+    // Pre-read by the caller (which owns the `CrabportApp` borrow) to avoid
+    // a nested `handle.read_with` during render — same reason as
+    // `panel_active_tab`.
+    tunnel_list: Vec<crate::views::tunnels::TunnelView>,
+    tunnel_form_state: Option<crate::views::tunnels::TunnelFormState>,
     alert_controller: &Entity<AlertController>,
     context_menu: &Entity<ContextMenuController>,
     window: &mut Window,
@@ -98,7 +103,60 @@ pub fn render_content(
                 hosts_view.clone().into_any_element()
             }
             SidebarItem::Tunnels => {
-                views::tunnels::render_tunnels_view(|_, _| {}).into_any_element()
+                let app_handle = handle.clone();
+                let on_new = move |w: &mut Window, cx: &mut App| {
+                    app_handle.update(cx, |app, cx| {
+                        app.open_tunnel_form_for_create(w, cx);
+                    });
+                };
+                let app_handle_start = handle.clone();
+                let on_start = move |id: i64, w: &mut Window, cx: &mut App| {
+                    app_handle_start.update(cx, |app, cx| {
+                        app.start_tunnel_owned(id, w, cx);
+                    });
+                };
+                let app_handle_stop = handle.clone();
+                let on_stop = move |id: i64, _w: &mut Window, cx: &mut App| {
+                    app_handle_stop.update(cx, |app, cx| {
+                        app.stop_tunnel(id, cx);
+                    });
+                };
+                let app_handle_edit = handle.clone();
+                let on_edit = move |id: i64, w: &mut Window, cx: &mut App| {
+                    app_handle_edit.update(cx, |app, cx| {
+                        app.open_tunnel_form_for_edit(id, w, cx);
+                    });
+                };
+                let app_handle_remove = handle.clone();
+                let on_remove = move |id: i64, _w: &mut Window, cx: &mut App| {
+                    app_handle_remove.update(cx, |app, cx| {
+                        app.remove_tunnel(id, cx);
+                    });
+                };
+
+                let on_new_rc: Rc<dyn Fn(&mut Window, &mut App)> = Rc::new(on_new);
+                let on_start_rc: Rc<dyn Fn(i64, &mut Window, &mut App)> = Rc::new(on_start);
+                let on_stop_rc: Rc<dyn Fn(i64, &mut Window, &mut App)> = Rc::new(on_stop);
+                let on_edit_rc: Rc<dyn Fn(i64, &mut Window, &mut App)> = Rc::new(on_edit);
+                let on_remove_rc: Rc<dyn Fn(i64, &mut Window, &mut App)> = Rc::new(on_remove);
+
+                tunnels_view.update(cx, |view, cx| {
+                    view.set_state(
+                        tunnel_list,
+                        hosts.to_vec(),
+                        Some(on_new_rc),
+                        Some(on_start_rc),
+                        Some(on_stop_rc),
+                        Some(on_edit_rc),
+                        Some(on_remove_rc),
+                        context_menu.clone(),
+                        alert_controller.clone(),
+                        tunnel_form_state,
+                        cx,
+                    );
+                });
+
+                tunnels_view.clone().into_any_element()
             }
             SidebarItem::Snippets => {
                 // Load snippets from the Store and push into the view.
