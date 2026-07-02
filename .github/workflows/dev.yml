@@ -5,10 +5,12 @@ name: dev
 # combinations and uploads each artifact to the workflow run so it can be
 # downloaded for smoke testing without cutting a release.
 #
-# Packaging strategy — every platform uses `cargo bundle`:
-#   - macOS  → `--format dmg`       → `.dmg` disk image
-#   - Linux   → `--format appimage` → `.AppImage`
-#   - Windows → `--format msi`      → `.msi` installer
+# Packaging strategy:
+#   - macOS  → `cargo bundle --format dmg`       → `.dmg` disk image
+#   - Linux   → `cargo bundle --format appimage` → `.AppImage`
+#   - Windows → `cargo build` + `Compress-Archive` → `.zip`
+#     (cargo-bundle's MSI support has a bug in v0.11.0 where it inserts a
+#     string value into a binary column, so we ship a zipped .exe instead.)
 #
 # Bundling (vs. shipping raw binaries) gives users a self-contained
 # installable package on every platform. On Linux in particular this
@@ -73,19 +75,18 @@ jobs:
           # Windows — both arches run on the windows runner; aarch64
           # cross-compiles via the MSVC arm64 toolchain (shipped with the
           # image, no extra setup needed beyond the rust target).
-          # `msi` format is generated in pure Rust (no WiX/dotnet needed).
+          # We ship a zipped .exe because cargo-bundle's MSI bundler has a
+          # bug (see comment at top of file).
           - os: windows
             arch: x86_64
             target: x86_64-pc-windows-msvc
             runner: windows-2022
-            bundle_format: msi
-            artifact_ext: msi
+            artifact_ext: zip
           - os: windows
             arch: aarch64
             target: aarch64-pc-windows-msvc
             runner: windows-2022
-            bundle_format: msi
-            artifact_ext: msi
+            artifact_ext: zip
 
     steps:
       - name: Checkout
@@ -98,6 +99,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Install cargo-bundle
+        if: runner.os != 'Windows'
         run: cargo install cargo-bundle --locked
 
       - name: Install Linux system dependencies
@@ -141,10 +143,17 @@ jobs:
         if: runner.os != 'Windows'
         run: cargo bundle --release --target ${{ matrix.target }} --format ${{ matrix.bundle_format }}
 
-      - name: Build bundle (Windows)
+      - name: Build and package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: cargo bundle --release --target ${{ matrix.target }} --format ${{ matrix.bundle_format }}
+        run: |
+          cargo build --release --target ${{ matrix.target }}
+          $exePath = "target\${{ matrix.target }}\release\CrabPort.exe"
+          $ref = "${{ github.ref_name }}" -replace '/', '-'
+          $sha = "${{ github.sha }}".Substring(0, 7)
+          $name = "CrabPort-$ref-$sha-windows-${{ matrix.arch }}.zip"
+          Compress-Archive -Path $exePath -DestinationPath "$env:RUNNER_TEMP\$name"
+          "artifact=$env:RUNNER_TEMP\$name" >> $env:GITHUB_ENV
 
       # ---- Stage artifacts to a predictable path ------------------------
       # The bundle lands under target/<triple>/release/bundle/<format>/.
@@ -162,18 +171,6 @@ jobs:
           artifact_path="$(find "$bundle_dir" -maxdepth 2 -type f -name '*.${{ matrix.artifact_ext }}' | head -n1)"
           cp "$artifact_path" "$RUNNER_TEMP/$name"
           echo "artifact=$RUNNER_TEMP/$name" >> $GITHUB_ENV
-
-      - name: Stage artifact (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $bundleDir = "target\${{ matrix.target }}\release\bundle\${{ matrix.bundle_format }}"
-          $artifact = Get-ChildItem -Path $bundleDir -Recurse -File -Filter *.${{ matrix.artifact_ext }} | Select-Object -First 1
-          $ref = "${{ github.ref_name }}" -replace '/', '-'
-          $sha = "${{ github.sha }}".Substring(0, 7)
-          $name = "CrabPort-$ref-$sha-windows-${{ matrix.arch }}.${{ matrix.artifact_ext }}"
-          Copy-Item $artifact.FullName "$env:RUNNER_TEMP\$name"
-          "artifact=$env:RUNNER_TEMP\$name" >> $env:GITHUB_ENV
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
