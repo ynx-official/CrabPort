@@ -170,7 +170,14 @@ impl TerminalView {
         let focus_handle = cx.focus_handle();
         let font_size = px(13.0);
         let line_height = px(20.0);
-        let cell_width = px(7.8);
+        // Consolas (Windows) has slightly narrower glyphs than Menlo (macOS);
+        // a mismatch here causes character gaps and clipping, so pick the
+        // advance width that matches the platform's monospace font.
+        let cell_width = if cfg!(target_os = "windows") {
+            px(7.2)
+        } else {
+            px(7.8)
+        };
 
         let session = Arc::new(TerminalSession::new(backend, cols, rows));
         session.start();
