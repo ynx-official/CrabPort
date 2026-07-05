@@ -3,5 +3,6 @@ pub mod context_menu;
 pub mod dialog;
 pub mod dropdown;
 pub mod input;
+pub mod notification;
 pub mod segmented_control;
 pub mod tabs;

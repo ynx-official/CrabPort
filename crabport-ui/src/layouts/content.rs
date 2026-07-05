@@ -11,8 +11,7 @@ use crate::components::dialog::{AlertController, AlertSeverity, AlertState};
 use crate::layouts::panel::render_panel;
 use crate::layouts::tabbar::render_tab_bar;
 use crate::layouts::terminal_toolbar::render_terminal_toolbar;
-use crate::views::connection_form::ConnectionFormState;
-use crate::views::hosts::{ConnectionHost, HostsView};
+use crate::views::hosts::{ConnectionFormState, ConnectionHost, HostsView};
 use crate::views::panel::sftp::SftpPanel;
 use crate::views::terminal::TerminalView;
 

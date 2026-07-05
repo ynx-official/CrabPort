@@ -1,6 +1,3 @@
-pub mod with_certificate;
-pub mod with_proxy;
-
 use gpui::{prelude::FluentBuilder, *};
 use gpui_animation::{animation::TransitionExt, transition::general::Linear};
 use gpui_component::input::InputState;
@@ -8,13 +5,13 @@ use rust_i18n::t;
 use std::rc::Rc;
 use std::time::Duration;
 
+use super::with_certificate::WithCertificateForm;
+use super::with_proxy::{ProxyKind, WithProxyForm};
 use crate::app::CrabportApp;
 use crate::color::*;
 use crate::components::button::Button;
 use crate::components::input::{StyledInput, StyledPasswordInput};
 use crate::components::tabs::{TabPane, Tabs};
-use with_certificate::WithCertificateForm;
-use with_proxy::{ProxyKind, WithProxyForm};
 
 // ---------------------------------------------------------------------------
 // Connection type
@@ -31,6 +28,32 @@ pub enum ConnectionKind {
 pub enum AuthKind {
     Password,
     Certificate,
+}
+
+// ---------------------------------------------------------------------------
+// ValidationErrors — per-field error strings shown via StyledInput.error()
+// ---------------------------------------------------------------------------
+
+/// Per-field validation errors for the connection form. A field is `Some`
+/// when it has an error to display; `None` means it passed validation.
+/// Cloning is cheap (just `SharedString`s).
+#[derive(Clone, Default)]
+pub struct ValidationErrors {
+    pub host: Option<SharedString>,
+    pub user: Option<SharedString>,
+    pub pass: Option<SharedString>,
+    pub private_key: Option<SharedString>,
+    pub proxy_url: Option<SharedString>,
+}
+
+impl ValidationErrors {
+    pub fn is_empty(&self) -> bool {
+        self.host.is_none()
+            && self.user.is_none()
+            && self.pass.is_none()
+            && self.private_key.is_none()
+            && self.proxy_url.is_none()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -69,6 +92,9 @@ pub struct ConnectionFormState {
     pub private_key_focused: bool,
     pub proxy_url_focused: bool,
     pub editing: bool,
+    /// Per-field validation errors. Populated by `validate()` and rendered
+    /// via `StyledInput.error(...)` on the relevant fields. Cleared on open.
+    pub errors: ValidationErrors,
     pub on_close: Option<Rc<dyn Fn(&mut Window, &mut App) + 'static>>,
     pub on_connect: Option<Rc<dyn Fn(ConnectionKind, &mut Window, &mut App) + 'static>>,
 }
@@ -115,6 +141,7 @@ impl ConnectionFormState {
             private_key_focused: false,
             proxy_url_focused: false,
             editing: false,
+            errors: ValidationErrors::default(),
             on_close: None,
             on_connect: None,
         }
@@ -122,6 +149,7 @@ impl ConnectionFormState {
 
     pub fn open(&mut self, window: &mut Window, cx: &mut App) {
         self.active = true;
+        self.errors = ValidationErrors::default();
         self.name_input.update(cx, |state, cx| {
             state.focus(window, cx);
         });
@@ -166,6 +194,55 @@ impl ConnectionFormState {
         self.proxy_url_input.read(cx).text().to_string()
     }
 
+    /// Validate the form against the required-field rules. Populates
+    /// `self.errors` and returns `true` if the form is valid (no errors).
+    ///
+    /// Rules:
+    /// - SSH / Telnet: host and username are required.
+    /// - SSH + Password auth: password is required.
+    /// - SSH + Certificate auth: private key is required (passphrase optional).
+    /// - Proxy = Custom: proxy URL is required.
+    /// - Name is optional in all modes.
+    /// - Serial has no required fields yet (placeholder backend).
+    pub fn validate(&mut self, cx: &App) -> bool {
+        let mut errors = ValidationErrors::default();
+
+        let needs_host_user = matches!(self.kind, ConnectionKind::SSH | ConnectionKind::Telnet);
+        if needs_host_user {
+            if self.host_text(cx).trim().is_empty() {
+                errors.host = Some(t!("connection_form.error_host_required").into());
+            }
+            if self.user_text(cx).trim().is_empty() {
+                errors.user = Some(t!("connection_form.error_user_required").into());
+            }
+        }
+
+        if self.kind == ConnectionKind::SSH {
+            match self.auth_kind {
+                AuthKind::Password => {
+                    if self.pass_text(cx).trim().is_empty() {
+                        errors.pass = Some(t!("connection_form.error_password_required").into());
+                    }
+                }
+                AuthKind::Certificate => {
+                    if self.private_key_text(cx).trim().is_empty() {
+                        errors.private_key =
+                            Some(t!("connection_form.error_private_key_required").into());
+                    }
+                    // passphrase is optional — no check.
+                }
+            }
+        }
+
+        if self.proxy_kind == ProxyKind::Custom && self.proxy_url_text(cx).trim().is_empty() {
+            errors.proxy_url = Some(t!("connection_form.error_proxy_url_required").into());
+        }
+
+        let ok = errors.is_empty();
+        self.errors = errors;
+        ok
+    }
+
     /// Build a `ProxyConfig` from the current form state.
     ///
     /// - `None`    → no proxy (direct connection).
@@ -176,9 +253,9 @@ impl ConnectionFormState {
     ///   `http://host:port`, `https://user:pass@host:port`.
     pub fn proxy_config(&self, cx: &App) -> Option<crabport_core::credential::ProxyConfig> {
         let cfg = match self.proxy_kind {
-            with_proxy::ProxyKind::None => None,
-            with_proxy::ProxyKind::System => crabport_core::credential::ProxyConfig::from_system(),
-            with_proxy::ProxyKind::Custom => {
+            ProxyKind::None => None,
+            ProxyKind::System => crabport_core::credential::ProxyConfig::from_system(),
+            ProxyKind::Custom => {
                 let url = self.proxy_url_text(cx);
                 crabport_core::credential::parse_proxy_url(&url)
             }
@@ -259,6 +336,7 @@ pub struct ConnectionFormView {
     private_key_focused: bool,
     proxy_url_focused: bool,
     editing: bool,
+    errors: ValidationErrors,
     app: Entity<CrabportApp>,
     on_close: Option<Rc<dyn Fn(&mut Window, &mut App) + 'static>>,
     on_connect: Option<Rc<dyn Fn(ConnectionKind, &mut Window, &mut App) + 'static>>,
@@ -288,6 +366,7 @@ impl ConnectionFormView {
             private_key_focused: state.private_key_focused,
             proxy_url_focused: state.proxy_url_focused,
             editing: state.editing,
+            errors: state.errors.clone(),
             app,
             on_close: state.on_close.clone(),
             on_connect: state.on_connect.clone(),
@@ -324,6 +403,7 @@ impl RenderOnce for ConnectionFormView {
                 self.passphrase_focused,
                 self.private_key_focused,
                 self.proxy_url_focused,
+                self.errors,
                 self.app,
                 on_close_for_dialog,
                 self.on_connect,
@@ -394,6 +474,7 @@ fn render_dialog(
     passphrase_focused: bool,
     private_key_focused: bool,
     proxy_url_focused: bool,
+    errors: ValidationErrors,
     app: Entity<CrabportApp>,
     on_close: Option<Rc<dyn Fn(&mut Window, &mut App) + 'static>>,
     on_connect: Option<Rc<dyn Fn(ConnectionKind, &mut Window, &mut App) + 'static>>,
@@ -474,13 +555,15 @@ fn render_dialog(
                                 port_input.clone(),
                                 host_focused,
                                 port_focused,
+                                errors.host.clone(),
                             ))
                             // Username (shared across auth types)
                             .child(
                                 div().child(
                                     StyledInput::new("username", user_input.clone())
                                         .label(t!("connection_form.username").to_string())
-                                        .focused(user_focused),
+                                        .focused(user_focused)
+                                        .when_some(errors.user.clone(), |el, e| el.error(e)),
                                 ),
                             )
                             .child(
@@ -496,10 +579,14 @@ fn render_dialog(
                                                 )
                                                 .label(t!("connection_form.password").to_string())
                                                 .focused(pass_focused)
+                                                .when_some(errors.pass.clone(), |el, e| el.error(e))
                                                 .on_toggle(|_, _| {}),
                                             ),
                                         )
-                                        .height(px(60.0)),
+                                        .height(px({
+                                            // Password StyledInput single-line + 2px rounding.
+                                            if errors.pass.is_some() { 80.0 } else { 57.0 }
+                                        })),
                                     )
                                     .pane(
                                         TabPane::new(
@@ -509,9 +596,19 @@ fn render_dialog(
                                                 private_key_input,
                                                 passphrase_focused,
                                                 private_key_focused,
+                                                private_key_error: errors.private_key.clone(),
                                             },
                                         )
-                                        .height(px(196.0)),
+                                        .height(px({
+                                            // Certificate pane: passphrase field (57) +
+                                            // gap_4 (16) + private_key textarea (125/148).
+                                            let pk_h = if errors.private_key.is_some() {
+                                                148.0
+                                            } else {
+                                                125.0
+                                            };
+                                            57.0 + 16.0 + pk_h
+                                        })),
                                     )
                                     .on_change({
                                         let app = app.clone();
@@ -534,22 +631,68 @@ fn render_dialog(
                                 proxy_url_input: proxy_url_input.clone(),
                                 proxy_url_focused,
                                 proxy_kind,
+                                proxy_url_error: errors.proxy_url.clone(),
                                 app: app.clone(),
                             }),
                     )
                     .height(px({
-                        let auth_pane = if auth_kind == AuthKind::Password {
-                            60.0
-                        } else {
-                            196.0
+                        // --- Component heights (measured + empirically adjusted) ---
+                        //
+                        // rem_size = 16px. line_height = phi() = 1.618x font.
+                        // text_xs: 12px font → line_height 19px (rounded)
+                        //
+                        // StyledInput outer column: gap_1(4px) between children.
+                        //   Single-line no error:  label(19) + gap(4) + shell(32) = 55px
+                        //   Single-line w/ error:  55 + gap(4) + error_row(19) = 78px
+                        //   Multi 5-row no error:  label(19) + gap(4) + shell(100) = 123px
+                        //   Multi 5-row w/ error:  123 + gap(4) + error_row(19) = 146px
+                        //
+                        // SegmentedControl tab bar:
+                        //   root p_0p5(4) + tab py_1(8) + text_sm(23) = 35px
+                        // gap_2 = 8px, gap_4 = 16px, gap_1 = 4px
+                        //
+                        // +2px per field for font metric rounding.
+
+                        let field_h = |err: bool| if err { 80.0 } else { 57.0 };
+
+                        // Auth pane content height.
+                        let auth_pane = match auth_kind {
+                            AuthKind::Password => field_h(errors.pass.is_some()),
+                            AuthKind::Certificate => {
+                                // passphrase (57, no error check) + gap_4 (16) +
+                                // private_key textarea (125 or 148 with error).
+                                let pk_h = if errors.private_key.is_some() {
+                                    148.0
+                                } else {
+                                    125.0
+                                };
+                                57.0 + 16.0 + pk_h
+                            }
                         };
-                        let auth_h = 54.0 + 16.0 + 54.0 + 16.0 + 30.0 + 8.0 + auth_pane;
+
+                        // SSH pane: host+port row + gap_4 + username + gap_4 +
+                        // auth tabs (bar + gap_2 + pane) + gap_4 + proxy section.
+                        let auth_h = field_h(errors.host.is_some())  // host+port row
+                            + 16.0                                    // gap_4
+                            + field_h(errors.user.is_some())          // username
+                            + 16.0                                    // gap_4
+                            + 35.0                                    // auth tab bar (SegmentedControl)
+                            + 8.0                                     // gap_2
+                            + auth_pane;
+
+                        // Proxy section: label(19) + gap_1(4) + tab bar(35) +
+                        // gap_2(8) + pane content.
                         let proxy_pane = if proxy_kind == ProxyKind::Custom {
-                            60.0
+                            field_h(errors.proxy_url.is_some())
                         } else {
                             0.0
                         };
-                        let proxy_h = 16.0 + 20.0 + 54.0 + 8.0 + proxy_pane;
+                        let proxy_h = 16.0   // gap_4 above proxy section
+                            + 21.0           // "Proxy" label (text_xs, line_height 19 + 2 rounding)
+                            + 4.0            // gap_1
+                            + 35.0           // proxy tab bar (SegmentedControl)
+                            + 8.0            // gap_2
+                            + proxy_pane;
                         auth_h + proxy_h
                     })),
                 )
@@ -566,13 +709,15 @@ fn render_dialog(
                                 port_input.clone(),
                                 host_focused,
                                 port_focused,
+                                errors.host.clone(),
                             ))
                             // Username
                             .child(
                                 div().child(
                                     StyledInput::new("telnet-username", user_input.clone())
                                         .label(t!("connection_form.username").to_string())
-                                        .focused(user_focused),
+                                        .focused(user_focused)
+                                        .when_some(errors.user.clone(), |el, e| el.error(e)),
                                 ),
                             )
                             // Proxy tabs
@@ -580,16 +725,27 @@ fn render_dialog(
                                 proxy_url_input: proxy_url_input.clone(),
                                 proxy_url_focused,
                                 proxy_kind,
+                                proxy_url_error: errors.proxy_url.clone(),
                                 app: app.clone(),
                             }),
                     )
                     .height(px({
+                        let field_h = |err: bool| if err { 80.0 } else { 57.0 };
                         let proxy_pane = if proxy_kind == ProxyKind::Custom {
-                            60.0
+                            field_h(errors.proxy_url.is_some())
                         } else {
                             0.0
                         };
-                        54.0 + 16.0 + 54.0 + 16.0 + 20.0 + 54.0 + 8.0 + proxy_pane
+                        // host+port row + gap_4 + username + gap_4 + proxy section
+                        field_h(errors.host.is_some())
+                            + 16.0
+                            + field_h(errors.user.is_some())
+                            + 16.0
+                            + 21.0   // "Proxy" label (text_xs + 2px rounding)
+                            + 4.0    // gap_1
+                            + 35.0   // proxy tab bar (SegmentedControl)
+                            + 8.0    // gap_2
+                            + proxy_pane
                     })),
                 )
                 .pane(
@@ -630,20 +786,23 @@ fn render_host_port_row(
     port_input: Entity<InputState>,
     host_focused: bool,
     port_focused: bool,
+    host_error: Option<SharedString>,
 ) -> impl IntoElement {
     div()
         .flex()
         .flex_row()
+        .items_start()
         .gap_3()
         .child(
-            div().flex_1().child(
+            div().flex_1().min_w_0().child(
                 StyledInput::new("host", host_input)
                     .label(t!("connection_form.host").to_string())
-                    .focused(host_focused),
+                    .focused(host_focused)
+                    .when_some(host_error, |el, e| el.error(e)),
             ),
         )
         .child(
-            div().w(px(96.0)).child(
+            div().w(px(96.0)).flex_none().child(
                 StyledInput::new("port", port_input)
                     .label(t!("connection_form.port").to_string())
                     .focused(port_focused),

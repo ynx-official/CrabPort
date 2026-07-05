@@ -54,6 +54,8 @@ pub struct SnippetEditState {
     pub command_input: Entity<InputState>,
     pub name_focused: bool,
     pub command_focused: bool,
+    pub name_error: Option<SharedString>,
+    pub command_error: Option<SharedString>,
 }
 
 /// Snippets management view.
@@ -124,6 +126,8 @@ impl SnippetsView {
             command_input,
             name_focused: true,
             command_focused: false,
+            name_error: None,
+            command_error: None,
         });
         cx.notify();
     }
@@ -140,6 +144,8 @@ impl SnippetsView {
             command_input,
             name_focused: true,
             command_focused: false,
+            name_error: None,
+            command_error: None,
         });
         cx.notify();
     }
@@ -171,6 +177,27 @@ impl SnippetsView {
         let id = edit.id;
         let name = edit.name_input.read(cx).value().to_string();
         let command = edit.command_input.read(cx).value().to_string();
+
+        // Validate: both name and command are required.
+        let name_error = if name.trim().is_empty() {
+            Some(t!("snippets.error_name_required").into())
+        } else {
+            None
+        };
+        let command_error = if command.trim().is_empty() {
+            Some(t!("snippets.error_command_required").into())
+        } else {
+            None
+        };
+        if name_error.is_some() || command_error.is_some() {
+            if let Some(ref mut edit) = self.editing {
+                edit.name_error = name_error;
+                edit.command_error = command_error;
+            }
+            cx.notify();
+            return;
+        }
+
         let store = crate::app_state::AppState::store(cx);
         if id == 0 {
             let _ = store.lock().add_snippet(&name, &command);
@@ -229,6 +256,8 @@ impl Render for SnippetsView {
             .as_ref()
             .map(|e| e.command_focused)
             .unwrap_or(false);
+        let edit_name_error = self.editing.as_ref().and_then(|e| e.name_error.clone());
+        let edit_command_error = self.editing.as_ref().and_then(|e| e.command_error.clone());
 
         div()
             .size_full()
@@ -391,7 +420,8 @@ impl Render for SnippetsView {
                                         div().child(
                                             StyledInput::new("snippet-edit-name", input)
                                                 .label(t!("snippets.name").to_string())
-                                                .focused(edit_name_focused),
+                                                .focused(edit_name_focused)
+                                                .when_some(edit_name_error, |el, e| el.error(e)),
                                         ),
                                     )
                                 })
@@ -402,7 +432,8 @@ impl Render for SnippetsView {
                                                 .label(t!("snippets.command").to_string())
                                                 .multi_line(true)
                                                 .rows(5)
-                                                .focused(edit_command_focused),
+                                                .focused(edit_command_focused)
+                                                .when_some(edit_command_error, |el, e| el.error(e)),
                                         ),
                                     )
                                 })

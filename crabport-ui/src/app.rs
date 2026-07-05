@@ -9,10 +9,13 @@ use crate::color::*;
 use crate::components::button::Button;
 use crate::components::context_menu::ContextMenuController;
 use crate::components::dialog::AlertController;
+use crate::components::notification::{
+    Notification, NotificationController, NotificationLevel, NotificationPosition,
+};
 use crate::layouts::command_palette::{CommandView, ConnectionType};
 use crate::layouts::sidebar::render_sidebar;
-use crate::views::connection_form::{AuthKind, ConnectionFormState, ConnectionKind};
 use crate::views::hosts::ConnectionHost;
+use crate::views::hosts::{AuthKind, ConnectionFormState, ConnectionKind};
 use crate::views::terminal::TerminalView;
 use crabport_core::credential::{
     CredentialEntry, CredentialKind as CoreCredentialKind, HostEntry, HostKind as CoreHostKind,
@@ -76,6 +79,11 @@ pub struct CrabportApp {
     /// Global context menu host. Triggered via
     /// `context_menu.update(cx, |c, cx| c.show(state, cx))`.
     pub context_menu: Entity<ContextMenuController>,
+    /// Global toast notification host. Rendered at the app root so toasts
+    /// overlay the entire window regardless of which view is active.
+    /// Triggered via
+    /// `notification_controller.update(cx, |c, cx| c.show(notification, cx))`.
+    pub notification_controller: Entity<NotificationController>,
     /// Central registry of all tunnels (stopped + running). Single source
     /// of truth for the Tunnels view; mutations fire `cx.notify()` via the
     /// `on_change` callback wired at construction.
@@ -148,6 +156,8 @@ impl CrabportApp {
         let tunnels_view = cx.new(|_cx| crate::views::tunnels::TunnelsView::new(app_entity));
         let alert_controller = cx.new(|_cx| AlertController::new());
         let context_menu = cx.new(|_cx| ContextMenuController::new());
+        let notification_controller =
+            cx.new(|_cx| NotificationController::new(NotificationPosition::BottomRight));
 
         // Tunnel registry: a plain mutex-guarded list of tunnel configs +
         // their optional runtime state. `CrabportApp` calls `cx.notify()`
@@ -170,9 +180,9 @@ impl CrabportApp {
                 port: h.port,
                 username: h.username,
                 kind: match h.kind {
-                    CoreHostKind::Ssh => crate::views::connection_form::ConnectionKind::SSH,
-                    CoreHostKind::Telnet => crate::views::connection_form::ConnectionKind::Telnet,
-                    CoreHostKind::Serial => crate::views::connection_form::ConnectionKind::Serial,
+                    CoreHostKind::Ssh => crate::views::hosts::ConnectionKind::SSH,
+                    CoreHostKind::Telnet => crate::views::hosts::ConnectionKind::Telnet,
+                    CoreHostKind::Serial => crate::views::hosts::ConnectionKind::Serial,
                 },
                 credential_id: h.credential_id,
                 last_login: h.last_login,
@@ -206,6 +216,7 @@ impl CrabportApp {
             tunnels_view,
             alert_controller,
             context_menu,
+            notification_controller,
             tunnels,
             tunnel_form: None,
             wired: false,
@@ -302,6 +313,12 @@ impl CrabportApp {
             let a = app.clone();
             move |_kind: ConnectionKind, _w: &mut Window, cx: &mut App| {
                 a.update(cx, |app, cx| {
+                    // Validate required fields before doing anything. If the
+                    // form is invalid, per-field errors are shown and a toast
+                    // is surfaced; the save/connect flow is aborted.
+                    if !app.validate_connection_form(cx) {
+                        return;
+                    }
                     // Read form values directly from state
                     let (
                         name,
@@ -378,7 +395,7 @@ impl CrabportApp {
                         host: host.to_string(),
                         port: port_num,
                         username: username.to_string(),
-                        kind: crate::views::connection_form::ConnectionKind::SSH,
+                        kind: crate::views::hosts::ConnectionKind::SSH,
                         credential_id: Some(cred_id),
                         last_login: None,
                         favorite: false,
@@ -448,6 +465,34 @@ impl CrabportApp {
         })
         .detach();
         cx.notify();
+    }
+
+    /// Validate the connection form before submitting. Populates per-field
+    /// error state (rendered via `StyledInput.error(...)`) and, when invalid,
+    /// shows a toast notification summarizing the missing fields. Returns
+    /// `true` when the form is valid and the caller may proceed with the
+    /// save / connect flow.
+    pub fn validate_connection_form(&mut self, cx: &mut Context<Self>) -> bool {
+        let valid = self
+            .connection_form
+            .as_mut()
+            .map(|form| form.validate(cx))
+            .unwrap_or(true);
+        if !valid {
+            // Surface a summary toast so the user knows something is wrong
+            // even if the offending field is scrolled out of view.
+            self.notification_controller.update(cx, |c, cx| {
+                c.show(
+                    Notification::new(t!("connection_form.validation_title").to_string())
+                        .level(NotificationLevel::Warning)
+                        .message(t!("connection_form.validation_message").to_string())
+                        .duration(std::time::Duration::from_secs(4)),
+                    cx,
+                );
+            });
+            cx.notify();
+        }
+        valid
     }
 
     // -----------------------------------------------------------------------
@@ -952,13 +997,9 @@ impl CrabportApp {
                     port: h.port,
                     username: h.username,
                     kind: match h.kind {
-                        CoreHostKind::Ssh => crate::views::connection_form::ConnectionKind::SSH,
-                        CoreHostKind::Telnet => {
-                            crate::views::connection_form::ConnectionKind::Telnet
-                        }
-                        CoreHostKind::Serial => {
-                            crate::views::connection_form::ConnectionKind::Serial
-                        }
+                        CoreHostKind::Ssh => crate::views::hosts::ConnectionKind::SSH,
+                        CoreHostKind::Telnet => crate::views::hosts::ConnectionKind::Telnet,
+                        CoreHostKind::Serial => crate::views::hosts::ConnectionKind::Serial,
                     },
                     credential_id: h.credential_id,
                     last_login: h.last_login,
@@ -1125,6 +1166,12 @@ impl CrabportApp {
                     editing_proxy_id
                 );
                 app.update(cx, |app, cx| {
+                    // Validate required fields before doing anything. If the
+                    // form is invalid, per-field errors are shown and a toast
+                    // is surfaced; the save flow is aborted.
+                    if !app.validate_connection_form(cx) {
+                        return;
+                    }
                     let (
                         name,
                         host,
@@ -1364,6 +1411,8 @@ impl Render for CrabportApp {
             .child(self.alert_controller.clone())
             // -- Global context menu --
             .child(self.context_menu.clone())
+            // -- Global toast notifications --
+            .child(self.notification_controller.clone())
     }
 }
 

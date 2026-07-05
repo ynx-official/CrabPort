@@ -42,6 +42,13 @@ connection_form:
   proxy_system: "系统"
   proxy_custom: "自定义"
   proxy_url: "代理地址"
+  error_host_required: "主机不能为空"
+  error_user_required: "用户名不能为空"
+  error_password_required: "密码不能为空"
+  error_private_key_required: "私钥不能为空"
+  error_proxy_url_required: "代理地址不能为空"
+  validation_title: "请填写必填字段"
+  validation_message: "请在提交前填写高亮的必填字段。"
 sessions:
   new_button: "新建"
   empty: "暂无保存的会话，点击「+ 新建」创建"
@@ -79,6 +86,14 @@ tunnel_form:
   save: "保存"
   cancel: "取消"
   no_hosts: "请先保存一个主机"
+  error_host_required: "请选择一个主机"
+  error_bind_addr_required: "绑定地址不能为空"
+  error_bind_port_required: "绑定端口不能为空"
+  error_target_host_required: "目标主机不能为空"
+  error_target_port_required: "目标端口不能为空"
+  error_port_invalid: "端口必须是 1 到 65535 之间的数字"
+  validation_title: "请填写必填字段"
+  validation_message: "请在提交前填写高亮的必填字段。"
 terminal:
   reconnect: "重新连接"
   host_key_unknown: "未知主机密钥"
@@ -125,6 +140,8 @@ snippets:
   command: "命令"
   save: "保存"
   cancel: "取消"
+  error_name_required: "名称不能为空"
+  error_command_required: "命令不能为空"
 window:
   about:
     title: "关于 CrabPort"

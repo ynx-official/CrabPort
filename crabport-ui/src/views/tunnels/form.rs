@@ -71,6 +71,31 @@ pub struct TunnelFormOutput {
 }
 
 // ---------------------------------------------------------------------------
+// TunnelValidationErrors — per-field error strings shown via StyledInput.error()
+// ---------------------------------------------------------------------------
+
+/// Per-field validation errors for the tunnel form. A field is `Some` when it
+/// has an error to display; `None` means it passed validation.
+#[derive(Clone, Default)]
+pub struct TunnelValidationErrors {
+    pub host: Option<SharedString>,
+    pub bind_addr: Option<SharedString>,
+    pub bind_port: Option<SharedString>,
+    pub target_host: Option<SharedString>,
+    pub target_port: Option<SharedString>,
+}
+
+impl TunnelValidationErrors {
+    pub fn is_empty(&self) -> bool {
+        self.host.is_none()
+            && self.bind_addr.is_none()
+            && self.bind_port.is_none()
+            && self.target_host.is_none()
+            && self.target_port.is_none()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // TunnelFormState — owned by CrabportApp
 // ---------------------------------------------------------------------------
 
@@ -102,6 +127,9 @@ pub struct TunnelFormState {
     /// Open/close animation state. `true` while the overlay is visible
     /// (drives the backdrop fade + dialog slide-in transition).
     pub open: bool,
+    /// Per-field validation errors. Populated by `validate()` and rendered
+    /// via `StyledInput.error(...)` on the relevant fields. Cleared on open.
+    pub errors: TunnelValidationErrors,
     pub on_close: Option<Rc<dyn Fn(&mut Window, &mut App) + 'static>>,
     pub on_save: Option<Rc<dyn Fn(TunnelFormOutput, &mut Window, &mut App) + 'static>>,
 }
@@ -130,6 +158,7 @@ impl TunnelFormState {
             target_port_focused: false,
             host_dropdown_open: false,
             open: false,
+            errors: TunnelValidationErrors::default(),
             on_close: None,
             on_save: None,
         }
@@ -137,6 +166,7 @@ impl TunnelFormState {
 
     pub fn open(&mut self, window: &mut Window, cx: &mut App) {
         self.open = true;
+        self.errors = TunnelValidationErrors::default();
         self.name_input.update(cx, |state, cx| {
             state.focus(window, cx);
         });
@@ -168,9 +198,12 @@ impl TunnelFormState {
                 state.set_value("", window, cx);
             });
         }
-        // Default bind address matches `ssh -L 127.0.0.1:...`.
+        // Default bind address + port matches `ssh -L 127.0.0.1:2333:...`.
         self.bind_addr_input.update(cx, |state, cx| {
             state.set_value("127.0.0.1", window, cx);
+        });
+        self.bind_port_input.update(cx, |state, cx| {
+            state.set_value("2333", window, cx);
         });
         self.open(window, cx);
     }
@@ -242,6 +275,52 @@ impl TunnelFormState {
             target_port: self.target_port_text(cx).parse().unwrap_or(0),
         }
     }
+
+    /// Validate the form against the required-field rules. Populates
+    /// `self.errors` and returns `true` if the form is valid (no errors).
+    ///
+    /// Rules:
+    /// - A host must be selected (`host_id` is `Some`).
+    /// - Bind address is required (all kinds).
+    /// - Bind port is required and must parse as `u16` (all kinds).
+    /// - For Local / Remote: target host and target port are required.
+    /// - For Dynamic: target host / target port are not used (no check).
+    /// - Name is optional.
+    pub fn validate(&mut self, cx: &App) -> bool {
+        let mut errors = TunnelValidationErrors::default();
+
+        if self.host_id.is_none() {
+            errors.host = Some(t!("tunnel_form.error_host_required").into());
+        }
+
+        if self.bind_addr_text(cx).trim().is_empty() {
+            errors.bind_addr = Some(t!("tunnel_form.error_bind_addr_required").into());
+        }
+
+        let bp_text = self.bind_port_text(cx);
+        if bp_text.trim().is_empty() {
+            errors.bind_port = Some(t!("tunnel_form.error_bind_port_required").into());
+        } else if bp_text.trim().parse::<u16>().is_err() {
+            errors.bind_port = Some(t!("tunnel_form.error_port_invalid").into());
+        }
+
+        // Target host / port are only required for Local / Remote.
+        if matches!(self.tunnel_kind, TunnelKind::Local | TunnelKind::Remote) {
+            if self.target_host_text(cx).trim().is_empty() {
+                errors.target_host = Some(t!("tunnel_form.error_target_host_required").into());
+            }
+            let tp_text = self.target_port_text(cx);
+            if tp_text.trim().is_empty() {
+                errors.target_port = Some(t!("tunnel_form.error_target_port_required").into());
+            } else if tp_text.trim().parse::<u16>().is_err() {
+                errors.target_port = Some(t!("tunnel_form.error_port_invalid").into());
+            }
+        }
+
+        let ok = errors.is_empty();
+        self.errors = errors;
+        ok
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -266,6 +345,7 @@ pub struct TunnelFormView {
     bind_port_focused: bool,
     target_host_focused: bool,
     target_port_focused: bool,
+    errors: TunnelValidationErrors,
     app: Entity<CrabportApp>,
     on_close: Option<Rc<dyn Fn(&mut Window, &mut App) + 'static>>,
     on_save: Option<Rc<dyn Fn(TunnelFormOutput, &mut Window, &mut App) + 'static>>,
@@ -294,6 +374,7 @@ impl TunnelFormView {
             bind_port_focused: state.bind_port_focused,
             target_host_focused: state.target_host_focused,
             target_port_focused: state.target_port_focused,
+            errors: state.errors.clone(),
             app,
             on_close: state.on_close.clone(),
             on_save: state.on_save.clone(),
@@ -325,6 +406,7 @@ impl RenderOnce for TunnelFormView {
                 self.bind_port_focused,
                 self.target_host_focused,
                 self.target_port_focused,
+                self.errors,
                 self.app,
                 on_close_for_dialog,
                 self.on_save,
@@ -390,6 +472,7 @@ fn render_dialog(
     bind_port_focused: bool,
     target_host_focused: bool,
     target_port_focused: bool,
+    errors: TunnelValidationErrors,
     app: Entity<CrabportApp>,
     on_close: Option<Rc<dyn Fn(&mut Window, &mut App) + 'static>>,
     on_save: Option<Rc<dyn Fn(TunnelFormOutput, &mut Window, &mut App) + 'static>>,
@@ -412,14 +495,16 @@ fn render_dialog(
     };
 
     // Per-kind pane content height (used so the Tabs component can animate
+    // Per-kind pane content height (used so the Tabs component can animate
     // max_height between kinds). Local/Remote show 4 fields; Dynamic hides
     // target_host/target_port.
-    // Each StyledInput label row ≈ 20px + gap_1(4) + shell(32) = ~56px per
-    // field, plus the gap_4 (16) between fields. Bind row uses a 2-col layout
-    // so it occupies one field's height (~56px).
+    // StyledInput single-line: label(19) + gap_1(4) + shell(32) = 55px per
+    // field (text_xs line_height = 12*1.618 = 19px). Plus gap_4 (16) between
+    // fields. Bind row uses a 2-col layout so it occupies one field height.
+    // +1px per field for font metric rounding.
     let kind_pane_height: f32 = match tunnel_kind {
         TunnelKind::Local | TunnelKind::Remote => {
-            // bind row (addr + port) + target_host + target_port
+            // bind row + gap_4 + target_host + gap_4 + target_port
             56.0 + 16.0 + 56.0 + 16.0 + 56.0
         }
         TunnelKind::Dynamic => {
@@ -476,6 +561,7 @@ fn render_dialog(
             host_id,
             host_dropdown_open,
             hosts,
+            errors.host.clone(),
             app.clone(),
         ))
         // Kind tabs (Local / Remote / Dynamic). Each pane shows the
@@ -493,6 +579,10 @@ fn render_dialog(
                     bind_port_focused,
                     target_host_focused,
                     target_port_focused,
+                    errors.bind_addr.clone(),
+                    errors.bind_port.clone(),
+                    errors.target_host.clone(),
+                    errors.target_port.clone(),
                 ))
                 .pane(render_kind_pane(
                     TunnelKind::Remote,
@@ -504,6 +594,10 @@ fn render_dialog(
                     bind_port_focused,
                     target_host_focused,
                     target_port_focused,
+                    errors.bind_addr.clone(),
+                    errors.bind_port.clone(),
+                    errors.target_host.clone(),
+                    errors.target_port.clone(),
                 ))
                 .pane(render_kind_pane(
                     TunnelKind::Dynamic,
@@ -515,6 +609,10 @@ fn render_dialog(
                     bind_port_focused,
                     target_host_focused,
                     target_port_focused,
+                    errors.bind_addr.clone(),
+                    errors.bind_port.clone(),
+                    errors.target_host.clone(),
+                    errors.target_port.clone(),
                 ))
                 .on_change({
                     let app = app.clone();
@@ -556,6 +654,10 @@ fn render_kind_pane(
     bind_port_focused: bool,
     target_host_focused: bool,
     target_port_focused: bool,
+    bind_addr_error: Option<SharedString>,
+    bind_port_error: Option<SharedString>,
+    target_host_error: Option<SharedString>,
+    target_port_error: Option<SharedString>,
 ) -> TabPane {
     let label = match kind {
         TunnelKind::Local => t!("tunnel_form.kind_local").to_string(),
@@ -563,55 +665,73 @@ fn render_kind_pane(
         TunnelKind::Dynamic => t!("tunnel_form.kind_dynamic").to_string(),
     };
 
+    // Each error row adds ~24px below its input (gap_1 4px + error text
+    // line_height 19px + 1px rounding). Add that to the pane height so the
+    // layout doesn't clip the error message during the height anim.
+    let err_extra = |e: &Option<SharedString>| if e.is_some() { 24.0_f32 } else { 0.0_f32 };
+    let bind_row_h = 56.0 + err_extra(&bind_addr_error).max(err_extra(&bind_port_error));
+
     // Bind addr + bind port share a row (mirrors the host:port row in the
-    // connection form).
+    // connection form). Both columns are `flex_none` so the error rows
+    // (rendered inside `StyledInput`) can't push the column wider than its
+    // allotted width and shrink the input shell. The addr column takes the
+    // remaining space via `flex_1`; the port column is a fixed width.
     let bind_row = div()
         .flex()
         .flex_row()
+        .items_start()
         .gap_3()
         .child(
-            div().flex_1().child(
+            div().flex_1().min_w_0().child(
                 StyledInput::new("tunnel-bind-addr", bind_addr_input)
                     .label(t!("tunnel_form.bind_addr").to_string())
-                    .focused(bind_addr_focused),
+                    .focused(bind_addr_focused)
+                    .when_some(bind_addr_error, |el, e| el.error(e)),
             ),
         )
         .child(
-            div().w(px(112.0)).child(
+            div().w(px(112.0)).flex_none().child(
                 StyledInput::new("tunnel-bind-port", bind_port_input)
                     .label(t!("tunnel_form.bind_port").to_string())
-                    .focused(bind_port_focused),
+                    .focused(bind_port_focused)
+                    .when_some(bind_port_error, |el, e| el.error(e)),
             ),
         );
 
     let (content, height) = match kind {
-        TunnelKind::Local | TunnelKind::Remote => (
-            div()
-                .flex()
-                .flex_col()
-                .gap_4()
-                .child(bind_row)
-                .child(
-                    div().child(
-                        StyledInput::new("tunnel-target-host", target_host_input)
-                            .label(t!("tunnel_form.target_host").to_string())
-                            .focused(target_host_focused),
+        TunnelKind::Local | TunnelKind::Remote => {
+            let target_host_h = 56.0 + err_extra(&target_host_error);
+            let target_port_h = 56.0 + err_extra(&target_port_error);
+            (
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .child(bind_row)
+                    .child(
+                        div().child(
+                            StyledInput::new("tunnel-target-host", target_host_input)
+                                .label(t!("tunnel_form.target_host").to_string())
+                                .focused(target_host_focused)
+                                .when_some(target_host_error.clone(), |el, e| el.error(e)),
+                        ),
+                    )
+                    .child(
+                        div().child(
+                            StyledInput::new("tunnel-target-port", target_port_input)
+                                .label(t!("tunnel_form.target_port").to_string())
+                                .focused(target_port_focused)
+                                .when_some(target_port_error.clone(), |el, e| el.error(e)),
+                        ),
                     ),
-                )
-                .child(
-                    div().child(
-                        StyledInput::new("tunnel-target-port", target_port_input)
-                            .label(t!("tunnel_form.target_port").to_string())
-                            .focused(target_port_focused),
-                    ),
-                ),
-            // bind row (56) + gap(16) + target_host (56) + gap(16) + target_port (56)
-            px(56.0 + 16.0 + 56.0 + 16.0 + 56.0),
-        ),
+                // bind row + gap + target_host + gap + target_port
+                px(bind_row_h + 16.0 + target_host_h + 16.0 + target_port_h),
+            )
+        }
         TunnelKind::Dynamic => (
             div().flex().flex_col().gap_4().child(bind_row),
             // bind row only
-            px(56.0),
+            px(bind_row_h),
         ),
     };
 
@@ -623,6 +743,7 @@ fn render_host_selector(
     host_id: Option<i64>,
     dropdown_open: bool,
     hosts: Vec<ConnectionHost>,
+    host_error: Option<SharedString>,
     app: Entity<CrabportApp>,
 ) -> impl IntoElement {
     let label_div = div()
@@ -630,6 +751,27 @@ fn render_host_selector(
         .font_weight(FontWeight::MEDIUM)
         .text_color(rgb(TEXT_MUTED))
         .child(t!("tunnel_form.host").to_string());
+
+    // Error row shown below the dropdown when no host is selected. Mirrors
+    // the StyledInput error presentation (small icon + text).
+    let error_row = |msg: SharedString| {
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(
+                svg()
+                    .path("icons/circle-alert.svg")
+                    .size_3()
+                    .text_color(rgb(crate::color::INPUT_BORDER_ERROR)),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(crate::color::INPUT_BORDER_ERROR))
+                    .child(msg),
+            )
+    };
 
     if hosts.is_empty() {
         return label_div
@@ -647,6 +789,7 @@ fn render_host_selector(
                     .text_color(rgb(TEXT_MUTED))
                     .child(t!("tunnel_form.no_hosts").to_string()),
             )
+            .when_some(host_error, |el, e| el.child(error_row(e)))
             .into_any_element();
     }
 
@@ -692,7 +835,10 @@ fn render_host_selector(
         dropdown = dropdown.selected(idx);
     }
 
-    label_div.child(dropdown).into_any_element()
+    label_div
+        .child(dropdown)
+        .when_some(host_error, |el, e| el.child(error_row(e)))
+        .into_any_element()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -735,10 +881,32 @@ fn render_buttons(
                     // starts fresh (mirrors connection_form's connect button).
                     gpui_animation::reset_transition(&overlay_id);
                     gpui_animation::reset_transition(&dialog_id);
-                    // Snapshot the form state into a TunnelFormOutput and
-                    // hand it to the save callback. The caller persists +
-                    // updates the registry + closes the form.
+                    // Validate required fields before building the output. If
+                    // invalid, per-field errors are shown and a toast is
+                    // surfaced; the save flow is aborted.
                     let output: Option<TunnelFormOutput> = app.update(cx, |app, cx| {
+                        let valid = app
+                            .tunnel_form
+                            .as_mut()
+                            .map(|form| form.validate(cx))
+                            .unwrap_or(true);
+                        if !valid {
+                            app.notification_controller.update(cx, |c, cx| {
+                                c.show(
+                                    crate::components::notification::Notification::new(
+                                        t!("tunnel_form.validation_title").to_string(),
+                                    )
+                                    .level(
+                                        crate::components::notification::NotificationLevel::Warning,
+                                    )
+                                    .message(t!("tunnel_form.validation_message").to_string())
+                                    .duration(std::time::Duration::from_secs(4)),
+                                    cx,
+                                );
+                            });
+                            cx.notify();
+                            return None;
+                        }
                         app.tunnel_form.as_ref().map(|form| form.output(cx))
                     });
                     if let Some(out) = output {

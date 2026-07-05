@@ -1,3 +1,4 @@
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::input::InputState;
 use rust_i18n::t;
@@ -40,12 +41,17 @@ pub struct WithProxyForm {
     pub proxy_url_input: Entity<InputState>,
     pub proxy_url_focused: bool,
     pub proxy_kind: ProxyKind,
+    /// Per-field validation error for the proxy URL (only relevant when
+    /// `proxy_kind == Custom`).
+    pub proxy_url_error: Option<SharedString>,
     pub app: Entity<crate::app::CrabportApp>,
 }
 
 impl RenderOnce for WithProxyForm {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let app = self.app.clone();
+        let proxy_url_error = self.proxy_url_error.clone();
+        let has_error = proxy_url_error.is_some();
 
         div()
             .flex()
@@ -75,10 +81,11 @@ impl RenderOnce for WithProxyForm {
                             div().flex().flex_col().gap_4().child(
                                 StyledInput::new("proxy-url", self.proxy_url_input)
                                     .label(t!("connection_form.proxy_url").to_string())
-                                    .focused(self.proxy_url_focused),
+                                    .focused(self.proxy_url_focused)
+                                    .when_some(proxy_url_error, |el, e| el.error(e)),
                             ),
                         )
-                        .height(px(60.0)),
+                        .height(px(if has_error { 80.0 } else { 57.0 })),
                     )
                     .on_change(move |index, w, cx| {
                         let kind = ProxyKind::from_index(index);
