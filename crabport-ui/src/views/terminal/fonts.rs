@@ -16,10 +16,26 @@ struct Fonts {
     bold_italic: Font,
 }
 
+/// Returns the monospace font family name for the current platform.
+///
+/// `Menlo` is macOS-only; on Windows it doesn't exist and font-kit's
+/// fallback picks a font whose metrics don't match the hardcoded
+/// `cell_width`, causing character gaps and clipping. We therefore use a
+/// platform-native monospace font so the metrics stay consistent.
+fn font_family() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "Consolas"
+    } else if cfg!(target_os = "macos") {
+        "Menlo"
+    } else {
+        "DejaVu Sans Mono"
+    }
+}
+
 fn fonts() -> &'static Fonts {
     static F: OnceLock<Fonts> = OnceLock::new();
     F.get_or_init(|| {
-        let base = font("Menlo");
+        let base = font(font_family());
         let mut italic = base.clone();
         italic.style = FontStyle::Italic;
         let mut bold_italic = base.clone().bold();
