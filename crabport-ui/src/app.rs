@@ -9,16 +9,21 @@ use crate::color::*;
 use crate::components::button::Button;
 use crate::components::context_menu::ContextMenuController;
 use crate::components::dialog::AlertController;
+use crate::components::notification::{
+    Notification, NotificationController, NotificationLevel, NotificationPosition,
+};
 use crate::layouts::command_palette::{CommandView, ConnectionType};
-use crate::layouts::connection_form::{AuthKind, ConnectionFormState, ConnectionKind};
 use crate::layouts::sidebar::render_sidebar;
 use crate::views::hosts::ConnectionHost;
+use crate::views::hosts::{AuthKind, ConnectionFormState, ConnectionKind};
 use crate::views::terminal::TerminalView;
 use crabport_core::credential::{
     CredentialEntry, CredentialKind as CoreCredentialKind, HostEntry, HostKind as CoreHostKind,
+    ProxyConfig, ProxyEntry, TunnelEntry, TunnelKind,
 };
 use crabport_ssh::backend::SshBackend;
 use crabport_ssh::session::SshConnectionInfo;
+use crabport_ssh::{CrabPortTunnel, OwnedSession, TunnelManager};
 
 use crate::app_state::AppState;
 
@@ -65,6 +70,8 @@ pub struct CrabportApp {
     pub hosts_view: Entity<crate::views::hosts::HostsView>,
     /// Snippets management sidebar view (right-click edit/delete).
     pub snippets_view: Entity<crate::views::snippets::SnippetsView>,
+    /// Tunnels management sidebar view (create/start/stop/edit/delete).
+    pub tunnels_view: Entity<crate::views::tunnels::TunnelsView>,
     /// Global alert dialog host. Rendered at the app root so it overlays the
     /// entire window regardless of which view is active. Triggered via
     /// `alert_controller.update(cx, |c, cx| c.show(state, cx))`.
@@ -72,6 +79,18 @@ pub struct CrabportApp {
     /// Global context menu host. Triggered via
     /// `context_menu.update(cx, |c, cx| c.show(state, cx))`.
     pub context_menu: Entity<ContextMenuController>,
+    /// Global toast notification host. Rendered at the app root so toasts
+    /// overlay the entire window regardless of which view is active.
+    /// Triggered via
+    /// `notification_controller.update(cx, |c, cx| c.show(notification, cx))`.
+    pub notification_controller: Entity<NotificationController>,
+    /// Central registry of all tunnels (stopped + running). Single source
+    /// of truth for the Tunnels view; mutations fire `cx.notify()` via the
+    /// `on_change` callback wired at construction.
+    pub tunnels: Arc<crate::views::tunnels::TunnelRegistry>,
+    /// Tunnel form window state (singleton dialog for creating/editing a
+    /// tunnel config). `None` when the dialog is closed.
+    pub tunnel_form: Option<crate::views::tunnels::TunnelFormState>,
     wired: bool,
     /// Tab id that currently holds focus. Used to focus the terminal only on
     /// actual tab switches instead of every render (which would steal focus
@@ -132,10 +151,19 @@ impl CrabportApp {
         let history_panel =
             cx.new(|_cx| crate::views::panel::history_command_panel::HistoryCommandPanel::new());
         let app_entity = cx.entity();
-        let hosts_view = cx.new(|_cx| crate::views::hosts::HostsView::new(app_entity));
+        let hosts_view = cx.new(|_cx| crate::views::hosts::HostsView::new(app_entity.clone()));
         let snippets_view = cx.new(|_cx| crate::views::snippets::SnippetsView::new());
+        let tunnels_view = cx.new(|_cx| crate::views::tunnels::TunnelsView::new(app_entity));
         let alert_controller = cx.new(|_cx| AlertController::new());
         let context_menu = cx.new(|_cx| ContextMenuController::new());
+        let notification_controller =
+            cx.new(|_cx| NotificationController::new(NotificationPosition::BottomRight));
+
+        // Tunnel registry: a plain mutex-guarded list of tunnel configs +
+        // their optional runtime state. `CrabportApp` calls `cx.notify()`
+        // after each mutation (start/stop/add/remove) since those run in
+        // GPUI contexts. The registry itself is context-free.
+        let tunnels = Arc::new(crate::views::tunnels::TunnelRegistry::new());
 
         // Read persisted data through the shared global store. The global
         // is initialized in `main` before any window is opened.
@@ -152,15 +180,22 @@ impl CrabportApp {
                 port: h.port,
                 username: h.username,
                 kind: match h.kind {
-                    CoreHostKind::Ssh => crate::layouts::connection_form::ConnectionKind::SSH,
-                    CoreHostKind::Telnet => crate::layouts::connection_form::ConnectionKind::Telnet,
-                    CoreHostKind::Serial => crate::layouts::connection_form::ConnectionKind::Serial,
+                    CoreHostKind::Ssh => crate::views::hosts::ConnectionKind::SSH,
+                    CoreHostKind::Telnet => crate::views::hosts::ConnectionKind::Telnet,
+                    CoreHostKind::Serial => crate::views::hosts::ConnectionKind::Serial,
                 },
                 credential_id: h.credential_id,
                 last_login: h.last_login,
                 favorite: h.favorite,
+                proxy_id: h.proxy_id,
             })
             .collect();
+
+        // Load persisted tunnel configs from the store. Tunnels start in the
+        // stopped state — the user starts them explicitly from the Tunnels
+        // view or a terminal panel.
+        let tunnel_configs = store.lock().tunnels().unwrap_or_default();
+        tunnels.set_configs(tunnel_configs);
 
         Self {
             sidebar_item: SidebarItem::Sessions,
@@ -178,8 +213,12 @@ impl CrabportApp {
             panel_active_tab: 0,
             hosts_view,
             snippets_view,
+            tunnels_view,
             alert_controller,
             context_menu,
+            notification_controller,
+            tunnels,
+            tunnel_form: None,
             wired: false,
             last_focused_tab_id: None,
         }
@@ -274,6 +313,12 @@ impl CrabportApp {
             let a = app.clone();
             move |_kind: ConnectionKind, _w: &mut Window, cx: &mut App| {
                 a.update(cx, |app, cx| {
+                    // Validate required fields before doing anything. If the
+                    // form is invalid, per-field errors are shown and a toast
+                    // is surfaced; the save/connect flow is aborted.
+                    if !app.validate_connection_form(cx) {
+                        return;
+                    }
                     // Read form values directly from state
                     let (
                         name,
@@ -284,6 +329,7 @@ impl CrabportApp {
                         passphrase,
                         auth_kind,
                         private_key,
+                        proxy_config,
                     ) = {
                         let f = app.connection_form.as_ref().unwrap();
                         let n = f.name_text(cx);
@@ -294,7 +340,8 @@ impl CrabportApp {
                         let pp = f.passphrase_text(cx);
                         let ak = f.auth_kind;
                         let pk = f.private_key_text(cx);
-                        (n, h, p, u, pw, pp, ak, pk)
+                        let pc = f.proxy_config(cx);
+                        (n, h, p, u, pw, pp, ak, pk, pc)
                     };
                     app.close_connection_form(cx);
 
@@ -327,6 +374,7 @@ impl CrabportApp {
                         .unwrap_or(0);
 
                     // Persist host with linked credential
+                    let proxy_id = upsert_proxy_for_host(&proxy_config, None, cx);
                     let entry = HostEntry {
                         id: 0,
                         name: name.clone(),
@@ -337,6 +385,7 @@ impl CrabportApp {
                         kind: CoreHostKind::Ssh,
                         last_login: None,
                         favorite: false,
+                        proxy_id,
                     };
                     let row_id = AppState::store(cx).lock().add_host(&entry).unwrap_or(0);
 
@@ -346,10 +395,11 @@ impl CrabportApp {
                         host: host.to_string(),
                         port: port_num,
                         username: username.to_string(),
-                        kind: crate::layouts::connection_form::ConnectionKind::SSH,
+                        kind: crate::views::hosts::ConnectionKind::SSH,
                         credential_id: Some(cred_id),
                         last_login: None,
                         favorite: false,
+                        proxy_id,
                     });
                     let (private_key_arg, passphrase_arg) = match auth_kind {
                         AuthKind::Password => (None, None),
@@ -378,6 +428,7 @@ impl CrabportApp {
                         },
                         private_key_arg,
                         passphrase_arg,
+                        proxy_config,
                         cx,
                     );
                     cx.notify();
@@ -411,6 +462,362 @@ impl CrabportApp {
                     cx.notify();
                 }
             });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Validate the connection form before submitting. Populates per-field
+    /// error state (rendered via `StyledInput.error(...)`) and, when invalid,
+    /// shows a toast notification summarizing the missing fields. Returns
+    /// `true` when the form is valid and the caller may proceed with the
+    /// save / connect flow.
+    pub fn validate_connection_form(&mut self, cx: &mut Context<Self>) -> bool {
+        let valid = self
+            .connection_form
+            .as_mut()
+            .map(|form| form.validate(cx))
+            .unwrap_or(true);
+        if !valid {
+            // Surface a summary toast so the user knows something is wrong
+            // even if the offending field is scrolled out of view.
+            self.notification_controller.update(cx, |c, cx| {
+                c.show(
+                    Notification::new(t!("connection_form.validation_title").to_string())
+                        .level(NotificationLevel::Warning)
+                        .message(t!("connection_form.validation_message").to_string())
+                        .duration(std::time::Duration::from_secs(4)),
+                    cx,
+                );
+            });
+            cx.notify();
+        }
+        valid
+    }
+
+    // -----------------------------------------------------------------------
+    // Tunnels
+    // -----------------------------------------------------------------------
+
+    /// Open the tunnel form dialog in create mode (blank fields).
+    pub fn open_tunnel_form_for_create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Lazily create the form state on first use.
+        if self.tunnel_form.is_none() {
+            let mut form = crate::views::tunnels::TunnelFormState::new(window, cx);
+            let app = cx.entity().clone();
+            form.on_close = Some(std::rc::Rc::new(move |_w, cx| {
+                app.update(cx, |app, cx| app.close_tunnel_form(cx));
+            }));
+            let app = cx.entity().clone();
+            form.on_save = Some(std::rc::Rc::new(move |out, w, cx| {
+                app.update(cx, |app, cx| app.save_tunnel(out, w, cx));
+            }));
+            self.tunnel_form = Some(form);
+        }
+        if let Some(ref mut form) = self.tunnel_form {
+            form.open_for_create(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Open the tunnel form dialog in edit mode, populated from a saved
+    /// tunnel config.
+    pub fn open_tunnel_form_for_edit(
+        &mut self,
+        tunnel_id: i64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Don't allow editing a running tunnel — the ports may be bound.
+        if self.tunnels.is_running(tunnel_id) {
+            tracing::warn!("tunnel {tunnel_id} is running; refusing to edit");
+            return;
+        }
+        let store = AppState::store(cx);
+        let entry = match store.lock().find_tunnel(tunnel_id) {
+            Ok(Some(e)) => e,
+            _ => return,
+        };
+        if self.tunnel_form.is_none() {
+            let mut form = crate::views::tunnels::TunnelFormState::new(window, cx);
+            let app = cx.entity().clone();
+            form.on_close = Some(std::rc::Rc::new(move |_w, cx| {
+                app.update(cx, |app, cx| app.close_tunnel_form(cx));
+            }));
+            let app = cx.entity().clone();
+            form.on_save = Some(std::rc::Rc::new(move |out, w, cx| {
+                app.update(cx, |app, cx| app.save_tunnel(out, w, cx));
+            }));
+            self.tunnel_form = Some(form);
+        }
+        if let Some(ref mut form) = self.tunnel_form {
+            form.open_for_edit(&entry, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Close the tunnel form dialog. Mirrors `close_connection_form`.
+    pub fn close_tunnel_form(&mut self, cx: &mut Context<Self>) {
+        if let Some(ref mut form) = self.tunnel_form {
+            form.close();
+        }
+        // Destroy after the exit animation.
+        let app = cx.entity().clone();
+        cx.spawn(async move |_this, cx| {
+            smol::Timer::after(std::time::Duration::from_millis(200)).await;
+            let _ = app.update(cx, |app, cx| {
+                if app.tunnel_form.is_some() {
+                    let tabs_id = gpui::ElementId::Name("tunnel-kind-tabs".into());
+                    crate::components::tabs::Tabs::cleanup_animation(&tabs_id, 3);
+                    app.tunnel_form = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Persist a tunnel config (insert or update) from the form output.
+    pub fn save_tunnel(
+        &mut self,
+        out: crate::views::tunnels::TunnelFormOutput,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Basic validation.
+        if out.name.trim().is_empty() || out.host_id == 0 || out.bind_port == 0 {
+            tracing::warn!(
+                "save_tunnel: validation failed — name={:?} host_id={} bind_port={}",
+                out.name,
+                out.host_id,
+                out.bind_port
+            );
+            return;
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let entry = TunnelEntry {
+            id: out.editing_id.unwrap_or(0),
+            name: out.name,
+            host_id: out.host_id,
+            kind: out.kind,
+            bind_addr: if out.bind_addr.is_empty() {
+                "127.0.0.1".to_string()
+            } else {
+                out.bind_addr
+            },
+            bind_port: out.bind_port,
+            target_host: out.target_host,
+            target_port: out.target_port,
+            created_at: now,
+        };
+        let store = AppState::store(cx);
+        match out.editing_id {
+            Some(_id) => {
+                if let Err(e) = store.lock().update_tunnel(&entry) {
+                    tracing::error!("update_tunnel failed: {e}");
+                    return;
+                }
+                self.tunnels.update_config(entry);
+            }
+            None => {
+                let id = match store.lock().add_tunnel(&entry) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        tracing::error!("add_tunnel failed: {e}");
+                        return;
+                    }
+                };
+                let mut entry = entry;
+                entry.id = id;
+                self.tunnels.add(entry);
+            }
+        }
+        self.close_tunnel_form(cx);
+    }
+
+    /// Start a tunnel using a fresh, owned SSH connection (started from the
+    /// Tunnels page). Resolves the host's credential + proxy, builds an
+    /// `OwnedSession`, then a `TunnelManager`, and starts the tunnel.
+    pub fn start_tunnel_owned(
+        &mut self,
+        tunnel_id: i64,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.tunnels.is_running(tunnel_id) {
+            tracing::warn!("tunnel {tunnel_id} already running");
+            return;
+        }
+        // Resolve the tunnel config + host + credential + proxy.
+        let store = AppState::store(cx);
+        let entry = match store.lock().find_tunnel(tunnel_id) {
+            Ok(Some(e)) => e,
+            _ => return,
+        };
+        let host = match store.lock().hosts() {
+            Ok(hosts) => hosts.into_iter().find(|h| h.id == entry.host_id),
+            Err(_) => None,
+        };
+        let Some(host) = host else {
+            tracing::error!("tunnel {tunnel_id}: host {} not found", entry.host_id);
+            return;
+        };
+        let cred = host
+            .credential_id
+            .and_then(|cid| store.lock().find_credential(cid).ok().flatten());
+        let (password, private_key, passphrase) = match cred.as_ref() {
+            Some(c) if c.kind == CoreCredentialKind::Certificate => (
+                String::new(),
+                if c.private_key.is_empty() {
+                    None
+                } else {
+                    Some(c.private_key.as_str())
+                },
+                if c.secret.is_empty() {
+                    None
+                } else {
+                    Some(c.secret.as_str())
+                },
+            ),
+            Some(c) => (c.secret.clone(), None, None),
+            None => (String::new(), None, None),
+        };
+        let proxy_config = host
+            .proxy_id
+            .and_then(|pid| store.lock().find_proxy_config(pid).ok().flatten());
+
+        let mut info =
+            SshConnectionInfo::new(&host.host, &host.username, &password).with_port(host.port);
+        if let Some(pk) = private_key {
+            info = info.with_private_key(pk, passphrase.map(|s| s.to_string()));
+        }
+        if let Some(p) = proxy_config {
+            info = info.with_proxy(p);
+        }
+
+        // The tunnel start logic touches tokio I/O (`TcpListener::bind`, the
+        // SSH connect path, russh channels) so it MUST run on the shared
+        // `TOKIO` runtime — GPUI's `cx.spawn` is a smol executor with no
+        // tokio reactor. We `TOKIO.spawn` the work and signal completion via
+        // a `tokio::sync::oneshot` (which is `Send` and uses standard
+        // `std::task::Waker`s, so smol's `cx.spawn` can await its
+        // `Receiver` without deadlocking — unlike awaiting a tokio
+        // `JoinHandle` or a `smol::channel` whose wakeups may not cross
+        // executors reliably).
+        let tunnel_id_for_set = tunnel_id;
+        let (tx, rx) = tokio::sync::oneshot::channel::<
+            Option<(std::sync::Arc<OwnedSession>, std::sync::Arc<TunnelManager>)>,
+        >();
+
+        crabport_ssh::TOKIO.spawn(async move {
+            let verifier = None; // owned tunnels don't prompt for host keys
+            // for now — reuse the app verifier later if needed.
+            let session = match OwnedSession::connect(info, verifier).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!("owned session connect failed: {e}");
+                    let _ = tx.send(None);
+                    return;
+                }
+            };
+            let session_arc: std::sync::Arc<dyn CrabPortTunnel> = session.clone();
+            let manager =
+                std::sync::Arc::new(TunnelManager::new(session_arc, std::sync::Arc::new(|| {})));
+            let start_result = match entry.kind {
+                TunnelKind::Local => {
+                    manager
+                        .start_local(
+                            entry.name.clone(),
+                            entry.bind_addr.clone(),
+                            entry.bind_port,
+                            entry.target_host.clone(),
+                            entry.target_port,
+                        )
+                        .await
+                }
+                TunnelKind::Remote => {
+                    manager
+                        .start_remote(
+                            entry.name.clone(),
+                            entry.bind_addr.clone(),
+                            entry.bind_port,
+                            entry.target_host.clone(),
+                            entry.target_port,
+                        )
+                        .await
+                }
+                TunnelKind::Dynamic => {
+                    manager
+                        .start_dynamic(entry.name.clone(), entry.bind_addr.clone(), entry.bind_port)
+                        .await
+                }
+            };
+            let _ = tx.send(match start_result {
+                Ok(_) => Some((session, manager)),
+                Err(e) => {
+                    tracing::error!("tunnel start failed: {e}");
+                    None
+                }
+            });
+        });
+
+        cx.spawn(async move |this, cx| match rx.await {
+            Ok(Some((session, manager))) => {
+                let _ = this.update(cx, |app, cx| {
+                    app.tunnels.set_owned(tunnel_id_for_set, session, manager);
+                    cx.notify();
+                });
+            }
+            _ => {
+                let _ = this.update(cx, |_, cx| cx.notify());
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Stop a running tunnel (owned or borrowed).
+    pub fn stop_tunnel(&mut self, tunnel_id: i64, cx: &mut Context<Self>) {
+        let manager = self.tunnels.manager_for(tunnel_id);
+        let Some(manager) = manager else {
+            return;
+        };
+        let id = tunnel_id;
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        crabport_ssh::TOKIO.spawn(async move {
+            manager.stop_all().await;
+            let _ = tx.send(());
+        });
+        cx.spawn(async move |this, cx| {
+            let _ = rx.await;
+            let _ = this.update(cx, |app, cx| {
+                app.tunnels.clear_runtime(id);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Delete a tunnel config (after alert confirmation). Stops it first if running.
+    pub fn remove_tunnel(&mut self, tunnel_id: i64, cx: &mut Context<Self>) {
+        let store = AppState::store(cx);
+        let tunnels = self.tunnels.clone();
+        // `tunnels.remove` calls `manager.stop_all().await` (tokio I/O) — run
+        // on `TOKIO`, signal completion via oneshot.
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        crabport_ssh::TOKIO.spawn(async move {
+            tunnels.remove(tunnel_id).await;
+            let _ = store.lock().remove_tunnel(tunnel_id);
+            let _ = tx.send(());
+        });
+        cx.spawn(async move |this, cx| {
+            let _ = rx.await;
+            let _ = this.update(cx, |_, cx| cx.notify());
         })
         .detach();
         cx.notify();
@@ -478,6 +885,7 @@ impl CrabportApp {
         password: &str,
         private_key: Option<&str>,
         passphrase: Option<&str>,
+        proxy: Option<crabport_core::credential::ProxyConfig>,
         cx: &mut Context<Self>,
     ) -> u64 {
         let id = self.next_tab_id;
@@ -492,6 +900,9 @@ impl CrabportApp {
         let mut info = SshConnectionInfo::new(host, username, password).with_port(port);
         if let Some(pk) = private_key {
             info = info.with_private_key(pk, passphrase.map(|s| s.to_string()));
+        }
+        if let Some(p) = proxy {
+            info = info.with_proxy(p);
         }
         let info_for_view = info.clone();
         let cols: usize = 80;
@@ -586,17 +997,14 @@ impl CrabportApp {
                     port: h.port,
                     username: h.username,
                     kind: match h.kind {
-                        CoreHostKind::Ssh => crate::layouts::connection_form::ConnectionKind::SSH,
-                        CoreHostKind::Telnet => {
-                            crate::layouts::connection_form::ConnectionKind::Telnet
-                        }
-                        CoreHostKind::Serial => {
-                            crate::layouts::connection_form::ConnectionKind::Serial
-                        }
+                        CoreHostKind::Ssh => crate::views::hosts::ConnectionKind::SSH,
+                        CoreHostKind::Telnet => crate::views::hosts::ConnectionKind::Telnet,
+                        CoreHostKind::Serial => crate::views::hosts::ConnectionKind::Serial,
                     },
                     credential_id: h.credential_id,
                     last_login: h.last_login,
                     favorite: h.favorite,
+                    proxy_id: h.proxy_id,
                 })
                 .collect();
         }
@@ -629,6 +1037,15 @@ impl CrabportApp {
             None => (String::new(), None, None),
         };
 
+        // Resolve the saved proxy (if any) into a ready-to-use config.
+        let proxy_config = host.proxy_id.and_then(|pid| {
+            AppState::store(cx)
+                .lock()
+                .find_proxy_config(pid)
+                .ok()
+                .flatten()
+        });
+
         self.add_ssh_tab(
             &host.name,
             Some(host_id),
@@ -638,6 +1055,7 @@ impl CrabportApp {
             &password,
             private_key,
             passphrase,
+            proxy_config,
             cx,
         );
     }
@@ -709,16 +1127,51 @@ impl CrabportApp {
             }
         }
 
+        // Load the saved proxy (if any) so the user can edit / clear it.
+        // System proxies aren't persisted, so we only resolve a config for a
+        // real `proxy_id`.
+        let saved_proxy = h.proxy_id.and_then(|pid| {
+            AppState::store(cx)
+                .lock()
+                .find_proxy_config(pid)
+                .ok()
+                .flatten()
+                .map(|cfg| (pid, cfg))
+        });
+        #[cfg(debug_assertions)]
+        tracing::info!(
+            "edit_host: host_id={}, host.proxy_id={:?}, resolved_saved_proxy={}",
+            h.id,
+            h.proxy_id,
+            saved_proxy.is_some()
+        );
+        match saved_proxy {
+            Some((pid, cfg)) => form.load_proxy(Some(pid), Some(&cfg), window, cx),
+            None => form.load_proxy(None, None, window, cx),
+        }
+
         let app = cx.entity().clone();
         let editing_host_id = h.id;
         let editing_cred_id = h.credential_id;
+        let editing_proxy_id = h.proxy_id;
 
         form.editing = true;
 
         form.on_connect = Some(Rc::new({
             let app = app.clone();
             move |_kind: ConnectionKind, _w: &mut Window, cx: &mut App| {
+                #[cfg(debug_assertions)]
+                tracing::info!(
+                    "edit_host: on_connect fired — editing_proxy_id={:?}",
+                    editing_proxy_id
+                );
                 app.update(cx, |app, cx| {
+                    // Validate required fields before doing anything. If the
+                    // form is invalid, per-field errors are shown and a toast
+                    // is surfaced; the save flow is aborted.
+                    if !app.validate_connection_form(cx) {
+                        return;
+                    }
                     let (
                         name,
                         host,
@@ -728,8 +1181,16 @@ impl CrabportApp {
                         passphrase,
                         auth_kind,
                         private_key,
+                        proxy_config,
                     ) = {
                         let f = app.connection_form.as_ref().unwrap();
+                        #[cfg(debug_assertions)]
+                        tracing::info!(
+                            "edit_host: reading form — proxy_kind={:?}, form.proxy_id={:?}, proxy_url={:?}",
+                            f.proxy_kind,
+                            f.proxy_id,
+                            f.proxy_url_text(cx)
+                        );
                         let n = f.name_text(cx);
                         let h = f.host_text(cx);
                         let p: u16 = f.port_text(cx).parse().unwrap_or(22);
@@ -738,7 +1199,8 @@ impl CrabportApp {
                         let pp = f.passphrase_text(cx);
                         let ak = f.auth_kind;
                         let pk = f.private_key_text(cx);
-                        (n, h, p, u, pw, pp, ak, pk)
+                        let pc = f.proxy_config(cx);
+                        (n, h, p, u, pw, pp, ak, pk, pc)
                     };
                     app.close_connection_form(cx);
 
@@ -784,7 +1246,14 @@ impl CrabportApp {
                         kind: CoreHostKind::Ssh,
                         last_login: None,
                         favorite: false,
+                        proxy_id: upsert_proxy_for_host(&proxy_config, editing_proxy_id, cx),
                     };
+                    #[cfg(debug_assertions)]
+                    tracing::info!(
+                        "edit_host: on_connect — editing_proxy_id={:?}, resolved_entry.proxy_id={:?}",
+                        editing_proxy_id,
+                        entry.proxy_id
+                    );
                     let _ = AppState::store(cx).lock().update_host(&entry);
 
                     if let Some(h) = app.hosts.iter_mut().find(|h| h.id == editing_host_id) {
@@ -793,6 +1262,7 @@ impl CrabportApp {
                         h.port = port_num;
                         h.username = username.clone();
                         h.credential_id = Some(new_cred_id);
+                        h.proxy_id = entry.proxy_id;
                     }
 
                     cx.notify();
@@ -878,6 +1348,14 @@ impl Render for CrabportApp {
         });
 
         // ---- Content view ----
+        // Pre-read tunnel state here (in the render method, where `self` is
+        // already borrowed) rather than via `handle.read_with` inside
+        // `render_content` — that would be a nested read of `CrabportApp`
+        // and panic ("cannot read while it is already being updated").
+        // Same pattern as `panel_active_tab`.
+        let tunnel_list = self.tunnels.list();
+        let tunnel_form_state = self.tunnel_form.clone();
+
         let content = crate::layouts::content::render_content(
             self.sidebar_item,
             &handle,
@@ -892,6 +1370,9 @@ impl Render for CrabportApp {
             self.panel_active_tab,
             &self.hosts_view,
             &self.snippets_view,
+            &self.tunnels_view,
+            tunnel_list,
+            tunnel_form_state,
             &self.alert_controller,
             &self.context_menu,
             _window,
@@ -930,12 +1411,101 @@ impl Render for CrabportApp {
             .child(self.alert_controller.clone())
             // -- Global context menu --
             .child(self.context_menu.clone())
+            // -- Global toast notifications --
+            .child(self.notification_controller.clone())
     }
 }
 
 // ---------------------------------------------------------------------------
 // Main window construction
 // ---------------------------------------------------------------------------
+
+/// Persist (or update, or remove) the proxy row linked to a host.
+///
+/// - `proxy_config = None` → if `existing_id` was set, delete that proxy row
+///   and return `None` (host becomes direct).
+/// - `proxy_config = Some(cfg)` → if `existing_id` is set, update that row;
+///   otherwise insert a new one. Returns the row id to store on the host.
+///
+/// The proxy is stored as an anonymous row (name = `"<host>"`) so it
+/// doesn't clutter a future proxies-management UI.
+fn upsert_proxy_for_host(
+    proxy_config: &Option<ProxyConfig>,
+    existing_id: Option<i64>,
+    cx: &mut App,
+) -> Option<i64> {
+    #[cfg(debug_assertions)]
+    tracing::info!(
+        "upsert_proxy_for_host: existing_id={:?}, has_config={}",
+        existing_id,
+        proxy_config.is_some()
+    );
+    let store = AppState::store(cx);
+    let proxy_config = proxy_config.as_ref()?;
+    // Only persist enabled proxies (kind != None and host non-empty).
+    if !proxy_config.is_enabled() {
+        #[cfg(debug_assertions)]
+        tracing::info!(
+            "upsert_proxy_for_host: config not enabled (kind={:?}, host={:?}) — removing if set",
+            proxy_config.kind,
+            proxy_config.host
+        );
+        if let Some(id) = existing_id {
+            let _ = store.lock().remove_proxy(id);
+        }
+        return None;
+    }
+
+    #[cfg(debug_assertions)]
+    tracing::info!(
+        "upsert_proxy_for_host: persisting kind={:?} {}:{} has_user={} has_pass={}",
+        proxy_config.kind,
+        proxy_config.host,
+        proxy_config.port,
+        proxy_config.username.is_some(),
+        proxy_config.password.is_some()
+    );
+
+    let password_bytes = proxy_config
+        .password
+        .as_ref()
+        .map(|p| p.as_bytes().to_vec());
+
+    let entry = ProxyEntry {
+        id: existing_id.unwrap_or(0),
+        name: String::new(), // anonymous — tied to the host
+        kind: proxy_config.kind,
+        host: proxy_config.host.clone(),
+        port: proxy_config.port,
+        username: proxy_config.username.clone(),
+        password: password_bytes,
+        created_at: 0,
+    };
+
+    let store = store.lock();
+    match existing_id {
+        Some(id) => {
+            let res = store.update_proxy(&entry);
+            #[cfg(debug_assertions)]
+            tracing::info!(
+                "upsert_proxy_for_host: update_proxy({}) result={:?}",
+                id,
+                res.as_ref().err()
+            );
+            let _ = res;
+            Some(id)
+        }
+        None => {
+            let res = store.add_proxy(&entry);
+            #[cfg(debug_assertions)]
+            tracing::info!(
+                "upsert_proxy_for_host: add_proxy result={:?}",
+                res.as_ref().err()
+            );
+            res.ok()
+        }
+    }
+}
 
 /// Open the main terminal window.
 ///
@@ -958,7 +1528,7 @@ pub fn open_main_window(cx: &mut App) {
             ..Default::default()
         }),
         window_min_size: Some(Size {
-            width: px(480.0),
+            width: px(560.0),
             height: px(340.0),
         }),
         ..Default::default()

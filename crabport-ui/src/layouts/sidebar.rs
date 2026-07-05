@@ -13,6 +13,7 @@ pub fn render_sidebar(
     div()
         .id("sidebar-container")
         .h_full()
+        .flex_shrink_0()
         .overflow_x_hidden()
         .w(px(180.0))
         .with_transition("sidebar-container")

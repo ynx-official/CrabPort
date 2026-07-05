@@ -13,7 +13,20 @@ use crate::color::*;
 use crate::components::button::Button;
 use crate::components::context_menu::{ContextMenuController, ContextMenuItem, ContextMenuState};
 use crate::components::dialog::{AlertController, AlertSeverity, AlertState};
-use crate::layouts::connection_form::{ConnectionFormState, ConnectionFormView};
+
+// ---------------------------------------------------------------------------
+// Submodules & re-exports
+// ---------------------------------------------------------------------------
+//
+// The connection form (state + view + render helpers) lives in `form.rs`,
+// mirroring `views/tunnels/form.rs`. `with_proxy` and `with_certificate` are
+// the proxy / certificate sub-form components used by the SSH pane.
+
+pub mod form;
+pub mod with_certificate;
+pub mod with_proxy;
+
+pub use form::{AuthKind, ConnectionFormState, ConnectionFormView, ConnectionKind};
 
 /// A saved connection host entry.
 #[derive(Clone)]
@@ -23,10 +36,12 @@ pub struct ConnectionHost {
     pub host: String,
     pub port: u16,
     pub username: String,
-    pub kind: crate::layouts::connection_form::ConnectionKind,
+    pub kind: crate::views::hosts::ConnectionKind,
     pub credential_id: Option<i64>,
     pub last_login: Option<i64>,
     pub favorite: bool,
+    /// FK into the `proxies` table. `None` means no proxy.
+    pub proxy_id: Option<i64>,
 }
 
 /// Hosts sidebar view.

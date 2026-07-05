@@ -205,11 +205,19 @@ impl RenderOnce for Dropdown {
         // Menu
         // ------------------------------------------------------------------
         let menu_id = ElementId::Name(format!("{id_str}-menu").into());
-        let natural_height = ITEM_HEIGHT * item_count as f32;
-        let menu_h = if natural_height > MAX_MENU_HEIGHT {
+        // Menu height = items + gap_1 between them. The inner p_1 padding
+        // is accounted for by NOT adding it — empirically the rendered
+        // padding is smaller than the theoretical 8px.
+        let gap_total = if item_count > 1 {
+            (item_count - 1) as f32 * 4.0
+        } else {
+            0.0
+        };
+        let natural_height = f32::from(ITEM_HEIGHT) * item_count as f32 + gap_total;
+        let menu_h = if natural_height > f32::from(MAX_MENU_HEIGHT) {
             MAX_MENU_HEIGHT
         } else {
-            natural_height
+            px(natural_height)
         };
 
         let item_els: Vec<AnyElement> = items
@@ -272,6 +280,7 @@ impl RenderOnce for Dropdown {
             .bg(rgb(BG_BASE))
             .opacity(0.)
             .h(px(0.))
+            .when(is_open, |el| el.occlude())
             .with_transition(menu_id)
             .transition_when_else(
                 is_open,
@@ -286,7 +295,6 @@ impl RenderOnce for Dropdown {
                     .flex_col()
                     .gap_1()
                     .p_1()
-                    .h_full()
                     .overflow_y_scrollbar()
                     .children(item_els),
             );
@@ -300,7 +308,11 @@ impl RenderOnce for Dropdown {
             .w_full()
             .cursor_default()
             .child(trigger)
-            .child(menu);
+            // `deferred` delays the menu's paint until after all ancestors
+            // and siblings, so the open menu renders on top of form elements
+            // that follow the dropdown in the layout. `occlude` (applied on
+            // the menu above when open) ensures it also captures clicks.
+            .child(deferred(menu));
 
         root.style().refine(&style);
         root
