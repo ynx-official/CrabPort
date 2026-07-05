@@ -64,6 +64,7 @@ pub struct Dropdown {
     selected: Option<usize>,
     placeholder: SharedString,
     is_open: bool,
+    disabled: bool,
     on_change: Option<Rc<dyn Fn(usize, &mut Window, &mut App) + 'static>>,
     on_toggle: Option<Rc<dyn Fn(&mut Window, &mut App) + 'static>>,
 }
@@ -86,6 +87,7 @@ impl Dropdown {
             selected: None,
             placeholder: "Select…".into(),
             is_open: false,
+            disabled: false,
             on_change: None,
             on_toggle: None,
         }
@@ -120,6 +122,13 @@ impl Dropdown {
         self
     }
 
+    /// Disable interaction and visually mute the dropdown. A disabled
+    /// dropdown never opens its menu, even if `is_open` is left `true`.
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
     pub fn on_change(mut self, f: impl Fn(usize, &mut Window, &mut App) + 'static) -> Self {
         self.on_change = Some(Rc::new(f));
         self
@@ -141,9 +150,13 @@ impl RenderOnce for Dropdown {
             selected,
             placeholder,
             is_open,
+            disabled,
             on_change,
             on_toggle,
         } = self;
+
+        // A disabled dropdown never shows its menu, regardless of `is_open`.
+        let is_open = is_open && !disabled;
 
         let item_count = items.len();
         let selected_label = selected
@@ -156,23 +169,15 @@ impl RenderOnce for Dropdown {
         // ------------------------------------------------------------------
         let trigger_id = ElementId::Name(format!("{id_str}-trigger").into());
 
-        let chevron_anim_id = ElementId::Name(format!("{id_str}-chevron-{is_open}").into());
         let chevron = svg()
             .path("icons/chevron-down.svg")
             .size_4()
             .text_color(rgb(TEXT_MUTED))
-            .with_animation(
-                chevron_anim_id,
-                Animation::new(Duration::from_millis(150)).with_easing(ease_in_out),
-                move |svg, delta| {
-                    let angle = if is_open {
-                        PI * delta
-                    } else {
-                        PI * (1.0 - delta)
-                    };
-                    svg.with_transformation(Transformation::rotate(radians(angle)))
-                },
-            );
+            .with_transformation(Transformation::rotate(radians(if is_open {
+                PI
+            } else {
+                0.0
+            })));
 
         let trigger = div()
             .id(trigger_id)
@@ -184,20 +189,30 @@ impl RenderOnce for Dropdown {
             .h_9()
             .px_3()
             .rounded_md()
-            .bg(rgb(BG_BASE))
+            .bg(rgb(if disabled { INPUT_BG_DISABLED } else { BG_BASE }))
             .border_1()
             .border_color(rgb(BORDER))
-            .cursor_pointer()
+            .when_else(
+                disabled,
+                |el| el.cursor_not_allowed().opacity(0.5),
+                |el| el.cursor_pointer(),
+            )
             .child(
                 div()
                     .text_sm()
-                    .text_color(rgb(TEXT_PRIMARY))
+                    .text_color(rgb(if disabled {
+                        INPUT_TEXT_DISABLED
+                    } else {
+                        TEXT_PRIMARY
+                    }))
                     .child(selected_label),
             )
             .child(chevron)
             .when_some(on_toggle, |this, cb| {
-                this.on_click(move |_e, w, cx| {
-                    cb(w, cx);
+                this.when(!disabled, |this| {
+                    this.on_click(move |_e, w, cx| {
+                        cb(w, cx);
+                    })
                 })
             });
 
@@ -228,8 +243,15 @@ impl RenderOnce for Dropdown {
                 let cb = on_change.clone();
                 let item_id = ElementId::Name(format!("{id_str}-item-{i}").into());
 
+                // Use GPUI's native `hover()` style instead of gpui-animation's
+                // `transition_on_hover`. The animation variant caches the
+                // initial element state (including text_color) and fails to
+                // pick up `selected` changes on re-render, so the highlight
+                // never follows the new selection. Native hover applies the
+                // bg purely from the current render's style, with no cached
+                // state, so text_color updates take effect immediately.
                 div()
-                    .id(item_id.clone())
+                    .id(item_id)
                     .flex()
                     .items_center()
                     .h(ITEM_HEIGHT)
@@ -238,25 +260,14 @@ impl RenderOnce for Dropdown {
                     .rounded_sm()
                     .cursor_pointer()
                     .text_sm()
-                    .text_color(if is_selected {
-                        rgb(TEXT_PRIMARY)
+                    .text_color(rgb(if is_selected {
+                        TEXT_PRIMARY
                     } else {
-                        rgb(TEXT_MUTED)
-                    })
+                        TEXT_MUTED
+                    }))
                     .bg(rgb(BG_BASE))
+                    .hover(|s| s.bg(rgb(SURFACE_ACTIVE)))
                     .child(item.label)
-                    .with_transition(item_id)
-                    .transition_on_hover(
-                        Duration::from_millis(150),
-                        EaseInOutQuad,
-                        move |hovered, state| {
-                            if *hovered {
-                                state.bg(rgb(SURFACE_ACTIVE))
-                            } else {
-                                state.bg(rgb(BG_BASE))
-                            }
-                        },
-                    )
                     .on_click(move |_e, w, cx| {
                         if let Some(ref f) = cb {
                             f(i, w, cx);
@@ -295,6 +306,7 @@ impl RenderOnce for Dropdown {
                     .flex_col()
                     .gap_1()
                     .p_1()
+                    .h_full()
                     .overflow_y_scrollbar()
                     .children(item_els),
             );

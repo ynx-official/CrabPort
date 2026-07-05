@@ -8,6 +8,8 @@ tracing-subscriber = { version = "0.3.22", default-features = false, features = 
 chrono = { version = "0.4.44", default-features = false, features = ["clock", "std"] }
 gpui = { version = "0.2", default-features = false }
 serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+parking_lot = "0.12"
 rusqlite = { version = "0.34", features = ["bundled"] }
 aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
 getrandom = "0.3"

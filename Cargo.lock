@@ -1338,8 +1338,10 @@ dependencies = [
  "dirs 6.0.0",
  "getrandom 0.3.4",
  "gpui",
+ "parking_lot",
  "rusqlite",
  "serde",
+ "toml 0.8.23",
  "tracing-subscriber",
 ]
 
