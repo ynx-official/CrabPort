@@ -24,17 +24,22 @@ use std::rc::Rc;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_animation::{animation::TransitionExt, transition::general::Linear};
-use gpui_component::input::InputState;
 use gpui_component::scroll::ScrollableElement as _;
 use rust_i18n::t;
 use std::time::Duration;
 
+use crate::app::CrabportApp;
 use crate::color::*;
 use crate::components::button::Button;
 use crate::components::context_menu::{ContextMenuController, ContextMenuItem, ContextMenuState};
 use crate::components::dialog::{AlertController, AlertSeverity, AlertState};
-use crate::components::input::StyledInput;
-use crate::components::notification::{Notification, NotificationController, NotificationLevel};
+
+// ---------------------------------------------------------------------------
+// Submodules & re-exports
+// ---------------------------------------------------------------------------
+
+pub mod form;
+pub use form::{SnippetFormOutput, SnippetFormState, SnippetFormView};
 
 /// A snippet row shown in the management list.
 #[derive(Clone)]
@@ -42,21 +47,6 @@ pub struct SnippetRow {
     pub id: i64,
     pub name: String,
     pub command: String,
-}
-
-/// In-flight edit state for the snippet editor overlay.
-pub struct SnippetEditState {
-    pub id: i64,
-    /// `true` while the overlay is animating in or fully open. Set to
-    /// `false` on close so the dismiss animation plays before `editing`
-    /// is cleared by a deferred task.
-    pub active: bool,
-    pub name_input: Entity<InputState>,
-    pub command_input: Entity<InputState>,
-    pub name_focused: bool,
-    pub command_focused: bool,
-    pub name_error: Option<SharedString>,
-    pub command_error: Option<SharedString>,
 }
 
 /// Snippets management view.
@@ -68,38 +58,49 @@ pub struct SnippetsView {
     /// Snippet list, most-recently-created first. Reloaded from the Store
     /// before each render via `set_state`.
     snippets: Vec<SnippetRow>,
-    /// Active edit overlay, if any. When `Some`, a modal dialog is shown
-    /// with name + command inputs.
-    editing: Option<SnippetEditState>,
+    /// Owning `CrabportApp` entity. Used to construct `SnippetFormView`
+    /// (which needs an `Entity<CrabportApp>` to drive the save callback).
+    app: Entity<CrabportApp>,
     /// Global context menu host (right-click Edit / Delete).
     context_menu: Option<Entity<ContextMenuController>>,
     /// Global alert dialog host (delete confirmation).
     alert_controller: Option<Entity<AlertController>>,
-    /// Global toast notification host (create/save success + failure).
-    notification_controller: Option<Entity<NotificationController>>,
+    /// "New" button callback — routes to `CrabportApp::open_snippet_form_for_create`.
+    on_new: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+    /// "Edit" context-menu callback — routes to
+    /// `CrabportApp::open_snippet_form_for_edit`. Receives the snippet id.
+    on_edit: Option<Rc<dyn Fn(i64, &mut Window, &mut App)>>,
+    /// Snippet form dialog state, pushed in before each render. When
+    /// `Some`, `SnippetFormView` is rendered on top of the list.
+    form_state: Option<SnippetFormState>,
 }
 
 impl SnippetsView {
-    pub fn new() -> Self {
+    pub fn new(app: Entity<CrabportApp>) -> Self {
         Self {
             hovered_snippet_id: None,
             context_menu_snippet_id: None,
             snippets: Vec::new(),
-            editing: None,
+            app,
             context_menu: None,
             alert_controller: None,
-            notification_controller: None,
+            on_new: None,
+            on_edit: None,
+            form_state: None,
         }
     }
 
     /// Push the latest external state into the view before render.
     /// `snippets` is re-read from the Store by the caller (`render_content`).
+    #[allow(clippy::too_many_arguments)]
     pub fn set_state(
         &mut self,
         snippets: Vec<SnippetRow>,
         context_menu: Entity<ContextMenuController>,
         alert_controller: Entity<AlertController>,
-        notification_controller: Entity<NotificationController>,
+        on_new: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+        on_edit: Option<Rc<dyn Fn(i64, &mut Window, &mut App)>>,
+        form_state: Option<SnippetFormState>,
         cx: &mut Context<Self>,
     ) {
         // Clear stale hover if the snippet disappeared.
@@ -111,181 +112,10 @@ impl SnippetsView {
         self.snippets = snippets;
         self.context_menu = Some(context_menu);
         self.alert_controller = Some(alert_controller);
-        self.notification_controller = Some(notification_controller);
+        self.on_new = on_new;
+        self.on_edit = on_edit;
+        self.form_state = form_state;
         let _ = cx;
-    }
-
-    /// Open the edit overlay for an existing snippet. Pre-fills the
-    /// inputs with the snippet's current name + command.
-    fn begin_edit(&mut self, snippet: &SnippetRow, window: &mut Window, cx: &mut Context<Self>) {
-        let name_input =
-            cx.new(|cx| InputState::new(window, cx).default_value(snippet.name.clone()));
-        let command_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .multi_line(true)
-                .default_value(snippet.command.clone())
-        });
-        self.editing = Some(SnippetEditState {
-            id: snippet.id,
-            active: true,
-            name_input,
-            command_input,
-            name_focused: true,
-            command_focused: false,
-            name_error: None,
-            command_error: None,
-        });
-        cx.notify();
-    }
-
-    /// Open the edit overlay in "create" mode — empty inputs, `id = 0`
-    /// signals that Save should insert a new snippet rather than update.
-    fn begin_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let name_input = cx.new(|cx| InputState::new(window, cx));
-        let command_input = cx.new(|cx| InputState::new(window, cx).multi_line(true));
-        self.editing = Some(SnippetEditState {
-            id: 0,
-            active: true,
-            name_input,
-            command_input,
-            name_focused: true,
-            command_focused: false,
-            name_error: None,
-            command_error: None,
-        });
-        cx.notify();
-    }
-
-    /// Close the edit overlay without saving. Sets `active = false` so the
-    /// dismiss animation plays, then clears `editing` after a short delay.
-    fn cancel_edit(&mut self, cx: &mut Context<Self>) {
-        if let Some(ref mut e) = self.editing {
-            e.active = false;
-        }
-        let entity = cx.entity().downgrade();
-        cx.spawn(async move |_this, cx| {
-            smol::Timer::after(std::time::Duration::from_millis(160)).await;
-            let _ = entity.update(cx, |view, cx| {
-                view.editing = None;
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    /// Save the edit overlay's name + command back to the Store, then close.
-    /// `id = 0` means create a new snippet; otherwise update the existing one.
-    fn save_edit(&mut self, cx: &mut Context<Self>) {
-        let Some(ref edit) = self.editing else {
-            return;
-        };
-        let id = edit.id;
-        let name = edit.name_input.read(cx).value().to_string();
-        let command = edit.command_input.read(cx).value().to_string();
-
-        // Validate: both name and command are required.
-        let name_error = if name.trim().is_empty() {
-            Some(t!("snippets.error_name_required").into())
-        } else {
-            None
-        };
-        let command_error = if command.trim().is_empty() {
-            Some(t!("snippets.error_command_required").into())
-        } else {
-            None
-        };
-        if name_error.is_some() || command_error.is_some() {
-            if let Some(ref mut edit) = self.editing {
-                edit.name_error = name_error;
-                edit.command_error = command_error;
-            }
-            cx.notify();
-            return;
-        }
-
-        let store = crate::app_state::AppState::store(cx);
-        let name_for_notif = name.clone();
-        if id == 0 {
-            match store.lock().add_snippet(&name, &command) {
-                Ok(_) => {
-                    self.show_notification(
-                        NotificationLevel::Success,
-                        t!("snippets.notif_created_title").to_string(),
-                        t!("snippets.notif_created_msg", name = name_for_notif.as_str())
-                            .to_string(),
-                        Duration::from_secs(3),
-                        cx,
-                    );
-                    self.cancel_edit(cx);
-                }
-                Err(e) => {
-                    tracing::error!("add_snippet failed: {e}");
-                    self.show_notification(
-                        NotificationLevel::Danger,
-                        t!("snippets.notif_save_failed_title").to_string(),
-                        t!(
-                            "snippets.notif_save_failed_msg",
-                            name = name_for_notif.as_str()
-                        )
-                        .to_string(),
-                        Duration::from_secs(5),
-                        cx,
-                    );
-                    cx.notify();
-                }
-            }
-        } else {
-            match store.lock().update_snippet(id, &name, &command) {
-                Ok(_) => {
-                    self.show_notification(
-                        NotificationLevel::Success,
-                        t!("snippets.notif_updated_title").to_string(),
-                        t!("snippets.notif_updated_msg", name = name_for_notif.as_str())
-                            .to_string(),
-                        Duration::from_secs(3),
-                        cx,
-                    );
-                    self.cancel_edit(cx);
-                }
-                Err(e) => {
-                    tracing::error!("update_snippet failed: {e}");
-                    self.show_notification(
-                        NotificationLevel::Danger,
-                        t!("snippets.notif_save_failed_title").to_string(),
-                        t!(
-                            "snippets.notif_save_failed_msg",
-                            name = name_for_notif.as_str()
-                        )
-                        .to_string(),
-                        Duration::from_secs(5),
-                        cx,
-                    );
-                    cx.notify();
-                }
-            }
-        }
-    }
-
-    fn show_notification(
-        &self,
-        level: NotificationLevel,
-        title: String,
-        message: String,
-        duration: Duration,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(ref nc) = self.notification_controller {
-            nc.update(cx, |c, cx| {
-                c.show(
-                    Notification::new(title)
-                        .level(level)
-                        .message(message)
-                        .duration(duration),
-                    cx,
-                );
-            });
-        }
     }
 
     /// Delete a snippet by id (after confirmation).
@@ -293,12 +123,6 @@ impl SnippetsView {
         let store = crate::app_state::AppState::store(cx);
         let _ = store.lock().remove_snippet(id);
         cx.notify();
-    }
-}
-
-impl Default for SnippetsView {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -320,24 +144,10 @@ impl Render for SnippetsView {
         }
         let context_menu_snippet_id = self.context_menu_snippet_id;
 
-        // Snapshot edit state for the overlay render.
-        let editing = self.editing.is_some();
-        let edit_active = self.editing.as_ref().map(|e| e.active).unwrap_or(false);
-        let edit_is_new = self.editing.as_ref().map(|e| e.id == 0).unwrap_or(false);
-        let edit_name_input = self.editing.as_ref().map(|e| e.name_input.clone());
-        let edit_command_input = self.editing.as_ref().map(|e| e.command_input.clone());
-        let edit_name_focused = self
-            .editing
-            .as_ref()
-            .map(|e| e.name_focused)
-            .unwrap_or(false);
-        let edit_command_focused = self
-            .editing
-            .as_ref()
-            .map(|e| e.command_focused)
-            .unwrap_or(false);
-        let edit_name_error = self.editing.as_ref().and_then(|e| e.name_error.clone());
-        let edit_command_error = self.editing.as_ref().and_then(|e| e.command_error.clone());
+        let on_new = self.on_new.clone();
+        let on_edit = self.on_edit.clone();
+        let form_state = self.form_state.clone();
+        let app = self.app.clone();
 
         div()
             .size_full()
@@ -368,12 +178,9 @@ impl Render for SnippetsView {
                             .w_auto()
                             .px_2()
                             .child(t!("snippets.new_button").to_string())
-                            .on_click({
-                                let entity = _cx.entity().downgrade();
-                                move |_e, w, cx| {
-                                    let _ = entity.update(cx, |view, cx| {
-                                        view.begin_new(w, cx);
-                                    });
+                            .on_click(move |_e, w, cx| {
+                                if let Some(ref cb) = on_new {
+                                    cb(w, cx);
                                 }
                             }),
                     ),
@@ -408,6 +215,7 @@ impl Render for SnippetsView {
                                     let is_hovered = hovered_snippet_id == Some(s.id);
                                     let force_highlight = context_menu_snippet_id == Some(s.id);
                                     let entity = _cx.entity().downgrade();
+                                    let on_edit = on_edit.clone();
 
                                     snippet_row(
                                         &snippet,
@@ -416,143 +224,16 @@ impl Render for SnippetsView {
                                         entity,
                                         context_menu,
                                         alert_controller,
+                                        on_edit,
                                     )
                                     .into_any_element()
                                 }))
                         },
                     ),
             )
-            // --- Edit overlay (with connection_form-style easing) ---
-            .when(editing, |el| {
-                let overlay_id = ElementId::Name("snippet-edit-overlay".into());
-                let dialog_id = ElementId::Name("snippet-edit-dialog".into());
-                let title = if edit_is_new {
-                    t!("snippets.new_button").to_string()
-                } else {
-                    t!("snippets.edit_title").to_string()
-                };
-                el.child(
-                    div()
-                        .id(overlay_id.clone())
-                        .absolute()
-                        .size_full()
-                        .top_0()
-                        .left_0()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .bg(rgba(0x00000000))
-                        .when(edit_active, |el| {
-                            el.occlude().on_click({
-                                let entity = _cx.entity().downgrade();
-                                move |_, _, cx| {
-                                    let _ = entity.update(cx, |view, cx| {
-                                        view.cancel_edit(cx);
-                                    });
-                                }
-                            })
-                        })
-                        .with_transition(overlay_id)
-                        .transition_when_else(
-                            edit_active,
-                            Duration::from_millis(150),
-                            Linear,
-                            |el| el.bg(rgba(0x00000080)),
-                            |el| el.bg(rgba(0x00000000)),
-                        )
-                        .child(
-                            div()
-                                .id(dialog_id.clone())
-                                .w(px(420.0))
-                                .bg(rgb(BG_BASE))
-                                .border_1()
-                                .border_color(rgb(BORDER))
-                                .rounded_lg()
-                                .shadow_lg()
-                                .flex()
-                                .flex_col()
-                                .p_6()
-                                .gap_4()
-                                .opacity(0.0)
-                                .mt(px(-16.0))
-                                .when(edit_active, |el| {
-                                    el.on_click(|_, _, cx| {
-                                        cx.stop_propagation();
-                                    })
-                                })
-                                .with_transition(dialog_id)
-                                .transition_when_else(
-                                    edit_active,
-                                    Duration::from_millis(150),
-                                    Linear,
-                                    |el| el.opacity(1.0).mt_0(),
-                                    |el| el.opacity(0.0).mt(px(-16.0)),
-                                )
-                                .child(
-                                    div()
-                                        .text_lg()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(rgb(TEXT_PRIMARY))
-                                        .child(title),
-                                )
-                                .when_some(edit_name_input, |el, input| {
-                                    el.child(
-                                        div().child(
-                                            StyledInput::new("snippet-edit-name", input)
-                                                .label(t!("snippets.name").to_string())
-                                                .focused(edit_name_focused)
-                                                .when_some(edit_name_error, |el, e| el.error(e)),
-                                        ),
-                                    )
-                                })
-                                .when_some(edit_command_input, |el, input| {
-                                    el.child(
-                                        div().child(
-                                            StyledInput::new("snippet-edit-command", input)
-                                                .label(t!("snippets.command").to_string())
-                                                .multi_line(true)
-                                                .rows(5)
-                                                .focused(edit_command_focused)
-                                                .when_some(edit_command_error, |el, e| el.error(e)),
-                                        ),
-                                    )
-                                })
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .gap_3()
-                                        .justify_end()
-                                        .child(
-                                            Button::new("snippet-edit-cancel")
-                                                .centered(true)
-                                                .child(t!("snippets.cancel").to_string())
-                                                .on_click({
-                                                    let entity = _cx.entity().downgrade();
-                                                    move |_, _, cx| {
-                                                        let _ = entity.update(cx, |view, cx| {
-                                                            view.cancel_edit(cx);
-                                                        });
-                                                    }
-                                                }),
-                                        )
-                                        .child(
-                                            Button::new("snippet-edit-save")
-                                                .primary()
-                                                .centered(true)
-                                                .child(t!("snippets.save").to_string())
-                                                .on_click({
-                                                    let entity = _cx.entity().downgrade();
-                                                    move |_, _, cx| {
-                                                        let _ = entity.update(cx, |view, cx| {
-                                                            view.save_edit(cx);
-                                                        });
-                                                    }
-                                                }),
-                                        ),
-                                ),
-                        ),
-                )
+            // --- Snippet form overlay (create/edit) ---
+            .when_some(form_state, move |el, state| {
+                el.child(SnippetFormView::new(&state, app))
             })
     }
 }
@@ -569,6 +250,7 @@ fn snippet_row(
     entity: WeakEntity<SnippetsView>,
     context_menu: Option<Entity<ContextMenuController>>,
     alert_controller: Option<Entity<AlertController>>,
+    on_edit: Option<Rc<dyn Fn(i64, &mut Window, &mut App)>>,
 ) -> impl IntoElement {
     let row_id = ElementId::Name(format!("snippet-row-{}", snippet.id).into());
 
@@ -590,7 +272,6 @@ fn snippet_row(
         // Right-click context menu: "Edit" + "Delete".
         .on_mouse_down(MouseButton::Right, {
             let entity = entity.clone();
-            let snippet_for_edit = snippet.clone();
             move |event, _w, cx| {
                 let Some(ref cm) = context_menu else {
                     return;
@@ -600,23 +281,21 @@ fn snippet_row(
                     cx.notify();
                 });
                 let pos = event.position;
-                let entity_for_edit = entity.clone();
                 let entity_for_delete = entity.clone();
                 let alert_controller = alert_controller.clone();
                 let snippet_name = snippet_name.clone();
-                let snippet_for_edit = snippet_for_edit.clone();
+                let on_edit = on_edit.clone();
                 cm.update(cx, |c, cx| {
                     c.show(
                         ContextMenuState {
                             position: pos,
                             items: vec![
                                 ContextMenuItem::new(t!("snippets.edit").to_string(), {
-                                    let entity = entity_for_edit.clone();
-                                    let snippet = snippet_for_edit.clone();
+                                    let on_edit = on_edit.clone();
                                     move |w, cx| {
-                                        let _ = entity.update(cx, |view, cx| {
-                                            view.begin_edit(&snippet, w, cx);
-                                        });
+                                        if let Some(ref cb) = on_edit {
+                                            cb(snippet_id, w, cx);
+                                        }
                                     }
                                 }),
                                 ContextMenuItem::new(t!("snippets.delete").to_string(), {

@@ -39,14 +39,12 @@ pub fn render_content(
     // `panel_active_tab`.
     tunnel_list: Vec<crate::views::tunnels::TunnelView>,
     tunnel_form_state: Option<crate::views::tunnels::TunnelFormState>,
+    snippet_form_state: Option<crate::views::snippets::SnippetFormState>,
     alert_controller: &Entity<AlertController>,
     context_menu: &Entity<ContextMenuController>,
     // Pre-read by the caller (which owns the `CrabportApp` borrow) to avoid
     // a nested `handle.read_with` during render — same reason as
-    // `tunnel_list` / `panel_active_tab`. Used to fire toast notifications
-    // from views that don't route their actions through `CrabportApp`
-    // methods (e.g. `SnippetsView::save_edit`).
-    notification_controller: &Entity<crate::components::notification::NotificationController>,
+    // `tunnel_list` / `panel_active_tab`.
     window: &mut Window,
     cx: &mut App,
 ) -> Div {
@@ -183,12 +181,30 @@ pub fn render_content(
                     } else {
                         Vec::new()
                     };
+                    // Wire New / Edit callbacks to the app's snippet-form
+                    // methods (mirrors the Tunnels arm).
+                    let app_handle = handle.clone();
+                    let on_new = move |w: &mut Window, cx: &mut App| {
+                        app_handle.update(cx, |app, cx| {
+                            app.open_snippet_form_for_create(w, cx);
+                        });
+                    };
+                    let app_handle_edit = handle.clone();
+                    let on_edit = move |id: i64, w: &mut Window, cx: &mut App| {
+                        app_handle_edit.update(cx, |app, cx| {
+                            app.open_snippet_form_for_edit(id, w, cx);
+                        });
+                    };
+                    let on_new_rc: Rc<dyn Fn(&mut Window, &mut App)> = Rc::new(on_new);
+                    let on_edit_rc: Rc<dyn Fn(i64, &mut Window, &mut App)> = Rc::new(on_edit);
                     snippets_view.update(cx, |view, cx| {
                         view.set_state(
                             rows,
                             context_menu.clone(),
                             alert_controller.clone(),
-                            notification_controller.clone(),
+                            Some(on_new_rc),
+                            Some(on_edit_rc),
+                            snippet_form_state,
                             cx,
                         );
                     });

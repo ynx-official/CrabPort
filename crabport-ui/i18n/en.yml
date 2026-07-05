@@ -138,7 +138,6 @@ sftp:
   delete_title: "Delete"
   delete_prompt: 'Are you sure you want to delete "%{name}"? This cannot be undone.'
   delete_confirm: "Delete"
-  # --- Notifications (download/upload complete, incl. failure) ---
   notif_download_done_title: "Download complete"
   notif_download_done_msg: "%{message}"
   notif_download_failed_title: "Download failed"
@@ -160,6 +159,10 @@ hosts:
   delete_title: "Delete Host"
   delete_prompt: 'Are you sure you want to delete "%{name}"? This cannot be undone.'
   delete_confirm: "Delete"
+  notif_saved_title: "Host saved"
+  notif_saved_msg: 'Host "%{name}" was saved.'
+  notif_save_failed_title: "Host save failed"
+  notif_save_failed_msg: 'Saving host "%{name}" failed.'
 snippets:
   new_button: "New"
   empty: "No saved snippets. Save commands from the History panel."
@@ -175,7 +178,6 @@ snippets:
   cancel: "Cancel"
   error_name_required: "Name is required"
   error_command_required: "Command is required"
-  # --- Notifications (create/save success, incl. failure) ---
   notif_created_title: "Snippet created"
   notif_created_msg: 'Snippet "%{name}" was saved.'
   notif_updated_title: "Snippet updated"
