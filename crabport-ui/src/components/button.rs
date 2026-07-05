@@ -238,6 +238,15 @@ impl RenderOnce for Button {
         root.style().refine(&self.style);
 
         let multiline = self.multiline;
+        // Icon color follows the selection state so unselected tabs read as
+        // muted and the active tab pops. GPUI's svg does not inherit
+        // text_color from the parent div, so this must be set on the svg
+        // itself.
+        let icon_color = if self.selected.unwrap_or_default() {
+            TEXT_PRIMARY
+        } else {
+            TEXT_MUTED
+        };
 
         // Icon
         let icon_el = self.icon.map(|path| {
@@ -245,7 +254,7 @@ impl RenderOnce for Button {
                 .path(path)
                 .size_4()
                 .flex_shrink_0()
-                .text_color(rgb(TEXT_PRIMARY))
+                .text_color(rgb(icon_color))
                 .into_any_element()
         });
 

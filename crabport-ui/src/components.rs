@@ -5,4 +5,5 @@ pub mod dropdown;
 pub mod input;
 pub mod notification;
 pub mod segmented_control;
+pub mod switch;
 pub mod tabs;

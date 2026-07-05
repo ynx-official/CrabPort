@@ -153,6 +153,20 @@ window:
   settings:
     title: "设置"
     placeholder: "设置界面建设中。"
+    tab:
+      general: "通用"
+      appearance: "外观"
+    general:
+      section_startup: "启动"
+      section_data: "数据"
+      open_data_dir: "打开数据目录"
+      open_data_dir_desc: "显示包含 SQLite 数据库与配置文件的文件夹。"
+      reset_config: "恢复默认"
+      reset_config_desc: "丢弃所有设置并恢复为默认值。"
+    appearance:
+      section_language: "语言"
+      language_en: "English"
+      language_zh_cn: "简体中文"
 menu:
   app_name: "CrabPort"
   about: "关于 CrabPort"

@@ -19,9 +19,11 @@ fn main() {
             gpui_component::theme::Theme::change(gpui_component::theme::ThemeMode::Dark, None, cx);
 
             // Set the active locale early so the menu bar (built below) and
-            // every window picks up the right translations. Hard-coded to
-            // zh-CN for now; will follow a user setting once Settings exists.
-            crabport_ui::set_locale("zh-CN");
+            // every window picks up the right translations. Read from the
+            // persisted config.toml so the user's language choice survives
+            // app restarts.
+            let locale = crabport_core::config::snapshot().appearance.locale;
+            crabport_ui::set_locale(&locale);
 
             cx.bind_keys([
                 KeyBinding::new("tab", TerminalTab, Some("CrabPortTerminal")),

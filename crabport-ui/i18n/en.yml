@@ -153,6 +153,20 @@ window:
   settings:
     title: "Settings"
     placeholder: "Settings UI is under construction."
+    tab:
+      general: "General"
+      appearance: "Appearance"
+    general:
+      section_startup: "Startup"
+      section_data: "Data"
+      open_data_dir: "Open Data Directory"
+      open_data_dir_desc: "Reveal the folder containing the SQLite database and config."
+      reset_config: "Reset to Defaults"
+      reset_config_desc: "Discard all settings and restore defaults."
+    appearance:
+      section_language: "Language"
+      language_en: "English"
+      language_zh_cn: "简体中文"
 menu:
   app_name: "CrabPort"
   about: "About CrabPort"

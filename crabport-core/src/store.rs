@@ -328,7 +328,7 @@ impl Store {
 }
 
 /// Platform-specific data directory.
-fn default_data_dir() -> Result<PathBuf, StoreError> {
+pub fn default_data_dir() -> Result<PathBuf, StoreError> {
     let base =
         dirs::data_dir().ok_or_else(|| StoreError::Io("cannot determine data dir".into()))?;
     Ok(base.join("crabport"))
