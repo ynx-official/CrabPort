@@ -44,7 +44,7 @@ impl CrabportApp {
         cx: &mut Context<Self>,
     ) {
         // Don't allow editing a running tunnel — the ports may be bound.
-        if self.tunnels.is_running(tunnel_id) {
+        if self.app_ctx.tunnels.is_running(tunnel_id) {
             tracing::warn!("tunnel {tunnel_id} is running; refusing to edit");
             return;
         }
@@ -135,7 +135,7 @@ impl CrabportApp {
             Some(_id) => {
                 if let Err(e) = store.lock().update_tunnel(&entry) {
                     tracing::error!("update_tunnel failed: {e}");
-                    self.notification_controller.update(cx, |c, cx| {
+                    self.app_ctx.notifications.update(cx, |c, cx| {
                         c.show(
                             Notification::new(t!("tunnels.notif_save_failed_title").to_string())
                                 .level(NotificationLevel::Danger)
@@ -150,8 +150,8 @@ impl CrabportApp {
                     cx.notify();
                     return;
                 }
-                self.tunnels.update_config(entry);
-                self.notification_controller.update(cx, |c, cx| {
+                self.app_ctx.tunnels.update_config(entry);
+                self.app_ctx.notifications.update(cx, |c, cx| {
                     c.show(
                         Notification::new(t!("tunnels.notif_save_updated_title").to_string())
                             .level(NotificationLevel::Success)
@@ -169,7 +169,7 @@ impl CrabportApp {
                     Ok(id) => id,
                     Err(e) => {
                         tracing::error!("add_tunnel failed: {e}");
-                        self.notification_controller.update(cx, |c, cx| {
+                        self.app_ctx.notifications.update(cx, |c, cx| {
                             c.show(
                                 Notification::new(
                                     t!("tunnels.notif_save_failed_title").to_string(),
@@ -189,8 +189,8 @@ impl CrabportApp {
                 };
                 let mut entry = entry;
                 entry.id = id;
-                self.tunnels.add(entry);
-                self.notification_controller.update(cx, |c, cx| {
+                self.app_ctx.tunnels.add(entry);
+                self.app_ctx.notifications.update(cx, |c, cx| {
                     c.show(
                         Notification::new(t!("tunnels.notif_save_created_title").to_string())
                             .level(NotificationLevel::Success)
@@ -216,7 +216,7 @@ impl CrabportApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.tunnels.is_running(tunnel_id) {
+        if self.app_ctx.tunnels.is_running(tunnel_id) {
             tracing::warn!("tunnel {tunnel_id} already running");
             return;
         }
@@ -339,8 +339,8 @@ impl CrabportApp {
             match rx.await {
                 Ok(Some((session, manager))) => {
                     let _ = this.update(cx, |app, cx| {
-                        app.tunnels.set_owned(tunnel_id_for_set, session, manager);
-                        app.notification_controller.update(cx, |c, cx| {
+                        app.app_ctx.tunnels.set_owned(tunnel_id_for_set, session, manager);
+                        app.app_ctx.notifications.update(cx, |c, cx| {
                             c.show(
                                 Notification::new(t!("tunnels.notif_start_title").to_string())
                                     .level(NotificationLevel::Success)
@@ -357,7 +357,7 @@ impl CrabportApp {
                 }
                 _ => {
                     let _ = this.update(cx, |app, cx| {
-                        app.notification_controller.update(cx, |c, cx| {
+                        app.app_ctx.notifications.update(cx, |c, cx| {
                             c.show(
                                 Notification::new(
                                     t!("tunnels.notif_start_failed_title").to_string(),
@@ -385,7 +385,7 @@ impl CrabportApp {
 
     /// Stop a running tunnel (owned or borrowed).
     pub fn stop_tunnel(&mut self, tunnel_id: i64, cx: &mut Context<Self>) {
-        let manager = self.tunnels.manager_for(tunnel_id);
+        let manager = self.app_ctx.tunnels.manager_for(tunnel_id);
         let Some(manager) = manager else {
             return;
         };
@@ -405,8 +405,8 @@ impl CrabportApp {
         cx.spawn(async move |this, cx| {
             let _ = rx.await;
             let _ = this.update(cx, |app, cx| {
-                app.tunnels.clear_runtime(id);
-                app.notification_controller.update(cx, |c, cx| {
+                app.app_ctx.tunnels.clear_runtime(id);
+                app.app_ctx.notifications.update(cx, |c, cx| {
                     c.show(
                         Notification::new(t!("tunnels.notif_stop_title").to_string())
                             .level(NotificationLevel::Success)
@@ -435,8 +435,8 @@ impl CrabportApp {
     /// If the tunnel is already running (owned or borrowed) the start is
     /// rejected with a warning toast.
     pub fn start_tunnel_borrowed(&mut self, tunnel_id: i64, tab_id: u64, cx: &mut Context<Self>) {
-        if self.tunnels.is_running(tunnel_id) {
-            self.notification_controller.update(cx, |c, cx| {
+        if self.app_ctx.tunnels.is_running(tunnel_id) {
+            self.app_ctx.notifications.update(cx, |c, cx| {
                 c.show(
                     Notification::new(t!("tunnels.notif_already_running_title").to_string())
                         .level(NotificationLevel::Warning)
@@ -464,7 +464,7 @@ impl CrabportApp {
         };
         let source = term_entity.read_with(cx, |v, _| v.tunnel_source().cloned());
         let Some(source) = source else {
-            self.notification_controller.update(cx, |c, cx| {
+            self.app_ctx.notifications.update(cx, |c, cx| {
                 c.show(
                     Notification::new(t!("tunnels.notif_borrow_no_session_title").to_string())
                         .level(NotificationLevel::Warning)
@@ -488,7 +488,7 @@ impl CrabportApp {
         // reflects the "running" state and `stop_tunnel` can find the manager.
         // The manager is `Arc`-backed, so the clone held by the registry keeps
         // the tunnels alive even after the spawn task below drops its clone.
-        self.tunnels
+        self.app_ctx.tunnels
             .set_borrowed(tunnel_id, tab_id, manager.clone());
 
         let tunnel_id_for_set = tunnel_id;
@@ -533,7 +533,7 @@ impl CrabportApp {
             match rx.await {
                 Ok(true) => {
                     let _ = this.update(cx, |app, cx| {
-                        app.notification_controller.update(cx, |c, cx| {
+                        app.app_ctx.notifications.update(cx, |c, cx| {
                             c.show(
                                 Notification::new(t!("tunnels.notif_start_title").to_string())
                                     .level(NotificationLevel::Success)
@@ -552,8 +552,8 @@ impl CrabportApp {
                     let _ = this.update(cx, |app, cx| {
                         // Start failed — tear down the borrowed runtime we
                         // optimistically registered above.
-                        app.tunnels.clear_runtime(tunnel_id_for_set);
-                        app.notification_controller.update(cx, |c, cx| {
+                        app.app_ctx.tunnels.clear_runtime(tunnel_id_for_set);
+                        app.app_ctx.notifications.update(cx, |c, cx| {
                             c.show(
                                 Notification::new(
                                     t!("tunnels.notif_start_failed_title").to_string(),
@@ -581,7 +581,7 @@ impl CrabportApp {
 
     pub fn remove_tunnel(&mut self, tunnel_id: i64, cx: &mut Context<Self>) {
         let store = AppState::store(cx);
-        let tunnels = self.tunnels.clone();
+        let tunnels = self.app_ctx.tunnels.clone();
         // `tunnels.remove` calls `manager.stop_all().await` (tokio I/O) — run
         // on `TOKIO`, signal completion via oneshot.
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();

@@ -105,7 +105,7 @@ impl CrabportApp {
             Some(id) => {
                 if let Err(e) = store.lock().update_snippet(id, &out.name, &out.command) {
                     tracing::error!("update_snippet failed: {e}");
-                    self.notification_controller.update(cx, |c, cx| {
+                    self.app_ctx.notifications.update(cx, |c, cx| {
                         c.show(
                             Notification::new(t!("snippets.notif_save_failed_title").to_string())
                                 .level(NotificationLevel::Danger)
@@ -119,7 +119,7 @@ impl CrabportApp {
                     });
                     return;
                 }
-                self.notification_controller.update(cx, |c, cx| {
+                self.app_ctx.notifications.update(cx, |c, cx| {
                     c.show(
                         Notification::new(t!("snippets.notif_updated_title").to_string())
                             .level(NotificationLevel::Success)
@@ -134,7 +134,7 @@ impl CrabportApp {
             None => {
                 if let Err(e) = store.lock().add_snippet(&out.name, &out.command) {
                     tracing::error!("add_snippet failed: {e}");
-                    self.notification_controller.update(cx, |c, cx| {
+                    self.app_ctx.notifications.update(cx, |c, cx| {
                         c.show(
                             Notification::new(t!("snippets.notif_save_failed_title").to_string())
                                 .level(NotificationLevel::Danger)
@@ -148,7 +148,7 @@ impl CrabportApp {
                     });
                     return;
                 }
-                self.notification_controller.update(cx, |c, cx| {
+                self.app_ctx.notifications.update(cx, |c, cx| {
                     c.show(
                         Notification::new(t!("snippets.notif_created_title").to_string())
                             .level(NotificationLevel::Success)

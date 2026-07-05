@@ -296,7 +296,7 @@ impl CrabportApp {
                     );
                     let save_result = AppState::store(cx).lock().update_host(&entry);
                     let host_name = name.clone();
-                    app.notification_controller.update(cx, |c, cx| {
+                    app.app_ctx.notifications.update(cx, |c, cx| {
                         let (title, msg, level) = match &save_result {
                             Ok(()) => (
                                 t!("hosts.notif_saved_title").to_string(),

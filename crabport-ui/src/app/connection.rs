@@ -217,7 +217,7 @@ impl CrabportApp {
         if !valid {
             // Surface a summary toast so the user knows something is wrong
             // even if the offending field is scrolled out of view.
-            self.notification_controller.update(cx, |c, cx| {
+            self.app_ctx.notifications.update(cx, |c, cx| {
                 c.show(
                     Notification::new(t!("connection_form.validation_title").to_string())
                         .level(NotificationLevel::Warning)

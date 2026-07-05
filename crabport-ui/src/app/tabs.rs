@@ -98,7 +98,7 @@ impl CrabportApp {
                             std::time::Duration::from_secs(5),
                         ),
                     };
-                    app.notification_controller.update(cx, |c, cx| {
+                    app.app_ctx.notifications.update(cx, |c, cx| {
                         c.show(
                             Notification::new(title)
                                 .level(level)
@@ -251,7 +251,7 @@ impl CrabportApp {
                             std::time::Duration::from_secs(5),
                         ),
                     };
-                    app.notification_controller.update(cx, |c, cx| {
+                    app.app_ctx.notifications.update(cx, |c, cx| {
                         c.show(
                             Notification::new(title)
                                 .level(level)
@@ -316,7 +316,7 @@ impl CrabportApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let cmd = self.command_palette.clone();
+        let cmd = self.app_ctx.command_palette.clone();
         let was_open = cmd.read(cx).open;
         cmd.update(cx, |cmd, cx| {
             if was_open {

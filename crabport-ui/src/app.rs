@@ -61,46 +61,19 @@ pub struct CrabportApp {
     pub terminal_views: HashMap<u64, Entity<TerminalView>>,
     pub hosts: Vec<ConnectionHost>,
     pub connection_form: Option<ConnectionFormState>,
-    pub command_palette: Entity<CommandView>,
-    pub sftp_panel: Entity<crate::views::panel::sftp::SftpPanel>,
-    pub snippets_panel: Entity<crate::views::panel::snippets_panel::SnippetsPanel>,
-    pub history_panel: Entity<crate::views::panel::history_command_panel::HistoryCommandPanel>,
-    /// Tunnels side panel (borrowed tunnels reusing the active tab's SSH
-    /// connection). Only useful for SSH tabs.
-    pub tunnels_panel: Entity<crate::views::panel::tunnels_panel::TunnelsPanel>,
     /// Active index of the right-hand panel's tab strip (SFTP / History /
     /// Snippets). Driven by `Tabs::on_change` in `render_panel`.
     pub panel_active_tab: usize,
-    pub hosts_view: Entity<crate::views::hosts::HostsView>,
-    /// Snippets management sidebar view (right-click edit/delete).
-    pub snippets_view: Entity<crate::views::snippets::SnippetsView>,
-    /// Tunnels management sidebar view (create/start/stop/edit/delete).
-    pub tunnels_view: Entity<crate::views::tunnels::TunnelsView>,
-    /// Global alert dialog host. Rendered at the app root so it overlays the
-    /// entire window regardless of which view is active. Triggered via
-    /// `alert_controller.update(cx, |c, cx| c.show(state, cx))`.
-    pub alert_controller: Entity<AlertController>,
-    /// Global context menu host. Triggered via
-    /// `context_menu.update(cx, |c, cx| c.show(state, cx))`.
-    pub context_menu: Entity<ContextMenuController>,
-    /// Global toast notification host. Rendered at the app root so toasts
-    /// overlay the entire window regardless of which view is active.
-    /// Triggered via
-    /// `notification_controller.update(cx, |c, cx| c.show(notification, cx))`.
-    pub notification_controller: Entity<NotificationController>,
-    /// Central registry of all tunnels (stopped + running). Single source
-    /// of truth for the Tunnels view; mutations fire `cx.notify()` via the
-    /// `on_change` callback wired at construction.
-    pub tunnels: Arc<crate::views::tunnels::TunnelRegistry>,
     /// Tunnel form window state (singleton dialog for creating/editing a
     /// tunnel config). `None` when the dialog is closed.
     pub tunnel_form: Option<crate::views::tunnels::TunnelFormState>,
     /// Snippet form window state (singleton dialog for creating/editing a
     /// snippet). `None` when the dialog is closed.
     pub snippet_form: Option<crate::views::snippets::SnippetFormState>,
-    /// Shared context bundle (app handle + global controllers + tunnels).
-    /// Cheap to clone; handed out to child views / layout functions / async
-    /// tasks instead of passing each controller separately.
+    /// Single entry point for all long-lived shared services: global overlay
+    /// controllers (alert / context-menu / notifications), the tunnel
+    /// registry, the command palette, and the side-panel + sidebar views.
+    /// Child modules reach them via `self.app_ctx.<field>`.
     pub app_ctx: AppCtx,
     wired: bool,
     /// Tab id that currently holds focus. Used to focus the terminal only on
@@ -155,6 +128,7 @@ impl CrabportApp {
             is_remote: false,
         };
 
+        // ---- Construct shared entities (all live in `AppCtx`) ----
         let command_palette = cx.new(|cx| CommandView::new(window, cx));
         let sftp_panel = cx.new(|_cx| crate::views::panel::sftp::SftpPanel::new());
         let snippets_panel =
@@ -168,28 +142,11 @@ impl CrabportApp {
             cx.new(|_cx| crate::views::snippets::SnippetsView::new(app_entity.clone()));
         let tunnels_view =
             cx.new(|_cx| crate::views::tunnels::TunnelsView::new(app_entity.clone()));
-        let alert_controller = cx.new(|_cx| AlertController::new());
+        let alert = cx.new(|_cx| AlertController::new());
         let context_menu = cx.new(|_cx| ContextMenuController::new());
-        let notification_controller =
+        let notifications =
             cx.new(|_cx| NotificationController::new(NotificationPosition::BottomRight));
-
-        // Tunnel registry: a plain mutex-guarded list of tunnel configs +
-        // their optional runtime state. `CrabportApp` calls `cx.notify()`
-        // after each mutation (start/stop/add/remove) since those run in
-        // GPUI contexts. The registry itself is context-free.
         let tunnels = Arc::new(crate::views::tunnels::TunnelRegistry::new());
-
-        // Shared context bundle: app handle + global controllers + tunnels.
-        // Built once here and stored on the app; cloned freely by child views
-        // and layout functions instead of threading each controller through
-        // `render_content`'s parameter list.
-        let app_ctx = AppCtx {
-            app: app_entity,
-            alert: alert_controller.clone(),
-            context_menu: context_menu.clone(),
-            notifications: notification_controller.clone(),
-            tunnels: tunnels.clone(),
-        };
 
         // Read persisted data through the shared global store. The global
         // is initialized in `main` before any window is opened.
@@ -223,6 +180,25 @@ impl CrabportApp {
         let tunnel_configs = store.lock().tunnels().unwrap_or_default();
         tunnels.set_configs(tunnel_configs);
 
+        // Shared context bundle: the single home for every long-lived service.
+        // Built after `tunnels` is fully initialized so the bundle wraps the
+        // final registry.
+        let app_ctx = AppCtx {
+            app: app_entity,
+            alert,
+            context_menu,
+            notifications,
+            tunnels,
+            command_palette,
+            sftp_panel,
+            snippets_panel,
+            history_panel,
+            tunnels_panel,
+            hosts_view,
+            snippets_view,
+            tunnels_view,
+        };
+
         Self {
             sidebar_item: SidebarItem::Sessions,
             tabs: vec![home_tab],
@@ -232,19 +208,7 @@ impl CrabportApp {
             terminal_views: HashMap::new(),
             hosts,
             connection_form: None,
-            command_palette,
-            sftp_panel,
-            snippets_panel,
-            history_panel,
-            tunnels_panel,
             panel_active_tab: 0,
-            hosts_view,
-            snippets_view,
-            tunnels_view,
-            alert_controller,
-            context_menu,
-            notification_controller,
-            tunnels,
             tunnel_form: None,
             snippet_form: None,
             app_ctx,
@@ -260,14 +224,14 @@ impl CrabportApp {
         }
         self.wired = true;
 
-        let cmd = self.command_palette.clone();
+        let cmd = self.app_ctx.command_palette.clone();
         let app = cx.entity().clone();
 
         // ---- Command palette callbacks ----
         let cmd_for_close = cmd.clone();
         let cmd_for_new = cmd.clone();
         let app_for_cmd = app.clone();
-        self.command_palette.update(cx, move |cmd, _cx| {
+        self.app_ctx.command_palette.update(cx, move |cmd, _cx| {
             cmd.set_on_close({
                 let c = cmd_for_close.clone();
                 move |_, cx| {
@@ -328,7 +292,7 @@ impl Render for CrabportApp {
                 .cmp(&a.favorite)
                 .then_with(|| b.last_login.cmp(&a.last_login))
         });
-        self.command_palette.update(cx, |cmd, _cx| {
+        self.app_ctx.command_palette.update(cx, |cmd, _cx| {
             cmd.set_hosts(sorted_hosts);
         });
 
@@ -338,7 +302,7 @@ impl Render for CrabportApp {
         // `render_content` — that would be a nested read of `CrabportApp`
         // and panic ("cannot read while it is already being updated").
         // Same pattern as `panel_active_tab`.
-        let tunnel_list = self.tunnels.list();
+        let tunnel_list = self.app_ctx.tunnels.list();
         let tunnel_form_state = self.tunnel_form.clone();
         let snippet_form_state = self.snippet_form.clone();
 
@@ -350,19 +314,11 @@ impl Render for CrabportApp {
             &self.terminal_views,
             &self.hosts,
             self.connection_form.as_ref(),
-            &self.sftp_panel,
-            &self.snippets_panel,
-            &self.history_panel,
-            &self.tunnels_panel,
             self.panel_active_tab,
-            &self.hosts_view,
-            &self.snippets_view,
-            &self.tunnels_view,
             tunnel_list,
             tunnel_form_state,
             snippet_form_state,
-            &self.alert_controller,
-            &self.context_menu,
+            &self.app_ctx,
             _window,
             cx,
         );
@@ -394,13 +350,13 @@ impl Render for CrabportApp {
             .child(render_sidebar(self.sidebar_item, show_sidebar, &handle))
             .child(content)
             // -- Command palette --
-            .child(self.command_palette.clone())
+            .child(self.app_ctx.command_palette.clone())
             // -- Global alert dialog (host-key prompts, etc.) --
-            .child(self.alert_controller.clone())
+            .child(self.app_ctx.alert.clone())
             // -- Global context menu --
-            .child(self.context_menu.clone())
+            .child(self.app_ctx.context_menu.clone())
             // -- Global toast notifications --
-            .child(self.notification_controller.clone())
+            .child(self.app_ctx.notifications.clone())
     }
 }
 
