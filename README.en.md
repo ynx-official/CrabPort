@@ -23,13 +23,17 @@ CrabPort aims to be a simple and easy-to-use cross-platform SSH client, integrat
 
 ### Key Features
 
-- **Multi-tab SSH terminal** — Built on `russh` + `alacritty_terminal`, with multi-session support, tab switching, and full ANSI color rendering
+- **Multi-tab terminal** — Built on `russh` + `alacritty_terminal`, with SSH / Telnet / Serial / local-terminal support, multi-session, tab switching, and full ANSI color rendering
 - **SFTP file management** — Visual directory browsing, file/directory upload & download, multi-select batch operations
+- **SSH port forwarding / tunnels** — Local (`-L`), Remote (`-R`), and Dynamic (`-D` SOCKS) tunnels; create, start/stop, edit, and delete from the UI
+- **Proxy connections** — SOCKS5, HTTP CONNECT, and HTTPS CONNECT proxies; per-host proxy config with optional username/password auth
 - **Secure credential storage** — Keys and passwords encrypted with AES-256-GCM; the encryption key is a locally generated random file
 - **Command history** — Automatically captures terminal command history with search, save-as-snippet, and one-click paste/run
 - **Snippet management** — Globally saved common commands with real-time search and quick execution
 - **Host management** — Persistent connection profiles with favorites and sorting by last login
 - **SSH host-key verification** — Prompts for confirmation on first connect, then auto-verifies on subsequent connects
+- **Settings panel** — Appearance & language (Chinese / English) controls, persisted live to `config.toml`
+- **Terminal key bindings** — Platform-native shortcuts (copy/paste) + Ctrl/Shift/Alt modifiers + function keys / arrow keys / Home/End with full VT escape sequences
 - **Cross-platform** — Native support for macOS / Linux / Windows on both x64 and arm64 architectures
 
 ## Screenshots
@@ -46,12 +50,14 @@ Download the latest version for your platform from the [Releases page](https://g
 
 | Platform | Download | Notes |
 |----------|----------|-------|
-| macOS (Apple Silicon) | `CrabPort-v*-macos-aarch64.zip` | Unzip and drag to `/Applications` |
-| macOS (Intel) | `CrabPort-v*-macos-x86_64.zip` | Unzip and drag to `/Applications` |
-| Linux (x64) | `CrabPort-v*-linux-x86_64.tar.gz` | Extract and run, or grab the `.AppImage` |
-| Linux (arm64) | `CrabPort-v*-linux-aarch64.tar.gz` | Extract and run |
-| Windows (x64) | `CrabPort-v*-windows-x86_64.zip` | Extract and run `CrabPort.exe`, or grab the `.msi` installer |
+| macOS (Apple Silicon) | `CrabPort-v*-macos-aarch64.dmg` | Open the `.dmg` and drag CrabPort to `/Applications` |
+| macOS (Intel) | `CrabPort-v*-macos-x86_64.dmg` | Open the `.dmg` and drag CrabPort to `/Applications` |
+| Linux (x64) | `CrabPort-v*-linux-x86_64.AppImage` | `chmod +x` and double-click to run; runtime libs are bundled |
+| Linux (arm64) | `CrabPort-v*-linux-aarch64.AppImage` | `chmod +x` and double-click to run; runtime libs are bundled |
+| Windows (x64) | `CrabPort-v*-windows-x86_64.zip` | Extract and run `CrabPort.exe` |
 | Windows (arm64) | `CrabPort-v*-windows-aarch64.zip` | Extract and run `CrabPort.exe` |
+
+> macOS builds ship as `.dmg` disk images. Linux builds ship as `.AppImage` (bundles the X11 / Wayland / Vulkan / fontconfig runtime libraries, so no manual system-package install is needed). Windows builds ship as a `.zip` (cargo-bundle v0.11.0 has an MSI packaging bug, so no `.msi` installer is provided for now).
 
 **macOS note**: On first launch you may see "cannot verify developer". Right-click the app → select "Open" to bypass, or run in Terminal:
 ```bash
@@ -83,7 +89,8 @@ sudo apt-get install -y \
   libgl1-mesa-dev libegl1-mesa-dev libvulkan-dev \
   libfontconfig1-dev libfreetype6-dev \
   libasound2-dev libpulse-dev libdbus-1-dev \
-  libssl-dev pkg-config
+  libssl-dev pkg-config \
+  squashfs-tools   # mksquashfs, required for .AppImage bundling
 ```
 
 **Windows**: MSVC toolchain (ships with Visual Studio Build Tools)
@@ -100,11 +107,23 @@ cargo run
 
 # Release build
 cargo build --release
-
-# Bundle as .dmg on macOS
-cargo install cargo-bundle
-cargo bundle --release --format dmg
 ```
+
+#### Bundle platform installers
+
+Install [cargo-bundle](https://github.com/burtonageo/cargo-bundle) first:
+
+```bash
+cargo install cargo-bundle --locked
+```
+
+| Platform | Command | Output |
+|----------|---------|--------|
+| macOS | `cargo bundle --release --format dmg` | `target/release/bundle/dmg/CrabPort_*.dmg` |
+| Linux | `cargo bundle --release --format appimage` | `target/release/bundle/appimage/CrabPort_*.AppImage` |
+| Windows | `cargo build --release` then zip the `.exe` manually | `CrabPort.exe` (`.zip`) |
+
+> Windows does not use cargo-bundle: its v0.11.0 MSI bundler has a bug that inserts a string into a binary column, so both CI and local builds ship a zipped `.exe` instead.
 
 ## Project Structure
 
@@ -115,8 +134,10 @@ CrabPort/
 ├── src/                    # Binary entry point
 │   └── main.rs             # Bootstraps the GPUI Application
 ├── crabport-core/          # Core infrastructure
-│   ├── credential.rs       # Host & credential data models
+│   ├── credential.rs       # Host / credential / proxy / tunnel data models
+│   ├── config.rs           # config.toml read/write (LazyLock global)
 │   ├── crypto.rs           # AES-256-GCM encrypt/decrypt
+│   ├── keybind.rs          # Terminal key bindings & resolution
 │   ├── store.rs            # SQLite persistence layer
 │   ├── profile.rs          # User config directory
 │   └── log.rs              # Logging initialization
@@ -126,6 +147,9 @@ CrabPort/
 │   ├── keys.rs             # Private-key parsing (OpenSSH/PEM)
 │   ├── known_hosts.rs      # known_hosts persistence
 │   ├── monitor.rs          # PTY data bridging
+│   ├── crabport_tunnel.rs  # TunnelManager / tunnel lifecycle & forward table
+│   ├── owned_session.rs    # Session handle wrapper
+│   ├── session.rs          # Session connect flow (with proxy dialing)
 │   └── transfer/           # SFTP transfer dispatch
 ├── crabport-sftp/          # SFTP backend
 │   ├── api.rs              # SFTP operation trait
@@ -134,17 +158,20 @@ CrabPort/
 │   └── transfer.rs         # Chunked transfer
 ├── crabport-terminal/      # Terminal abstraction
 │   └── terminal.rs         # alacritty_terminal wrapper
-├── crabport-tunnel/        # Tunnels (WIP)
+├── crabport-proxy/         # Proxy dialing (SOCKS5 / HTTP CONNECT / HTTPS CONNECT)
+│   └── lib.rs              # Returns a unified AsyncRead+AsyncWrite stream
+├── crabport-tunnel/        # Tunnel data types & reverse-forward registry
+│   └── lib.rs              # TunnelInfo / ReverseForwardRegistry, etc.
 └── crabport-ui/            # GPUI interface layer
     ├── src/
     │   ├── app.rs          # Main window & tab management
     │   ├── views/
     │   │   ├── terminal/   # Terminal view (render, selection, fonts, colors)
     │   │   ├── panel/      # Right-hand panel (SFTP/History/Snippets)
-    │   │   ├── hosts.rs    # Host list
-    │   │   ├── snippets.rs # Snippet management
-    │   │   └── tunnels.rs  # Tunnel management
-    │   ├── windows/        # Settings, About, and other aux windows
+    │   │   ├── hosts/      # Host list & connection form (with proxy config)
+    │   │   ├── tunnels.rs  # Tunnel management view (Local/Remote/Dynamic)
+    │   │   └── snippets.rs # Snippet management
+    │   ├── windows/        # Settings panel, About, and other aux windows
     │   ├── layouts/        # Layout components (sidebar, command palette, connection form)
     │   └── components/     # Reusable UI components
     ├── assets/             # Icons and static assets
@@ -162,8 +189,9 @@ App data lives under the platform-standard directory:
 | Windows | `%APPDATA%\crabport\` |
 
 Contains:
-- `crabport.db` — SQLite database (hosts, credentials, snippets)
+- `crabport.db` — SQLite database (hosts, credentials, snippets, tunnels, proxies)
 - `.key` — AES-256 encryption key (randomly generated; do not delete — stored credentials cannot be decrypted without it)
+- `config.toml` — app configuration (language & appearance settings; written atomically)
 
 ## Tech Stack
 
@@ -183,8 +211,11 @@ Contains:
 
 ## Roadmap
 
+- [x] Settings panel (language)
+- [x] Port forwarding / SSH tunnel management (Local / Remote / Dynamic)
+- [x] Proxy connections (SOCKS5 / HTTP CONNECT / HTTPS CONNECT)
+- [x] Telnet / Serial connection types
 - [ ] Settings panel (theme, fonts, custom shortcuts)
-- [ ] Port forwarding / SSH tunnel management
 - [ ] Terminal session sync (shared across windows)
 - [ ] Custom color schemes
 - [ ] Plugin system
