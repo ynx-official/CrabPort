@@ -92,6 +92,9 @@ pub struct CrabportApp {
     /// Tunnel form window state (singleton dialog for creating/editing a
     /// tunnel config). `None` when the dialog is closed.
     pub tunnel_form: Option<crate::views::tunnels::TunnelFormState>,
+    /// Snippet form window state (singleton dialog for creating/editing a
+    /// snippet). `None` when the dialog is closed.
+    pub snippet_form: Option<crate::views::snippets::SnippetFormState>,
     wired: bool,
     /// Tab id that currently holds focus. Used to focus the terminal only on
     /// actual tab switches instead of every render (which would steal focus
@@ -153,7 +156,8 @@ impl CrabportApp {
             cx.new(|_cx| crate::views::panel::history_command_panel::HistoryCommandPanel::new());
         let app_entity = cx.entity();
         let hosts_view = cx.new(|_cx| crate::views::hosts::HostsView::new(app_entity.clone()));
-        let snippets_view = cx.new(|_cx| crate::views::snippets::SnippetsView::new());
+        let snippets_view =
+            cx.new(|_cx| crate::views::snippets::SnippetsView::new(app_entity.clone()));
         let tunnels_view = cx.new(|_cx| crate::views::tunnels::TunnelsView::new(app_entity));
         let alert_controller = cx.new(|_cx| AlertController::new());
         let context_menu = cx.new(|_cx| ContextMenuController::new());
@@ -220,6 +224,7 @@ impl CrabportApp {
             notification_controller,
             tunnels,
             tunnel_form: None,
+            snippet_form: None,
             wired: false,
             last_focused_tab_id: None,
         }
@@ -691,6 +696,161 @@ impl CrabportApp {
             }
         }
         self.close_tunnel_form(cx);
+    }
+
+    // -----------------------------------------------------------------------
+    // Snippets form
+    // -----------------------------------------------------------------------
+
+    /// Open the snippet form dialog in create mode (blank fields).
+    pub fn open_snippet_form_for_create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Lazily create the form state on first use.
+        if self.snippet_form.is_none() {
+            let mut form = crate::views::snippets::SnippetFormState::new(window, cx);
+            let app = cx.entity().clone();
+            form.on_close = Some(std::rc::Rc::new(move |_w, cx| {
+                app.update(cx, |app, cx| app.close_snippet_form(cx));
+            }));
+            let app = cx.entity().clone();
+            form.on_save = Some(std::rc::Rc::new(move |out, w, cx| {
+                app.update(cx, |app, cx| app.save_snippet(out, w, cx));
+            }));
+            self.snippet_form = Some(form);
+        }
+        if let Some(ref mut form) = self.snippet_form {
+            form.open_for_create(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Open the snippet form dialog in edit mode, populated from a saved
+    /// snippet.
+    pub fn open_snippet_form_for_edit(
+        &mut self,
+        snippet_id: i64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let store = AppState::store(cx);
+        let snippet = store
+            .lock()
+            .snippets()
+            .ok()
+            .into_iter()
+            .flatten()
+            .find(|s| s.id == snippet_id);
+        let Some(snippet) = snippet else {
+            tracing::warn!("snippet {snippet_id} not found");
+            return;
+        };
+        if self.snippet_form.is_none() {
+            let mut form = crate::views::snippets::SnippetFormState::new(window, cx);
+            let app = cx.entity().clone();
+            form.on_close = Some(std::rc::Rc::new(move |_w, cx| {
+                app.update(cx, |app, cx| app.close_snippet_form(cx));
+            }));
+            let app = cx.entity().clone();
+            form.on_save = Some(std::rc::Rc::new(move |out, w, cx| {
+                app.update(cx, |app, cx| app.save_snippet(out, w, cx));
+            }));
+            self.snippet_form = Some(form);
+        }
+        if let Some(ref mut form) = self.snippet_form {
+            form.open_for_edit(snippet.id, &snippet.name, &snippet.command, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Close the snippet form dialog. Mirrors `close_tunnel_form`.
+    pub fn close_snippet_form(&mut self, cx: &mut Context<Self>) {
+        if let Some(ref mut form) = self.snippet_form {
+            form.close();
+        }
+        // Destroy after the exit animation.
+        let app = cx.entity().clone();
+        cx.spawn(async move |_this, cx| {
+            smol::Timer::after(std::time::Duration::from_millis(200)).await;
+            let _ = app.update(cx, |app, cx| {
+                if app.snippet_form.is_some() {
+                    app.snippet_form = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Persist a snippet (insert or update) from the form output.
+    pub fn save_snippet(
+        &mut self,
+        out: crate::views::snippets::SnippetFormOutput,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let store = AppState::store(cx);
+        let name = out.name.clone();
+        match out.editing_id {
+            Some(id) => {
+                if let Err(e) = store.lock().update_snippet(id, &out.name, &out.command) {
+                    tracing::error!("update_snippet failed: {e}");
+                    self.notification_controller.update(cx, |c, cx| {
+                        c.show(
+                            Notification::new(t!("snippets.notif_save_failed_title").to_string())
+                                .level(NotificationLevel::Danger)
+                                .message(
+                                    t!("snippets.notif_save_failed_msg", name = name.as_str())
+                                        .to_string(),
+                                )
+                                .duration(std::time::Duration::from_secs(5)),
+                            cx,
+                        );
+                    });
+                    return;
+                }
+                self.notification_controller.update(cx, |c, cx| {
+                    c.show(
+                        Notification::new(t!("snippets.notif_updated_title").to_string())
+                            .level(NotificationLevel::Success)
+                            .message(
+                                t!("snippets.notif_updated_msg", name = name.as_str()).to_string(),
+                            )
+                            .duration(std::time::Duration::from_secs(3)),
+                        cx,
+                    );
+                });
+            }
+            None => {
+                if let Err(e) = store.lock().add_snippet(&out.name, &out.command) {
+                    tracing::error!("add_snippet failed: {e}");
+                    self.notification_controller.update(cx, |c, cx| {
+                        c.show(
+                            Notification::new(t!("snippets.notif_save_failed_title").to_string())
+                                .level(NotificationLevel::Danger)
+                                .message(
+                                    t!("snippets.notif_save_failed_msg", name = name.as_str())
+                                        .to_string(),
+                                )
+                                .duration(std::time::Duration::from_secs(5)),
+                            cx,
+                        );
+                    });
+                    return;
+                }
+                self.notification_controller.update(cx, |c, cx| {
+                    c.show(
+                        Notification::new(t!("snippets.notif_created_title").to_string())
+                            .level(NotificationLevel::Success)
+                            .message(
+                                t!("snippets.notif_created_msg", name = name.as_str()).to_string(),
+                            )
+                            .duration(std::time::Duration::from_secs(3)),
+                        cx,
+                    );
+                });
+            }
+        }
+        self.close_snippet_form(cx);
     }
 
     /// Start a tunnel using a fresh, owned SSH connection (started from the
@@ -1464,7 +1624,38 @@ impl CrabportApp {
                         editing_proxy_id,
                         entry.proxy_id
                     );
-                    let _ = AppState::store(cx).lock().update_host(&entry);
+                    let save_result = AppState::store(cx).lock().update_host(&entry);
+                    let host_name = name.clone();
+                    app.notification_controller.update(cx, |c, cx| {
+                        let (title, msg, level) = match &save_result {
+                            Ok(()) => (
+                                t!("hosts.notif_saved_title").to_string(),
+                                t!("hosts.notif_saved_msg", name = host_name.as_str()).to_string(),
+                                NotificationLevel::Success,
+                            ),
+                            Err(e) => {
+                                tracing::error!("update_host failed: {e}");
+                                (
+                                    t!("hosts.notif_save_failed_title").to_string(),
+                                    t!("hosts.notif_save_failed_msg", name = host_name.as_str())
+                                        .to_string(),
+                                    NotificationLevel::Danger,
+                                )
+                            }
+                        };
+                        c.show(
+                            Notification::new(title)
+                                .level(level)
+                                .message(msg)
+                                .duration(std::time::Duration::from_secs(
+                                    if save_result.is_ok() { 3 } else { 5 },
+                                )),
+                            cx,
+                        );
+                    });
+                    if save_result.is_err() {
+                        return;
+                    }
 
                     if let Some(h) = app.hosts.iter_mut().find(|h| h.id == editing_host_id) {
                         h.name = name.clone();
@@ -1565,6 +1756,7 @@ impl Render for CrabportApp {
         // Same pattern as `panel_active_tab`.
         let tunnel_list = self.tunnels.list();
         let tunnel_form_state = self.tunnel_form.clone();
+        let snippet_form_state = self.snippet_form.clone();
 
         let content = crate::layouts::content::render_content(
             self.sidebar_item,
@@ -1583,9 +1775,9 @@ impl Render for CrabportApp {
             &self.tunnels_view,
             tunnel_list,
             tunnel_form_state,
+            snippet_form_state,
             &self.alert_controller,
             &self.context_menu,
-            &self.notification_controller,
             _window,
             cx,
         );

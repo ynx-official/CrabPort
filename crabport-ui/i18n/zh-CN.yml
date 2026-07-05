@@ -68,7 +68,6 @@ tunnels:
   kind_dynamic: "动态"
   delete_confirm_title: "删除隧道"
   delete_confirm_msg: "删除此隧道配置？此操作无法撤销。"
-  # --- 通知（启动/停止/编辑/保存，含失败）---
   notif_start_title: "隧道已启动"
   notif_start_msg: "隧道「%{name}」已开始运行。"
   notif_start_failed_title: "隧道启动失败"
@@ -129,7 +128,6 @@ sftp:
   delete_title: "删除"
   delete_prompt: "确定要删除「%{name}」吗？此操作无法撤销。"
   delete_confirm: "删除"
-  # --- 通知（下载/上传完成，含失败）---
   notif_download_done_title: "下载完成"
   notif_download_done_msg: "%{message}"
   notif_download_failed_title: "下载失败"
@@ -151,6 +149,10 @@ hosts:
   delete_title: "删除主机"
   delete_prompt: "确定要删除「%{name}」吗？此操作无法撤销。"
   delete_confirm: "删除"
+  notif_saved_title: "主机已保存"
+  notif_saved_msg: "主机「%{name}」已保存。"
+  notif_save_failed_title: "主机保存失败"
+  notif_save_failed_msg: "保存主机「%{name}」失败。"
 snippets:
   new_button: "新建"
   empty: "暂无保存的代码片段，可从历史记录面板保存命令。"
@@ -166,7 +168,6 @@ snippets:
   cancel: "取消"
   error_name_required: "名称不能为空"
   error_command_required: "命令不能为空"
-  # --- 通知（创建/保存成功，含失败）---
   notif_created_title: "代码片段已创建"
   notif_created_msg: "代码片段「%{name}」已保存。"
   notif_updated_title: "代码片段已更新"
