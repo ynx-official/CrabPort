@@ -38,12 +38,23 @@ use crate::components::context_menu::{ContextMenuController, ContextMenuItem, Co
 use crate::components::input::StyledInput;
 use crate::views::tunnels::TunnelView;
 
-/// Color accents for the kind badge (mirrors the Tunnels page).
-const KIND_LOCAL_COLOR: u32 = 0x89b4fa;
-const KIND_REMOTE_COLOR: u32 = 0xf9c2ff;
-const KIND_DYNAMIC_COLOR: u32 = 0xf9e2af;
-const STATUS_RUNNING_COLOR: u32 = 0xa6e3a1;
-const STATUS_STOPPED_COLOR: u32 = 0x585b70;
+/// Color accents for the kind badge (mirrors the Tunnels page). Read live
+/// from the theme so a preset switch recolors the badges too.
+fn kind_local_color() -> u32 {
+    term_blue()
+}
+fn kind_remote_color() -> u32 {
+    term_magenta()
+}
+fn kind_dynamic_color() -> u32 {
+    term_yellow()
+}
+fn status_running_color() -> u32 {
+    term_green()
+}
+fn status_stopped_color() -> u32 {
+    text_muted()
+}
 
 /// Tunnels panel view.
 pub struct TunnelsPanel {
@@ -222,12 +233,14 @@ impl Render for TunnelsPanel {
 
                         // Kind badge accent + letter.
                         let (kind_letter, kind_color) = match t.kind {
-                            crabport_core::credential::TunnelKind::Local => ("L", KIND_LOCAL_COLOR),
+                            crabport_core::credential::TunnelKind::Local => {
+                                ("L", kind_local_color())
+                            }
                             crabport_core::credential::TunnelKind::Remote => {
-                                ("R", KIND_REMOTE_COLOR)
+                                ("R", kind_remote_color())
                             }
                             crabport_core::credential::TunnelKind::Dynamic => {
-                                ("D", KIND_DYNAMIC_COLOR)
+                                ("D", kind_dynamic_color())
                             }
                         };
 
@@ -249,9 +262,9 @@ impl Render for TunnelsPanel {
 
                         // Status dot color.
                         let status_dot = if t.running {
-                            STATUS_RUNNING_COLOR
+                            status_running_color()
                         } else {
-                            STATUS_STOPPED_COLOR
+                            status_stopped_color()
                         };
 
                         let on_start_for_row = on_start.clone();
@@ -366,8 +379,8 @@ impl Render for TunnelsPanel {
                                 is_highlighted,
                                 std::time::Duration::from_millis(120),
                                 Linear,
-                                |el| el.bg(rgba((SURFACE_HOVER << 8) | 0x60)),
-                                |el| el.bg(rgba((SURFACE_HOVER << 8) | 0x00)),
+                                |el| el.bg(rgba((surface_hover() << 8) | 0x60)),
+                                |el| el.bg(rgba((surface_hover() << 8) | 0x00)),
                             )
                             // Kind badge (single letter, color-coded).
                             .child(
@@ -394,7 +407,7 @@ impl Render for TunnelsPanel {
                                         div()
                                             .text_xs()
                                             .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(rgb(TEXT_PRIMARY))
+                                            .text_color(rgb(text_primary()))
                                             .whitespace_nowrap()
                                             .overflow_hidden()
                                             .text_ellipsis()
@@ -403,7 +416,7 @@ impl Render for TunnelsPanel {
                                     .child(
                                         div()
                                             .text_xs()
-                                            .text_color(rgb(TEXT_MUTED))
+                                            .text_color(rgb(text_muted()))
                                             .whitespace_nowrap()
                                             .overflow_hidden()
                                             .text_ellipsis()
@@ -438,7 +451,7 @@ impl Render for TunnelsPanel {
                                 svg()
                                     .path("icons/search.svg")
                                     .size(px(12.0))
-                                    .text_color(rgb(TEXT_MUTED)),
+                                    .text_color(rgb(text_muted())),
                             ),
                     ),
                 )
@@ -454,7 +467,7 @@ impl Render for TunnelsPanel {
                         .justify_center()
                         .child(
                             div()
-                                .text_color(rgb(TEXT_MUTED))
+                                .text_color(rgb(text_muted()))
                                 .text_sm()
                                 .child(t!("tunnels.panel_empty").to_string()),
                         ),
@@ -467,8 +480,8 @@ impl Render for TunnelsPanel {
                         .flex_1()
                         .min_h_0()
                         .border_1()
-                        .border_color(rgb(BORDER))
-                        .bg(rgb(BG_TAB_BAR))
+                        .border_color(rgb(border()))
+                        .bg(rgb(bg_tab_bar()))
                         .rounded_md()
                         .overflow_hidden()
                         .child(list)

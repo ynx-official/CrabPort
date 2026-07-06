@@ -60,10 +60,10 @@ pub enum NotificationLevel {
 impl NotificationLevel {
     fn accent(self) -> u32 {
         match self {
-            Self::Info => 0x89b4fa,    // TERM_BLUE-ish
-            Self::Success => 0xa6e3a1, // TERM_GREEN
-            Self::Warning => 0xf9e2af, // TERM_YELLOW
-            Self::Danger => 0xf38ba8,  // TERM_RED
+            Self::Info => term_blue(),
+            Self::Success => term_green(),
+            Self::Warning => term_yellow(),
+            Self::Danger => term_red(),
         }
     }
 
@@ -502,9 +502,9 @@ fn render_notification_card(
         .w(px(360.0))
         // Re-enable pointer events on the card so it's clickable even though
         // the surrounding layer is click-through.
-        .bg(rgb(BG_BASE))
+        .bg(rgb(bg_base()))
         .border_1()
-        .border_color(rgb(BORDER))
+        .border_color(rgb(border()))
         .rounded_md()
         .shadow_lg()
         .flex()
@@ -562,14 +562,14 @@ fn render_notification_card(
         div()
             .text_sm()
             .font_weight(FontWeight::SEMIBOLD)
-            .text_color(rgb(TEXT_PRIMARY))
+            .text_color(rgb(text_primary()))
             .child(title.to_string()),
     );
     if let Some(msg) = message {
         body = body.child(
             div()
                 .text_xs()
-                .text_color(rgb(TEXT_MUTED))
+                .text_color(rgb(text_muted()))
                 // Allow long messages to wrap inside the card.
                 .whitespace_normal()
                 .child(msg.to_string()),
@@ -615,12 +615,12 @@ fn render_notification_card(
             .h_5()
             .w_5()
             .rounded_sm()
-            .text_color(rgb(TEXT_MUTED))
+            .text_color(rgb(text_muted()))
             .child(
                 svg()
                     .path("icons/close.svg")
                     .size_3()
-                    .text_color(rgb(TEXT_MUTED)),
+                    .text_color(rgb(text_muted())),
             )
             .on_click(move |_e, w, cx| {
                 close_cb(close_id_for_cb.as_ref(), w, cx);

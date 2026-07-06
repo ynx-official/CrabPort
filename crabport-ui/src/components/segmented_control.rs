@@ -33,8 +33,8 @@ impl Segment {
     }
 
     /// Attach an icon to this segment. The svg's `text_color` is driven by
-    /// the SegmentedControl (animated between `TEXT_PRIMARY` when active /
-    /// hovered and `TEXT_MUTED` otherwise), so pass an empty label if you
+    /// the SegmentedControl (animated between `text_primary()` when active /
+    /// hovered and `text_muted()` otherwise), so pass an empty label if you
     /// want an icon-only tab.
     pub fn icon(mut self, path: impl Into<SharedString>) -> Self {
         self.icon = Some(path.into());
@@ -143,7 +143,7 @@ impl RenderOnce for SegmentedControl {
             .w(DefiniteLength::Fraction(seg_width))
             .h_full()
             .rounded_sm()
-            .bg(rgb(BG_BASE));
+            .bg(rgb(bg_base()));
 
         // The track is absolute and fills the inner container via inset_0.
         // Children use h_full to match the track height explicitly.
@@ -171,7 +171,7 @@ impl RenderOnce for SegmentedControl {
 
                 // Background-hover easing: default bg is fully transparent so
                 // the tab blends with the SegmentedControl's own bg. On hover
-                // we ease into a semi-transparent SURFACE_HOVER (alpha ~0.5)
+                // we ease into a semi-transparent surface_hover() (alpha ~0.5)
                 // for a subtle wash rather than a solid block. Active state is
                 // signalled by the sliding indicator, not bg.
                 let mut tab = div()
@@ -185,7 +185,7 @@ impl RenderOnce for SegmentedControl {
                     .py_1()
                     .rounded_sm()
                     .text_sm()
-                    .text_color(rgb(if is_active { TEXT_PRIMARY } else { TEXT_MUTED }))
+                    .text_color(rgb(if is_active { text_primary() } else { text_muted() }))
                     .bg(rgba(0x24273a00))
                     .with_transition(tab_id)
                     .transition_on_hover(
@@ -205,7 +205,7 @@ impl RenderOnce for SegmentedControl {
                 // `ParentElement`). The hover background above provides the
                 // visual feedback instead.
                 if let Some(path) = icon_path {
-                    let icon_color = if is_active { TEXT_PRIMARY } else { TEXT_MUTED };
+                    let icon_color = if is_active { text_primary() } else { text_muted() };
                     tab = tab.child(
                         svg()
                             .path(path)
@@ -243,7 +243,7 @@ impl RenderOnce for SegmentedControl {
 
         let mut root = div()
             .id(self.id)
-            .bg(rgb(SURFACE_ACTIVE))
+            .bg(rgb(surface_active()))
             .rounded_md()
             .p_0p5()
             .child(inner);

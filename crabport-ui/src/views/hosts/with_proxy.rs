@@ -61,7 +61,7 @@ impl RenderOnce for WithProxyForm {
                 div()
                     .text_xs()
                     .font_weight(FontWeight::MEDIUM)
-                    .text_color(rgb(crate::color::TEXT_MUTED))
+                    .text_color(rgb(crate::color::text_muted()))
                     .child(t!("connection_form.proxy").to_string()),
             )
             .child(

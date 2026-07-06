@@ -516,9 +516,9 @@ fn render_dialog(
     div()
         .id(dialog_id.clone())
         .w(px(440.0))
-        .bg(rgb(BG_BASE))
+        .bg(rgb(bg_base()))
         .border_1()
-        .border_color(rgb(BORDER))
+        .border_color(rgb(border()))
         .rounded_lg()
         .shadow_lg()
         .flex()
@@ -545,7 +545,7 @@ fn render_dialog(
             div()
                 .text_lg()
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(TEXT_PRIMARY))
+                .text_color(rgb(text_primary()))
                 .child(title),
         )
         // Name
@@ -628,7 +628,7 @@ fn render_dialog(
                 }),
         )
         // Kind-specific hint
-        .child(div().text_xs().text_color(rgb(TEXT_MUTED)).child(hint))
+        .child(div().text_xs().text_color(rgb(text_muted())).child(hint))
         // Buttons
         .child(render_buttons(
             editing,
@@ -749,7 +749,7 @@ fn render_host_selector(
     let label_div = div()
         .text_xs()
         .font_weight(FontWeight::MEDIUM)
-        .text_color(rgb(TEXT_MUTED))
+        .text_color(rgb(text_muted()))
         .child(t!("tunnel_form.host").to_string());
 
     // Error row shown below the dropdown when no host is selected. Mirrors
@@ -763,12 +763,12 @@ fn render_host_selector(
                 svg()
                     .path("icons/circle-alert.svg")
                     .size_3()
-                    .text_color(rgb(crate::color::INPUT_BORDER_ERROR)),
+                    .text_color(rgb(crate::color::input_border_error())),
             )
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(crate::color::INPUT_BORDER_ERROR))
+                    .text_color(rgb(crate::color::input_border_error()))
                     .child(msg),
             )
     };
@@ -782,11 +782,11 @@ fn render_host_selector(
                     .h_9()
                     .px_3()
                     .rounded_md()
-                    .bg(rgb(BG_BASE))
+                    .bg(rgb(bg_base()))
                     .border_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(border()))
                     .text_sm()
-                    .text_color(rgb(TEXT_MUTED))
+                    .text_color(rgb(text_muted()))
                     .child(t!("tunnel_form.no_hosts").to_string()),
             )
             .when_some(host_error, |el, e| el.child(error_row(e)))

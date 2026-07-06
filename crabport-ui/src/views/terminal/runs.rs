@@ -1,7 +1,7 @@
 use alacritty_terminal::term::cell::Flags;
 use gpui::{TextRun, UnderlineStyle, px, rgb};
 
-use crate::views::terminal::color::*;
+use crate::color::theme;
 use crate::views::terminal::fonts::pick_font;
 use crate::views::terminal::render_cache::CellSnap;
 
@@ -38,8 +38,11 @@ pub(crate) fn build_runs(cells: &[CellSnap], num_cols: usize) -> (String, Vec<Te
     let mut line_text = String::new();
     let mut runs: Vec<TextRun> = Vec::new();
     let mut run_start = 0usize;
-    let mut cur_fg = TERM_FG;
-    let mut cur_inv_bg = TERM_BG;
+    // Snapshot the theme once per line so the whole run list is consistent
+    // even if `refresh_theme()` fires between cell lookups.
+    let t = theme();
+    let mut cur_fg = t.term_fg;
+    let mut cur_inv_bg = t.term_bg;
     let mut cur_bold = false;
     let mut cur_italic = false;
     let mut cur_underline = false;
@@ -124,7 +127,7 @@ pub(crate) fn build_runs(cells: &[CellSnap], num_cols: usize) -> (String, Vec<Te
         runs.push(TextRun {
             len: pad,
             font: pick_font(false, false),
-            color: rgb(TERM_FG).into(),
+            color: rgb(t.term_fg).into(),
             background_color: None,
             underline: None,
             strikethrough: None,

@@ -303,7 +303,7 @@ impl Render for SftpPanel {
                             svg()
                                 .path("icons/folder.svg")
                                 .size(px(12.0))
-                                .text_color(rgb(TEXT_MUTED)),
+                                .text_color(rgb(text_muted())),
                         ),
                     ),
                 )
@@ -743,8 +743,8 @@ impl Render for SftpPanel {
                                                 is_highlighted,
                                                 std::time::Duration::from_millis(120),
                                                 Linear,
-                                                |el| el.bg(rgba((SURFACE_HOVER << 8) | 0xFF)),
-                                                |el| el.bg(rgba((SURFACE_HOVER << 8) | 0x00)),
+                                                |el| el.bg(rgba((surface_hover() << 8) | 0xFF)),
+                                                |el| el.bg(rgba((surface_hover() << 8) | 0x00)),
                                             )
                                             // Selected rows get a persistent blue accent bar
                                             // on the left edge plus a subtle blue tint so the
@@ -763,23 +763,23 @@ impl Render for SftpPanel {
                                                         .left_0()
                                                         .w(px(2.0))
                                                         .rounded(px(1.0))
-                                                        .bg(rgb(BTN_PRIMARY_BG)),
+                                                        .bg(rgb(btn_primary_bg())),
                                                 )
                                             })
                                             .when(is_selected && !is_highlighted, |el| {
-                                                el.bg(rgba(INPUT_SELECTION))
+                                                el.bg(rgba(input_selection()))
                                             })
                                             .child(
                                                 svg()
                                                     .path(icon_path)
                                                     .size(px(14.0))
                                                     .flex_shrink_0()
-                                                    .text_color(rgb(TEXT_MUTED)),
+                                                    .text_color(rgb(text_muted())),
                                             )
                                             .child(
                                                 div()
                                                     .text_xs()
-                                                    .text_color(rgb(TEXT_PRIMARY))
+                                                    .text_color(rgb(text_primary()))
                                                     .whitespace_nowrap()
                                                     .overflow_hidden()
                                                     .child(name.clone()),
@@ -919,8 +919,8 @@ fn render_sftp_action_button(
     enabled: bool,
     on_click: impl Fn(&mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    let color = if enabled { TEXT_MUTED } else { 0x45475a };
-    let hover_bg = rgba((SURFACE_HOVER << 8) | 0xFF);
+    let color = if enabled { text_muted() } else { 0x45475a };
+    let hover_bg = rgba((surface_hover() << 8) | 0xFF);
     div()
         .id(id)
         .flex()

@@ -169,7 +169,7 @@ impl Render for HostsView {
                         div()
                             .text_lg()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(TEXT_PRIMARY))
+                            .text_color(rgb(text_primary()))
                             .child(t!("sidebar.sessions").to_string()),
                     )
                     .child(
@@ -187,7 +187,7 @@ impl Render for HostsView {
                     ),
             )
             // --- Separator ---
-            .child(div().h_px().bg(rgb(BORDER)).mx_4())
+            .child(div().h_px().bg(rgb(border())).mx_4())
             // --- Hosts list (or empty state) ---
             .child(
                 div()
@@ -200,7 +200,7 @@ impl Render for HostsView {
                         |el| {
                             el.flex().items_center().justify_center().child(
                                 div()
-                                    .text_color(rgb(TEXT_MUTED))
+                                    .text_color(rgb(text_muted()))
                                     .text_sm()
                                     .child(t!("sessions.empty").to_string()),
                             )
@@ -284,7 +284,7 @@ fn host_row(
         .px_3()
         .py_2()
         .rounded_md()
-        .bg(rgb(BG_BASE))
+        .bg(rgb(bg_base()))
         .on_double_click(move |_, w, cx| {
             gpui_animation::reset_transition(&row_id_clone);
             on_click(w, cx);
@@ -388,8 +388,8 @@ fn host_row(
             is_highlighted,
             Duration::from_millis(120),
             Linear,
-            |el| el.bg(rgb(SURFACE_ACTIVE)),
-            |el| el.bg(rgb(BG_BASE)),
+            |el| el.bg(rgb(surface_active())),
+            |el| el.bg(rgb(bg_base())),
         )
         // Host info (name + address)
         .child(
@@ -401,13 +401,13 @@ fn host_row(
                 .child(
                     div()
                         .text_sm()
-                        .text_color(rgb(TEXT_PRIMARY))
+                        .text_color(rgb(text_primary()))
                         .child(host.name.clone()),
                 )
                 .child(
                     div()
                         .text_xs()
-                        .text_color(rgb(TEXT_MUTED))
+                        .text_color(rgb(text_muted()))
                         .child(format!("{}@{}:{}", host.username, host.host, host.port)),
                 ),
         )

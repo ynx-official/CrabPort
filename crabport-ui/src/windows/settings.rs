@@ -48,6 +48,7 @@ pub struct SettingsWindow {
     tab: SettingsTab,
     // Dropdown open states (Dropdown is uncontrolled — caller manages it).
     locale_dropdown_open: bool,
+    theme_dropdown_open: bool,
 }
 
 impl SettingsWindow {
@@ -83,6 +84,7 @@ impl SettingsWindow {
         Self {
             tab: SettingsTab::General,
             locale_dropdown_open: false,
+            theme_dropdown_open: false,
         }
     }
 
@@ -97,8 +99,8 @@ impl SettingsWindow {
             .w(px(180.0))
             .flex_shrink_0()
             .border_r_1()
-            .border_color(rgb(BORDER))
-            .bg(rgb(BG_SIDEBAR))
+            .border_color(rgb(border()))
+            .bg(rgb(bg_sidebar()))
             .flex()
             .flex_col()
             .pt_11()
@@ -132,14 +134,14 @@ impl SettingsWindow {
         div()
             .text_sm()
             .font_weight(FontWeight::SEMIBOLD)
-            .text_color(rgb(TEXT_PRIMARY))
+            .text_color(rgb(text_primary()))
             .child(text.into())
     }
 
     fn section_desc(text: impl Into<SharedString>) -> impl IntoElement {
         div()
             .text_xs()
-            .text_color(rgb(TEXT_MUTED))
+            .text_color(rgb(text_muted()))
             .child(text.into())
     }
 
@@ -173,7 +175,7 @@ impl SettingsWindow {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(TEXT_MUTED))
+                            .text_color(rgb(text_muted()))
                             .child(Label::new(store_path)),
                     )
                     .child(
@@ -209,6 +211,10 @@ impl SettingsWindow {
                                 let _ = config::update(|cfg| {
                                     cfg.appearance = Default::default();
                                 });
+                                // Resetting appearance also resets the theme,
+                                // so repaint every window with the default
+                                // palette.
+                                crate::refresh_theme_with(cx);
                                 h.update(cx, |_, cx| {
                                     cx.notify();
                                 });
@@ -228,6 +234,15 @@ impl SettingsWindow {
         } else {
             0
         };
+
+        // Map the persisted theme preset name to a dropdown index. Unknown
+        // names (e.g. a hand-edited config.toml) fall back to the default.
+        let presets = crabport_core::config::ThemeConfig::PRESETS;
+        let current_name = config::snapshot().appearance.theme.name;
+        let theme_idx = presets
+            .iter()
+            .position(|p| *p == current_name.as_str())
+            .unwrap_or(0);
 
         div()
             .size_full()
@@ -260,16 +275,69 @@ impl SettingsWindow {
                                         });
                                     }
                                 })
-                                .on_change(move |idx, _w, cx| {
-                                    let locale = if idx == 1 { "zh-CN" } else { "en" };
-                                    let _ = config::update(|cfg| {
-                                        cfg.appearance.locale = locale.to_string();
-                                    });
-                                    crate::set_locale(locale);
-                                    handle.update(cx, |view, cx| {
-                                        view.locale_dropdown_open = false;
-                                        cx.notify();
-                                    });
+                                .on_change({
+                                    let h = handle.clone();
+                                    move |idx, _w, cx| {
+                                        let locale = if idx == 1 { "zh-CN" } else { "en" };
+                                        let _ = config::update(|cfg| {
+                                            cfg.appearance.locale = locale.to_string();
+                                        });
+                                        crate::set_locale(locale);
+                                        h.update(cx, |view, cx| {
+                                            view.locale_dropdown_open = false;
+                                            cx.notify();
+                                        });
+                                    }
+                                }),
+                        ),
+                    ),
+            )
+            // --- Theme ---
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(Self::section_header(t!(
+                        "window.settings.appearance.section_theme"
+                    )))
+                    .child(Self::section_desc(t!(
+                        "window.settings.appearance.theme_desc"
+                    )))
+                    .child(
+                        div().w(px(240.0)).child(
+                            Dropdown::new("settings-theme")
+                                .item(t!("window.settings.appearance.theme_modern_dark"))
+                                .item(t!("window.settings.appearance.theme_mocha"))
+                                .item(t!("window.settings.appearance.theme_tokyo_night"))
+                                .selected(theme_idx)
+                                .is_open(self.theme_dropdown_open)
+                                .on_toggle({
+                                    let h = handle.clone();
+                                    move |_w, cx| {
+                                        h.update(cx, |view, cx| {
+                                            view.theme_dropdown_open = !view.theme_dropdown_open;
+                                            cx.notify();
+                                        });
+                                    }
+                                })
+                                .on_change({
+                                    let h = handle.clone();
+                                    move |idx, _w, cx| {
+                                        let id = presets.get(idx).copied().unwrap_or("modern-dark");
+                                        let _ = config::update(|cfg| {
+                                            cfg.appearance.theme =
+                                                crabport_core::config::ThemeConfig::preset(id);
+                                        });
+                                        // Reload the cached theme and repaint every
+                                        // open window so the new palette shows up
+                                        // everywhere, not just in Settings.
+                                        crate::refresh_theme_with(cx);
+                                        h.update(cx, |view, cx| {
+                                            view.theme_dropdown_open = false;
+                                            cx.notify();
+                                        });
+                                    }
                                 }),
                         ),
                     ),
@@ -290,7 +358,7 @@ impl Render for SettingsWindow {
 
         div()
             .size_full()
-            .bg(rgb(BG_BASE))
+            .bg(rgb(bg_base()))
             .flex()
             .flex_row()
             .child(self.render_sidebar(cx))

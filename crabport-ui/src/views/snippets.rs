@@ -168,7 +168,7 @@ impl Render for SnippetsView {
                         div()
                             .text_lg()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(TEXT_PRIMARY))
+                            .text_color(rgb(text_primary()))
                             .child(t!("sidebar.snippets").to_string()),
                     )
                     .child(
@@ -186,7 +186,7 @@ impl Render for SnippetsView {
                     ),
             )
             // --- Separator ---
-            .child(div().h_px().bg(rgb(BORDER)).mx_4())
+            .child(div().h_px().bg(rgb(border())).mx_4())
             // --- Snippets list (or empty state) ---
             .child(
                 div()
@@ -199,7 +199,7 @@ impl Render for SnippetsView {
                         |el| {
                             el.flex().items_center().justify_center().child(
                                 div()
-                                    .text_color(rgb(TEXT_MUTED))
+                                    .text_color(rgb(text_muted()))
                                     .text_sm()
                                     .child(t!("snippets.empty").to_string()),
                             )
@@ -268,7 +268,7 @@ fn snippet_row(
         .px_3()
         .py_2()
         .rounded_md()
-        .bg(rgb(BG_BASE))
+        .bg(rgb(bg_base()))
         // Right-click context menu: "Edit" + "Delete".
         .on_mouse_down(MouseButton::Right, {
             let entity = entity.clone();
@@ -365,8 +365,8 @@ fn snippet_row(
             is_highlighted,
             Duration::from_millis(120),
             Linear,
-            |el| el.bg(rgb(SURFACE_ACTIVE)),
-            |el| el.bg(rgb(BG_BASE)),
+            |el| el.bg(rgb(surface_active())),
+            |el| el.bg(rgb(bg_base())),
         )
         // Snippet info (name + command)
         .child(
@@ -375,7 +375,7 @@ fn snippet_row(
                 .flex_col()
                 .min_w_0()
                 .flex_1()
-                .child(div().text_sm().text_color(rgb(TEXT_PRIMARY)).child(
+                .child(div().text_sm().text_color(rgb(text_primary())).child(
                     if snippet.name.is_empty() {
                         snippet_command.clone()
                     } else {
@@ -385,7 +385,7 @@ fn snippet_row(
                 .child(
                     div()
                         .text_xs()
-                        .text_color(rgb(TEXT_MUTED))
+                        .text_color(rgb(text_muted()))
                         .whitespace_nowrap()
                         .overflow_hidden()
                         .text_ellipsis()

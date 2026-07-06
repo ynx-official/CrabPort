@@ -52,8 +52,8 @@ pub fn render_panel(
                 .h_full()
                 .w(px(PANEL_WIDTH))
                 .border_l_1()
-                .border_color(rgb(BORDER))
-                .bg(rgb(BG_SIDEBAR))
+                .border_color(rgb(border()))
+                .bg(rgb(bg_sidebar()))
                 .child(
                     Tabs::new("panel-tabs")
                         .ctrl_style(|s| s.rounded_none())
