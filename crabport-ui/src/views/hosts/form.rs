@@ -166,9 +166,18 @@ impl ConnectionFormState {
         self.name_input.update(cx, |state, cx| {
             state.focus(window, cx);
         });
-        self.port_input.update(cx, |state, cx| {
-            state.set_value("22", window, cx);
-        });
+        // Only set default port for new connections, not when editing an
+        // existing host (where the port was already loaded from the store).
+        if !self.editing {
+            let default_port = match self.kind {
+                ConnectionKind::SSH => "22",
+                ConnectionKind::Telnet => "23",
+                ConnectionKind::Serial => "22",
+            };
+            self.port_input.update(cx, |state, cx| {
+                state.set_value(default_port, window, cx);
+            });
+        }
     }
 
     pub fn close(&mut self) {

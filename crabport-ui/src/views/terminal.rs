@@ -15,6 +15,8 @@ use crabport_core::keybind::{self, KeyAction, TerminalAction};
 use crabport_ssh::CrabPortTunnel;
 use crabport_ssh::backend::HostKeyInfo;
 use crabport_ssh::session::SshConnectionInfo;
+use crabport_telnet::backend::TelnetBackend;
+use crabport_telnet::session::TelnetConnectionInfo;
 use crabport_terminal::pty::PtyBackend;
 use crabport_terminal::terminal::{
     CrabPortMonitor, RemoteStatus, SftpTransferBytes, SftpTransferKind, SftpTransferStage,
@@ -110,6 +112,7 @@ pub struct TerminalView {
     host_id: Option<i64>,
     count: u64,
     ssh_info: Option<SshConnectionInfo>,
+    telnet_info: Option<TelnetConnectionInfo>,
     on_backend_closed: Option<Rc<dyn Fn(&mut App)>>,
     /// Latest SFTP transfer progress pushed by the backend, or `None` when
     /// no transfer is in flight. Updated by the backend-event subscriber;
@@ -138,7 +141,7 @@ impl TerminalView {
             PtyBackend::new(cols as u16, rows as u16)
                 .expect("failed to create pty backend (local PTY is not supported on Windows)"),
         );
-        Self::with_backend(backend, cols, rows, None, count, cx)
+        Self::with_backend(backend, cols, rows, None, None, count, cx)
     }
 
     pub fn with_backend(
@@ -146,10 +149,20 @@ impl TerminalView {
         cols: usize,
         rows: usize,
         ssh_info: Option<SshConnectionInfo>,
+        telnet_info: Option<TelnetConnectionInfo>,
         count: u64,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::with_backend_and_host(backend, cols, rows, String::new(), ssh_info, count, cx)
+        Self::with_backend_and_host(
+            backend,
+            cols,
+            rows,
+            String::new(),
+            ssh_info,
+            telnet_info,
+            count,
+            cx,
+        )
     }
 
     pub fn with_backend_and_host(
@@ -158,12 +171,22 @@ impl TerminalView {
         rows: usize,
         host: String,
         ssh_info: Option<SshConnectionInfo>,
+        telnet_info: Option<TelnetConnectionInfo>,
         count: u64,
         cx: &mut Context<Self>,
     ) -> Self {
         let overlay = Arc::new(Mutex::new(ConnectionOverlayState::new()));
         Self::with_backend_and_host_and_overlay(
-            backend, cols, rows, host, None, overlay, ssh_info, count, cx,
+            backend,
+            cols,
+            rows,
+            host,
+            None,
+            overlay,
+            ssh_info,
+            telnet_info,
+            count,
+            cx,
         )
     }
 
@@ -175,6 +198,7 @@ impl TerminalView {
         host_id: Option<i64>,
         overlay: SharedOverlayState,
         ssh_info: Option<SshConnectionInfo>,
+        telnet_info: Option<TelnetConnectionInfo>,
         count: u64,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -454,6 +478,7 @@ impl TerminalView {
             host_id,
             count,
             ssh_info,
+            telnet_info,
             on_backend_closed: None,
             sftp_progress: None,
             on_sftp_progress_changed: None,
@@ -593,10 +618,35 @@ impl TerminalView {
     }
 
     pub fn reconnect(&mut self, cx: &mut Context<Self>) {
-        let info = match self.ssh_info.clone() {
-            Some(i) => i,
-            None => return,
-        };
+        // Try SSH first, then telnet.
+        let backend: Arc<dyn crabport_terminal::terminal::CrabPortTerminal> =
+            if let Some(info) = self.ssh_info.clone() {
+                let verifier = crate::views::terminal::connection_overlay::make_host_key_verifier(
+                    self.overlay.clone(),
+                );
+                let overlay_cb = self.overlay.clone();
+                Arc::new(crabport_ssh::backend::SshBackend::new(
+                    info,
+                    80,
+                    24,
+                    Arc::new(move |msg: String| {
+                        overlay_cb.lock().log(ConnectionLogLevel::Info, msg);
+                    }),
+                    Some(verifier),
+                ))
+            } else if let Some(info) = self.telnet_info.clone() {
+                let overlay_cb = self.overlay.clone();
+                Arc::new(TelnetBackend::new(
+                    info,
+                    80,
+                    24,
+                    Arc::new(move |msg: String| {
+                        overlay_cb.lock().log(ConnectionLogLevel::Info, msg);
+                    }),
+                ))
+            } else {
+                return;
+            };
 
         self.session.close();
 
@@ -611,20 +661,6 @@ impl TerminalView {
 
         let cols: usize = 80;
         let rows: usize = 24;
-
-        let overlay_cb = self.overlay.clone();
-        let verifier = crate::views::terminal::connection_overlay::make_host_key_verifier(
-            self.overlay.clone(),
-        );
-        let backend = Arc::new(crabport_ssh::backend::SshBackend::new(
-            info,
-            cols as u16,
-            rows as u16,
-            Arc::new(move |msg: String| {
-                overlay_cb.lock().log(ConnectionLogLevel::Info, msg);
-            }),
-            Some(verifier),
-        ));
 
         let session = Arc::new(TerminalSession::new(backend, cols, rows));
         session.start();

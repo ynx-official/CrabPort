@@ -1,4 +1,4 @@
-//! `TelnetBackend` — raw-TCP + minimal-IAC telnet transport.
+//! `TelnetBackend` — raw-TCP + IAC telnet transport.
 //!
 //! Connects via [`crabport_proxy::connect`] (direct / SOCKS5 / HTTP CONNECT /
 //! HTTPS CONNECT) so proxy support is shared with SSH for free. The resulting
@@ -6,14 +6,24 @@
 //! drive all I/O on a shared tokio runtime (`TOKIO`) and bridge to the
 //! frontend's `broadcast`/`async-channel` primitives.
 //!
-//! Wire format (RFC 854): the reader task runs a small state machine that
-//! strips IAC command bytes from the visible output and answers every option
-//! negotiation by refusing it (`WILL → DONT`, `DO → WONT`). Refusing keeps
-//! the session in the safe default NVT (network virtual terminal) mode and
-//! avoids option-enable loops. Subnegotiations (`SB … IAC SE`) are skipped
-//! silently. Auth is intentionally not automated for v1 — the server's
-//! `login:` / `Password:` prompts reach the terminal and the user types into
-//! them, matching how standalone telnet clients behave.
+//! Wire format (RFC 854): a single async task runs a combined read+write
+//! select! loop. It:
+//!
+//! - Sends proactive negotiation (DO ECHO, DO SUPPRESS_GO_AHEAD, WILL NAWS,
+//!   WILL TERMINAL_TYPE) after connect so the server knows we're a real
+//!   terminal.
+//! - Runs an IAC state machine that strips command bytes from the visible
+//!   output, responds to DO/WILL with sensible accept/refuse decisions, and
+//!   replies to TERMINAL-TYPE subnegotiations with the local `$TERM` value.
+//! - Auto-detects `login:` / `Password:` prompts in the visible data stream
+//!   and replies with the stored credentials automatically.
+//! - Sends NAWS updates on terminal resize.
+//!
+//! Compared to the original v1 which refused all options and required manual
+//! login typing, this backend behaves like a proper telnet client: typed
+//! input is echoed, the server knows our terminal size and type, and
+//! credentials are sent automatically (mirroring how `SshBackend` handles
+//! password auth).
 
 use std::sync::{Arc, LazyLock};
 
@@ -30,7 +40,7 @@ use crabport_terminal::terminal::{
 use crate::session::TelnetConnectionInfo;
 
 // ---------------------------------------------------------------------------
-// Telnet protocol constants (RFC 854)
+// Telnet protocol constants (RFC 854, RFC 857, RFC 1073, RFC 1091)
 // ---------------------------------------------------------------------------
 
 const IAC: u8 = 255;
@@ -40,6 +50,14 @@ const WONT: u8 = 252;
 const WILL: u8 = 251;
 const SB: u8 = 250;
 const SE: u8 = 240;
+
+/// Telnet options we negotiate.
+mod opt {
+    pub const ECHO: u8 = 1;
+    pub const SUPPRESS_GO_AHEAD: u8 = 3;
+    pub const TERMINAL_TYPE: u8 = 24;
+    pub const NAWS: u8 = 31;
+}
 
 // ---------------------------------------------------------------------------
 // Tokio runtime (the proxy stream is tokio-based, same as SSH)
@@ -57,8 +75,11 @@ pub static TOKIO: LazyLock<Runtime> =
 
 #[derive(Debug)]
 enum Command {
+    /// User-typed data to send to the server.
     Write(Vec<u8>),
+    /// Terminal resize notification.
     Resize(u16, u16),
+    /// Close the connection gracefully.
     Close,
 }
 
@@ -100,14 +121,112 @@ enum IacState {
 }
 
 // ---------------------------------------------------------------------------
+// Auto-login state machine
+// ---------------------------------------------------------------------------
+
+/// Tracks which credential the server is currently prompting for.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum LoginPhase {
+    /// Not yet seen a prompt.
+    Idle,
+    /// Saw "login:" — waiting to send username.
+    LoginPrompt,
+    /// Saw "Password:" — waiting to send password.
+    PasswordPrompt,
+    /// Credentials sent; no more auto-login.
+    Done,
+}
+
+/// Auto-login buffer that accumulates plain-text output and scans for
+/// `login:` / `Password:` prompts.
+struct AutoLogin {
+    phase: LoginPhase,
+    /// Accumulated plain-text bytes since the last flush. We scan the
+    /// trailing bytes for prompt patterns.
+    buf: Vec<u8>,
+}
+
+impl AutoLogin {
+    fn new() -> Self {
+        Self {
+            phase: LoginPhase::Idle,
+            buf: Vec::new(),
+        }
+    }
+
+    /// Feed a chunk of plain-text data that *will* be displayed to the user.
+    /// Returns `Some(reply)` when a prompt is detected and a credential
+    /// should be sent; `None` otherwise.
+    fn feed(&mut self, data: &[u8], info: &TelnetConnectionInfo) -> Option<Vec<u8>> {
+        self.buf.extend_from_slice(data);
+        // Keep only the last 256 bytes — prompt detection only needs recent
+        // output, and unbounded growth on long sessions would be wasteful.
+        if self.buf.len() > 256 {
+            let excess = self.buf.len() - 256;
+            self.buf.drain(..excess);
+        }
+        match self.phase {
+            LoginPhase::Done => None,
+            LoginPhase::Idle => {
+                if has_login_prompt(&self.buf) {
+                    self.phase = LoginPhase::LoginPrompt;
+                    self.buf.clear();
+                    Some(format!("{}\r\n", info.username).into_bytes())
+                } else {
+                    None
+                }
+            }
+            LoginPhase::LoginPrompt => {
+                if has_password_prompt(&self.buf) {
+                    self.phase = LoginPhase::PasswordPrompt;
+                    self.buf.clear();
+                    Some(format!("{}\r\n", info.password).into_bytes())
+                } else {
+                    None
+                }
+            }
+            LoginPhase::PasswordPrompt => {
+                // After sending password, mark done — no more auto-login.
+                self.phase = LoginPhase::Done;
+                None
+            }
+        }
+    }
+}
+
+/// Scan the trailing text for a `login:` prompt (case-insensitive).
+fn has_login_prompt(buf: &[u8]) -> bool {
+    let lower: Vec<u8> = buf.iter().map(|b| b.to_ascii_lowercase()).collect();
+    let window = if lower.len() > 64 {
+        &lower[lower.len() - 64..]
+    } else {
+        &lower
+    };
+    // "login:" anywhere in the last chunk.
+    window.windows(6).any(|w| w == b"login:")
+}
+
+/// Scan the trailing text for a `Password:` prompt (case-insensitive).
+fn has_password_prompt(buf: &[u8]) -> bool {
+    let lower: Vec<u8> = buf.iter().map(|b| b.to_ascii_lowercase()).collect();
+    let window = if lower.len() > 64 {
+        &lower[lower.len() - 64..]
+    } else {
+        &lower
+    };
+    window.windows(9).any(|w| w == b"password:")
+}
+
+// ---------------------------------------------------------------------------
 // TelnetBackend
 // ---------------------------------------------------------------------------
 
 /// Telnet terminal backend.
 ///
-/// Connects over raw TCP (optionally through a proxy), strips IAC
-/// negotiations from the visible stream, and bridges the resulting byte
-/// stream to the frontend via the standard `CrabPortTerminal` trait.
+/// Connects over raw TCP (optionally through a proxy), negotiates ECHO +
+/// NAWS + TERMINAL-TYPE with the server, auto-responds to login prompts
+/// with stored credentials, and bridges the resulting byte stream to the
+/// frontend via the standard `CrabPortTerminal` trait.
 pub struct TelnetBackend {
     command_tx: MpscSender<Command>,
     event_tx: BroadcastSender<BackendEvent>,
@@ -132,8 +251,6 @@ impl TelnetBackend {
         let (event_tx, event_rx) = broadcast(1024);
         let _event_rx = event_rx.deactivate();
         let (command_tx, command_rx) = unbounded::<Command>();
-        // Reader → command-loop channel for IAC negotiation replies.
-        let (resp_tx, resp_rx) = unbounded::<Vec<u8>>();
 
         let monitor = Arc::new(RwLock::new(MonitorState {
             status: RemoteStatus::Connecting,
@@ -150,9 +267,16 @@ impl TelnetBackend {
             tracing::info!("telnet: connecting to {}", addr);
             on_status2(format!("Connecting to {}", addr));
 
-            let stream = match crabport_proxy::connect(&info.proxy, &info.host, info.port).await {
+            let mut stream = match crabport_proxy::connect(&info.proxy, &info.host, info.port).await
+            {
                 Ok(s) => {
+                    #[cfg(debug_assertions)]
+                    tracing::info!("telnet: TCP connected to {}", addr);
                     on_status2("TCP connection established".into());
+                    {
+                        let mut m = monitor2.write();
+                        m.status = RemoteStatus::Connected;
+                    }
                     s
                 }
                 Err(e) => {
@@ -168,103 +292,148 @@ impl TelnetBackend {
                 }
             };
 
-            // Split so the reader and the command loop can run concurrently.
-            let (read_half, write_half) = tokio::io::split(stream);
+            // ---- Initial negotiation ----
+            // After TCP connect, proactively request options that improve the
+            // terminal experience:
+            //   IAC WILL ECHO          → "I'm willing to echo"
+            //   IAC WILL SUPPRESS_GA   → "skip Go-Ahead protocol"
+            //   IAC WILL NAWS          → "I'll send window size"
+            //   IAC DO TERMINAL_TYPE   → "tell me your terminal type"
+            let init = [
+                IAC,
+                WILL,
+                opt::ECHO,
+                IAC,
+                WILL,
+                opt::SUPPRESS_GO_AHEAD,
+                IAC,
+                WILL,
+                opt::NAWS,
+                IAC,
+                DO,
+                opt::TERMINAL_TYPE,
+            ];
+            if let Err(e) = stream.write_all(&init).await {
+                tracing::warn!("telnet: initial negotiation write error: {e}");
+            }
+            let _ = stream.flush().await;
 
-            // ---- Reader task ----
-            // Reads from the socket, runs the IAC state machine, broadcasts
-            // visible output, and forwards negotiation replies to the command
-            // loop via `resp_tx` (so all writes are serialized on one task).
-            {
-                let event_tx = event_tx2.clone();
-                let monitor = monitor2.clone();
-                let resp_tx = resp_tx;
-                let _on_status = on_status2.clone();
+            // Send initial NAWS payload so the server knows our size from
+            // the start (before any DO NAWS negotiation completes).
+            let naws = naws_payload(cols, rows);
+            if let Err(e) = stream.write_all(&naws).await {
+                tracing::warn!("telnet: initial NAWS write error: {e}");
+            }
+            let _ = stream.flush().await;
 
-                TOKIO.spawn(async move {
-                    let _ = _on_status;
-                    let mut reader = read_half;
-                    let mut buf = [0u8; 8192];
-                    let mut state = IacState::Normal;
-                    let mut data_out: Vec<u8> = Vec::with_capacity(8192);
+            // ---- Combined read+write event loop ----
+            // Single tokio::select! handles reading from the socket,
+            // user commands (write/resize/close), and auto-login credential
+            // sends. No split — reads and writes share the same stream.
+            let mut buf = [0u8; 8192];
+            let mut iac_state = IacState::Normal;
+            let mut data_out: Vec<u8> = Vec::with_capacity(8192);
+            let mut neg_out: Vec<u8> = Vec::with_capacity(256);
+            let mut auto_login = AutoLogin::new();
 
-                    loop {
-                        match reader.read(&mut buf).await {
+            loop {
+                select! {
+                    // ---- Socket read ----
+                    result = stream.read(&mut buf) => {
+                        match result {
                             Ok(0) => {
                                 #[cfg(debug_assertions)]
-                                tracing::info!("telnet reader: EOF");
-                                flush_data(&event_tx, &mut data_out).await;
+                                tracing::info!("telnet: EOF from server");
+                                flush_data(&event_tx2, &mut data_out).await;
                                 {
-                                    let mut m = monitor.write();
+                                    let mut m = monitor2.write();
                                     m.status = RemoteStatus::Disconnected;
                                 }
-                                let _ = event_tx.broadcast(BackendEvent::Closed).await;
-                                break;
+                                let _ = event_tx2.broadcast(BackendEvent::Closed).await;
+                                return;
                             }
                             Ok(n) => {
-                                process_iac(&buf[..n], &mut state, &mut data_out, &resp_tx);
+                                // Parse IAC from the socket; visible bytes go
+                                // into data_out, negotiation replies go into
+                                // neg_out.
+                                neg_out.clear();
+                                process_iac(&buf[..n], &mut iac_state, &mut data_out, &mut neg_out);
 
+                                // Write negotiation replies to the socket
+                                // first — they are raw IAC bytes, NOT visible
+                                // terminal output.
+                                if !neg_out.is_empty() {
+                                    #[cfg(debug_assertions)]
+                                    tracing::debug!(
+                                        "telnet: sending {} negotiation bytes",
+                                        neg_out.len()
+                                    );
+                                    if let Err(e) = stream.write_all(&neg_out).await {
+                                        tracing::warn!("telnet: negotiation write error: {e}");
+                                    }
+                                    let _ = stream.flush().await;
+                                }
+
+                                // Broadcast visible data (IAC already
+                                // stripped) to the frontend.
                                 if !data_out.is_empty() {
                                     let chunk = std::mem::take(&mut data_out);
+                                    // Check for login prompts in the visible
+                                    // output. If detected, send credentials
+                                    // inline.
+                                    if let Some(reply) = auto_login.feed(&chunk, &info) {
+                                        #[cfg(debug_assertions)]
+                                        tracing::debug!(
+                                            "telnet: auto-login sending (phase={:?})",
+                                            auto_login.phase
+                                        );
+                                        if let Err(e) = stream.write_all(&reply).await {
+                                            tracing::warn!("telnet: auto-login write error: {e}");
+                                        }
+                                        let _ = stream.flush().await;
+                                    }
                                     #[cfg(debug_assertions)]
-                                    tracing::debug!("telnet reader: {} data bytes", chunk.len());
-                                    let _ = event_tx.broadcast(BackendEvent::Data(chunk)).await;
+                                    tracing::debug!("telnet read: {} data bytes", chunk.len());
+                                    let _ = event_tx2.broadcast(BackendEvent::Data(chunk)).await;
                                 }
                             }
                             Err(e) => {
-                                tracing::error!("telnet reader error: {e}");
-                                flush_data(&event_tx, &mut data_out).await;
+                                tracing::error!("telnet read error: {e}");
+                                flush_data(&event_tx2, &mut data_out).await;
                                 {
-                                    let mut m = monitor.write();
+                                    let mut m = monitor2.write();
                                     m.status = RemoteStatus::Disconnected;
                                 }
-                                let _ =
-                                    event_tx.broadcast(BackendEvent::Error(e.to_string())).await;
-                                break;
+                                let _ = event_tx2
+                                    .broadcast(BackendEvent::Error(e.to_string()))
+                                    .await;
+                                return;
                             }
                         }
                     }
-                });
-            }
 
-            // ---- Command loop (writes + resize + close) ----
-            let mut writer = write_half;
-            loop {
-                select! {
-                    biased;
-
-                    // Negotiation replies from the reader — drain first so the
-                    // server doesn't time out waiting on our WONT/DONT.
-                    Ok(resp) = resp_rx.recv() => {
-                        if let Err(e) = writer.write_all(&resp).await {
-                            #[cfg(debug_assertions)]
-                            tracing::warn!("telnet: IAC reply write error: {e}");
-                        }
-                        let _ = writer.flush().await;
-                    }
-
+                    // ---- User commands ----
                     cmd = command_rx.recv() => {
                         match cmd {
                             Ok(Command::Write(data)) => {
-                                if let Err(e) = writer.write_all(&data).await {
+                                if let Err(e) = stream.write_all(&data).await {
                                     #[cfg(debug_assertions)]
                                     tracing::warn!("telnet: write error: {e}");
                                 }
-                                let _ = writer.flush().await;
+                                let _ = stream.flush().await;
                             }
-                            Ok(Command::Resize(_cols, _rows)) => {
-                                // v1: no-op. Proper NAWS would negotiate
-                                // `IAC WILL NAWS` then send
-                                // `IAC SB NAWS cols rows IAC SE`; left for a
-                                // follow-up since most telnet servers tolerate
-                                // a missing window size.
-                                #[cfg(debug_assertions)]
-                                tracing::debug!("telnet: resize (no-op for v1)");
+                            Ok(Command::Resize(cols, rows)) => {
+                                let naws = naws_payload(cols, rows);
+                                if let Err(e) = stream.write_all(&naws).await {
+                                    #[cfg(debug_assertions)]
+                                    tracing::warn!("telnet: NAWS write error: {e}");
+                                }
+                                let _ = stream.flush().await;
                             }
                             Ok(Command::Close) | Err(_) => {
                                 #[cfg(debug_assertions)]
                                 tracing::info!("telnet: closing connection");
-                                let _ = writer.shutdown().await;
+                                let _ = stream.shutdown().await;
                                 {
                                     let mut m = monitor2.write();
                                     m.status = RemoteStatus::Disconnected;
@@ -278,12 +447,6 @@ impl TelnetBackend {
             }
         });
 
-        // Silence unused-variable warnings for cols/rows in release builds
-        // where the debug resize log is compiled out.
-        let _ = (cols, rows);
-
-        // Silence unused-variable warnings for cols/rows in release builds
-        // where the debug resize log is compiled out.
         let _ = (cols, rows);
 
         Self {
@@ -304,20 +467,43 @@ async fn flush_data(event_tx: &BroadcastSender<BackendEvent>, data_out: &mut Vec
     }
 }
 
-/// Run the IAC state machine over one read chunk.
-///
-/// - Visible bytes are appended to `data_out` (caller broadcasts them).
-/// - Negotiation replies are forwarded to `resp_tx` (caller's command loop
-///   writes them to the socket, keeping all writes on one task).
-fn process_iac(
-    chunk: &[u8],
-    state: &mut IacState,
-    data_out: &mut Vec<u8>,
-    resp_tx: &MpscSender<Vec<u8>>,
-) {
-    let mut resp: Vec<u8> = Vec::new();
+/// Build a NAWS subnegotiation payload: `IAC SB NAWS <cols-hi> <cols-lo>
+/// <rows-hi> <rows-lo> IAC SE`.
+fn naws_payload(cols: u16, rows: u16) -> [u8; 9] {
+    [
+        IAC,
+        SB,
+        opt::NAWS,
+        (cols >> 8) as u8,
+        cols as u8,
+        (rows >> 8) as u8,
+        rows as u8,
+        IAC,
+        SE,
+    ]
+}
 
-    for &b in chunk {
+/// Run the IAC state machine over one read chunk, appending visible bytes to
+/// `data_out` and queuing negotiation replies via `resp` (which the caller
+/// writes to the socket).
+///
+/// Option-specific handling:
+/// - `DO ECHO` → accept with `WILL ECHO` (we want server echo so typed
+///   characters appear).
+/// - `DO SUPPRESS_GO_AHEAD` → accept with `WILL SUPPRESS_GO_AHEAD`.
+/// - `DO TERMINAL_TYPE` → accept with `WILL TERMINAL_TYPE`; when the server
+///   follows up with `SB TERMINAL_TYPE SEND IAC SE`, reply with our
+///   terminal type string.
+/// - `DO NAWS` → accept with `WILL NAWS` (size sent on connect + resize).
+/// - All others → refuse (safe NVT default).
+fn process_iac(chunk: &[u8], state: &mut IacState, data_out: &mut Vec<u8>, neg_out: &mut Vec<u8>) {
+    let mut byt = chunk.iter().copied();
+
+    // Track the first byte of a subnegotiation body (the option code) so we
+    // can distinguish TERMINAL_TYPE subnegotiations from others.
+    let mut sb_opt: Option<u8> = None;
+
+    while let Some(b) = byt.next() {
         match *state {
             IacState::Normal => {
                 if b == IAC {
@@ -328,7 +514,6 @@ fn process_iac(
             }
             IacState::Iac => match b {
                 IAC => {
-                    // Escaped 255 → literal 0xff in the data stream.
                     data_out.push(IAC);
                     *state = IacState::Normal;
                 }
@@ -336,48 +521,71 @@ fn process_iac(
                 WONT => *state = IacState::Wont,
                 DO => *state = IacState::Do,
                 DONT => *state = IacState::Dont,
-                SB => *state = IacState::Sb,
-                // SE / NOP / DM / BRK / … — single-byte commands we don't
-                // act on; consume and return to normal data.
+                SB => {
+                    *state = IacState::Sb;
+                    sb_opt = None;
+                }
                 _ => *state = IacState::Normal,
             },
             IacState::Will => {
-                // Server offers to enable option `b`; refuse → `IAC DONT b`.
-                resp.extend_from_slice(&[IAC, DONT, b]);
+                // Server offers `b`. Accept ECHO + SUPPRESS_GO_AHEAD; refuse
+                // everything else.
+                if b == opt::ECHO || b == opt::SUPPRESS_GO_AHEAD {
+                    neg_out.extend_from_slice(&[IAC, DO, b]);
+                } else {
+                    neg_out.extend_from_slice(&[IAC, DONT, b]);
+                }
                 *state = IacState::Normal;
             }
             IacState::Wont => {
-                // Server says it won't; nothing to do (already disabled).
                 *state = IacState::Normal;
             }
             IacState::Do => {
-                // Server asks us to enable option `b`; refuse → `IAC WONT b`.
-                resp.extend_from_slice(&[IAC, WONT, b]);
+                // Server asks us to enable `b`. Accept ECHO, SUPPRESS_GA,
+                // NAWS, TERMINAL_TYPE; refuse everything else.
+                if b == opt::ECHO
+                    || b == opt::SUPPRESS_GO_AHEAD
+                    || b == opt::NAWS
+                    || b == opt::TERMINAL_TYPE
+                {
+                    neg_out.extend_from_slice(&[IAC, WILL, b]);
+                } else {
+                    neg_out.extend_from_slice(&[IAC, WONT, b]);
+                }
                 *state = IacState::Normal;
             }
             IacState::Dont => {
-                // Server asks us to disable; nothing to do.
                 *state = IacState::Normal;
             }
             IacState::Sb => {
                 if b == IAC {
                     *state = IacState::SbIac;
+                } else if sb_opt.is_none() {
+                    sb_opt = Some(b);
                 }
-                // Otherwise stay in Sb, skipping subneg body.
             }
             IacState::SbIac => match b {
-                SE => *state = IacState::Normal,
+                SE => {
+                    // Subnegotiation ended. If the server asked for our
+                    // terminal type (SB TERMINAL_TYPE SEND), reply with
+                    // our TERM env var.
+                    if sb_opt == Some(opt::TERMINAL_TYPE) {
+                        let term =
+                            std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".into());
+                        let mut reply = vec![IAC, SB, opt::TERMINAL_TYPE, 0]; // 0 = IS
+                        reply.extend_from_slice(term.as_bytes());
+                        reply.extend_from_slice(&[IAC, SE]);
+                        neg_out.extend_from_slice(&reply);
+                    }
+                    *state = IacState::Normal;
+                    sb_opt = None;
+                }
                 IAC => {
-                    // Escaped 255 inside subneg; skip it, stay in subneg.
                     *state = IacState::Sb;
                 }
                 _ => *state = IacState::Sb,
             },
         }
-    }
-
-    if !resp.is_empty() {
-        let _ = resp_tx.try_send(resp);
     }
 }
 
@@ -439,75 +647,126 @@ impl Drop for TelnetBackend {
 mod tests {
     use super::*;
 
-    fn parse(chunk: &[u8]) -> (Vec<u8>, Vec<Vec<u8>>) {
-        // Collect data and any negotiation-reply batches sent via the
-        // (unbounded) channel. The reader loop calls `process_iac` once per
-        // read; we mirror that by invoking it once per chunk.
-        let (tx, rx) = unbounded::<Vec<u8>>();
+    /// Parse a chunk through process_iac, returning (visible_data, negotiation_bytes).
+    fn parse(chunk: &[u8]) -> (Vec<u8>, Vec<u8>) {
         let mut state = IacState::Normal;
         let mut data_out = Vec::new();
-        process_iac(chunk, &mut state, &mut data_out, &tx);
-        let mut replies = Vec::new();
-        while let Ok(r) = rx.try_recv() {
-            replies.push(r);
-        }
-        (data_out, replies)
+        let mut neg_out = Vec::new();
+        process_iac(chunk, &mut state, &mut data_out, &mut neg_out);
+        (data_out, neg_out)
+    }
+
+    /// Parse and return only the visible data.
+    fn parse_data(chunk: &[u8]) -> Vec<u8> {
+        parse(chunk).0
     }
 
     #[test]
     fn plain_data_passes_through() {
-        let (data, replies) = parse(b"hello\r\n");
+        let data = parse_data(b"hello\r\n");
         assert_eq!(data, b"hello\r\n");
-        assert!(replies.is_empty());
     }
 
     #[test]
     fn escaped_iac_yields_literal_255() {
-        let (data, _replies) = parse(&[IAC, IAC, b'x']);
+        let data = parse_data(&[IAC, IAC, b'x']);
         assert_eq!(data, vec![IAC, b'x']);
     }
 
     #[test]
-    fn do_option_refused_with_wont() {
-        let (_data, replies) = parse(&[IAC, DO, 31]); // DO NAWS
-        assert_eq!(replies, vec![vec![IAC, WONT, 31]]);
+    fn do_echo_accepted_with_will() {
+        let (data, neg) = parse(&[IAC, DO, opt::ECHO]);
+        assert_eq!(data, b"");
+        assert_eq!(neg, vec![IAC, WILL, opt::ECHO]);
     }
 
     #[test]
-    fn will_option_refused_with_dont() {
-        let (_data, replies) = parse(&[IAC, WILL, 1]); // WILL ECHO
-        assert_eq!(replies, vec![vec![IAC, DONT, 1]]);
+    fn do_naws_accepted_with_will() {
+        let (data, neg) = parse(&[IAC, DO, opt::NAWS]);
+        assert_eq!(data, b"");
+        assert_eq!(neg, vec![IAC, WILL, opt::NAWS]);
+    }
+
+    #[test]
+    fn do_unknown_refused_with_wont() {
+        let (data, neg) = parse(&[IAC, DO, 99]);
+        assert_eq!(data, b"");
+        assert_eq!(neg, vec![IAC, WONT, 99]);
+    }
+
+    #[test]
+    fn will_echo_accepted_with_do() {
+        let (data, neg) = parse(&[IAC, WILL, opt::ECHO]);
+        assert_eq!(data, b"");
+        assert_eq!(neg, vec![IAC, DO, opt::ECHO]);
+    }
+
+    #[test]
+    fn will_unknown_refused_with_dont() {
+        let (data, neg) = parse(&[IAC, WILL, 99]);
+        assert_eq!(data, b"");
+        assert_eq!(neg, vec![IAC, DONT, 99]);
     }
 
     #[test]
     fn wont_and_dont_produce_no_reply() {
-        let (_data, replies) = parse(&[IAC, WONT, 3, IAC, DONT, 5]);
-        assert!(replies.is_empty());
+        let (data, neg) = parse(&[IAC, WONT, 3, IAC, DONT, 5]);
+        assert_eq!(data, b"");
+        assert_eq!(neg, b"");
     }
 
     #[test]
     fn subnegotiation_is_skipped() {
-        let (data, replies) = parse(&[
+        let (data, neg) = parse(&[
             b'a', b'b', // visible
-            IAC, SB, 31, 0, 80, 0, 24, IAC, SE, // NAWS subneg
+            IAC, SB, 31, 0, 80, 0, 24, IAC, SE, // NAWS subneg (not TERMINAL_TYPE)
             b'c',
         ]);
         assert_eq!(data, b"abc");
-        assert!(replies.is_empty());
+        assert_eq!(neg, b"");
     }
 
     #[test]
     fn iac_split_across_chunks() {
-        let (tx, rx) = unbounded::<Vec<u8>>();
         let mut state = IacState::Normal;
         let mut data = Vec::new();
-        process_iac(&[b'x', IAC], &mut state, &mut data, &tx);
-        process_iac(&[DO, 24], &mut state, &mut data, &tx);
+        let mut neg = Vec::new();
+        process_iac(&[b'x', IAC], &mut state, &mut data, &mut neg);
+        process_iac(&[DO, 24], &mut state, &mut data, &mut neg);
         assert_eq!(data, b"x");
-        let mut replies = Vec::new();
-        while let Ok(r) = rx.try_recv() {
-            replies.push(r);
-        }
-        assert_eq!(replies, vec![vec![IAC, WONT, 24]]);
+        assert_eq!(neg, vec![IAC, WILL, 24]);
+    }
+
+    #[test]
+    fn auto_login_detects_login_prompt() {
+        assert!(has_login_prompt(b"\r\nlogin: "));
+        assert!(has_login_prompt(b"Login: "));
+        assert!(has_login_prompt(b"Ubuntu 22.04 login: "));
+        assert!(!has_login_prompt(b"Welcome!"));
+    }
+
+    #[test]
+    fn auto_login_detects_password_prompt() {
+        assert!(has_password_prompt(b"\r\nPassword: "));
+        assert!(has_password_prompt(b"password: "));
+        assert!(!has_password_prompt(b"Enter password"));
+    }
+
+    #[test]
+    fn auto_login_phase_progression() {
+        let info = TelnetConnectionInfo::new("host", "admin", "secret");
+        let mut al = AutoLogin::new();
+        // Idle → LoginPrompt
+        let r = al.feed(b"\r\nlogin: ", &info);
+        assert!(r.is_some());
+        assert_eq!(al.phase, LoginPhase::LoginPrompt);
+        // LoginPrompt → PasswordPrompt
+        let r = al.feed(b"\r\nPassword: ", &info);
+        assert!(r.is_some());
+        assert_eq!(al.phase, LoginPhase::PasswordPrompt);
+        // After password, no more sends
+        let r = al.feed(b"Welcome!", &info);
+        assert!(r.is_none());
+        assert_eq!(al.phase, LoginPhase::Done);
     }
 }

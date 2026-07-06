@@ -193,6 +193,7 @@ impl CrabportApp {
                 host_id,
                 overlay,
                 Some(info_for_view),
+                None, // no TelnetConnectionInfo for SSH
                 id,
                 cx,
             )
@@ -310,6 +311,7 @@ impl CrabportApp {
         if let Some(p) = proxy {
             info = info.with_proxy(p);
         }
+        let info_for_view = info.clone();
 
         let cols: usize = 80;
         let rows: usize = 24;
@@ -342,7 +344,8 @@ impl CrabportApp {
                 format!("{}@{}", username, host),
                 host_id,
                 overlay,
-                None, // no SshConnectionInfo for telnet
+                None,                // no SshConnectionInfo for telnet
+                Some(info_for_view), // TelnetConnectionInfo for reconnect
                 id,
                 cx,
             )
