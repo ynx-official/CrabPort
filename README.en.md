@@ -23,18 +23,13 @@ CrabPort aims to be a simple and easy-to-use cross-platform SSH client, integrat
 
 ### Key Features
 
-- **Multi-tab terminal** — Built on `russh` + `alacritty_terminal`, with SSH / Telnet / Serial / local-terminal support, multi-session, tab switching, and full ANSI color rendering
-- **SFTP file management** — Visual directory browsing, file/directory upload & download, multi-select batch operations
-- **SSH port forwarding / tunnels** — Local (`-L`), Remote (`-R`), and Dynamic (`-D` SOCKS) tunnels; create, start/stop, edit, and delete from the UI
-- **Proxy connections** — SOCKS5, HTTP CONNECT, and HTTPS CONNECT proxies; per-host proxy config with optional username/password auth
-- **Secure credential storage** — Keys and passwords encrypted with AES-256-GCM; the encryption key is a locally generated random file
-- **Command history** — Automatically captures terminal command history with search, save-as-snippet, and one-click paste/run
-- **Snippet management** — Globally saved common commands with real-time search and quick execution
-- **Host management** — Persistent connection profiles with favorites and sorting by last login
-- **SSH host-key verification** — Prompts for confirmation on first connect, then auto-verifies on subsequent connects
-- **Settings panel** — Appearance & language (Chinese / English) controls, persisted live to `config.toml`
-- **Terminal key bindings** — Platform-native shortcuts (copy/paste) + Ctrl/Shift/Alt modifiers + function keys / arrow keys / Home/End with full VT escape sequences
-- **Cross-platform** — Native support for macOS / Linux / Windows on both x64 and arm64 architectures
+- **Multi-tab terminal** — SSH / Telnet / Serial / local terminal, multi-session switching
+- **SFTP file management** — Visual directory browsing with batch upload & download
+- **SSH tunnels** — Local / Remote / Dynamic (SOCKS) port forwarding
+- **Proxy connections** — SOCKS5 / HTTP(S) proxy, per-host config
+- **Encrypted credential storage** — AES-256-GCM at rest
+- **Command history & snippets** — Auto-capture, search, and quick execution
+- **Cross-platform** — macOS / Linux / Windows, x64 and arm64
 
 ## Screenshots
 
