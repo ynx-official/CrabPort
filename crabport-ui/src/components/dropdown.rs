@@ -5,6 +5,10 @@ use gpui_component::scroll::ScrollableElement;
 use std::f32::consts::PI;
 use std::{rc::Rc, time::Duration};
 
+/// Rotation (in radians) of the trigger chevron when the menu is open.
+/// PI = 180°, so the down-chevron points up when open.
+const CHEVRON_OPEN_ROTATION: f32 = PI;
+
 // ---------------------------------------------------------------------------
 // Dropdown
 // ---------------------------------------------------------------------------
@@ -169,15 +173,39 @@ impl RenderOnce for Dropdown {
         // ------------------------------------------------------------------
         let trigger_id = ElementId::Name(format!("{id_str}-trigger").into());
 
+        // Chevron: rotate 180° when open. We animate via GPUI's built-in
+        // `with_animation` rather than `gpui-animation`'s `transition_when_else`,
+        // because the latter only interpolates `StyleRefinement` fields (bg,
+        // opacity, size…) and SVG `Transformation` is not part of the style.
+        //
+        // The animation ID encodes `is_open` so that flipping the toggle
+        // creates a fresh `AnimationState` (start = `Instant::now()`) and the
+        // rotation re-runs from the opposite end. Without this, the cached
+        // state would report `delta > 1` (animation already finished) and the
+        // chevron would snap instead of rotating.
+        //
+        // For the close animation we must animate *back* from PI to 0, so the
+        // rotation is `(1 - delta) * PI` (start = PI, end = 0). Computing it as
+        // `delta * 0` would leave the chevron at 0 the whole time — no visible
+        // reverse motion.
+        let chevron_anim_id = ElementId::Name(format!("{id_str}-chevron-{}", is_open).into());
+
         let chevron = svg()
             .path("icons/chevron-down.svg")
             .size_4()
             .text_color(rgb(text_muted()))
-            .with_transformation(Transformation::rotate(radians(if is_open {
-                PI
-            } else {
-                0.0
-            })));
+            .with_animation(
+                chevron_anim_id,
+                Animation::new(Duration::from_millis(200)).with_easing(ease_in_out),
+                move |this, delta| {
+                    let angle = if is_open {
+                        delta * CHEVRON_OPEN_ROTATION
+                    } else {
+                        (1.0 - delta) * CHEVRON_OPEN_ROTATION
+                    };
+                    this.with_transformation(Transformation::rotate(radians(angle)))
+                },
+            );
 
         let trigger = div()
             .id(trigger_id)
@@ -189,7 +217,11 @@ impl RenderOnce for Dropdown {
             .h_9()
             .px_3()
             .rounded_md()
-            .bg(rgb(if disabled { input_bg_disabled() } else { bg_base() }))
+            .bg(rgb(if disabled {
+                input_bg_disabled()
+            } else {
+                bg_base()
+            }))
             .border_1()
             .border_color(rgb(border()))
             .when_else(

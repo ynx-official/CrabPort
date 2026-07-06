@@ -12,6 +12,7 @@ use crate::components::notification::{Notification, NotificationLevel};
 use crate::views::hosts::{AuthKind, ConnectionFormState, ConnectionHost, ConnectionKind};
 use crabport_core::credential::{
     CredentialEntry, CredentialKind as CoreCredentialKind, HostEntry, HostKind as CoreHostKind,
+    PrivateKeyKind,
 };
 
 use super::CrabportApp;
@@ -160,9 +161,23 @@ impl CrabportApp {
                     form.passphrase_input.update(cx, |state, cx| {
                         state.set_value(&c.secret, window, cx);
                     });
-                    form.private_key_input.update(cx, |state, cx| {
-                        state.set_value(&c.private_key, window, cx);
-                    });
+                    // Restore the private key into the field it was originally
+                    // entered in: PEM content → textarea, file path → read-only
+                    // path input. `decode_private_key` resolves both at connect
+                    // time, so keeping them in the right field is purely for
+                    // the user's mental model when editing.
+                    match c.private_key_kind {
+                        PrivateKeyKind::Path => {
+                            form.private_key_path_input.update(cx, |state, cx| {
+                                state.set_value(&c.private_key, window, cx);
+                            });
+                        }
+                        PrivateKeyKind::Content => {
+                            form.private_key_input.update(cx, |state, cx| {
+                                state.set_value(&c.private_key, window, cx);
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -221,6 +236,7 @@ impl CrabportApp {
                         passphrase,
                         auth_kind,
                         private_key,
+                        private_key_kind,
                         proxy_config,
                     ) = {
                         let f = app.connection_form.as_ref().unwrap();
@@ -238,22 +254,24 @@ impl CrabportApp {
                         let pw = f.pass_text(cx);
                         let pp = f.passphrase_text(cx);
                         let ak = f.auth_kind;
-                        let pk = f.private_key_text(cx);
+                        let (pk, pk_kind) = f.private_key_value(cx);
                         let pc = f.proxy_config(cx);
-                        (n, h, p, u, pw, pp, ak, pk, pc)
+                        (n, h, p, u, pw, pp, ak, pk, pk_kind, pc)
                     };
                     app.close_connection_form(cx);
 
-                    let (cred_kind, secret, pk) = match auth_kind {
+                    let (cred_kind, secret, pk, pk_kind) = match auth_kind {
                         AuthKind::Password => (
                             CoreCredentialKind::Password,
                             password.clone(),
                             String::new(),
+                            PrivateKeyKind::Content,
                         ),
                         AuthKind::Certificate => (
                             CoreCredentialKind::Certificate,
                             passphrase.clone(),
                             private_key.clone(),
+                            private_key_kind,
                         ),
                     };
 
@@ -268,6 +286,7 @@ impl CrabportApp {
                         anonymous: true,
                         secret,
                         private_key: pk,
+                        private_key_kind: pk_kind,
                         public_key: String::new(),
                         certificate: String::new(),
                     };

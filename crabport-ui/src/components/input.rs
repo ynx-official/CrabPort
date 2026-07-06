@@ -66,6 +66,12 @@ pub struct StyledInput {
     /// Read from your view state; updated via InputState's on_focus/on_blur.
     focused: bool,
     disabled: bool,
+    /// When `true`, the underlying `Input` widget refuses keyboard edits but
+    /// the shell keeps its normal (non-dimmed) appearance. Used by read-only
+    /// fields that are filled programmatically (e.g. the private-key file
+    /// path, which is set only via the Browse button) so an interactive
+    /// suffix button inside the shell doesn't look disabled.
+    input_disabled: bool,
     height: Pixels,
     multi_line: bool,
     /// Optional override for the input text size (default inherits from
@@ -84,6 +90,7 @@ impl StyledInput {
             error: None,
             focused: false,
             disabled: false,
+            input_disabled: false,
             height: px(32.0),
             multi_line: false,
             input_size: None,
@@ -121,6 +128,15 @@ impl StyledInput {
 
     pub fn disabled(mut self, v: bool) -> Self {
         self.disabled = v;
+        self
+    }
+
+    /// Disable keyboard editing of the underlying `Input` widget but leave
+    /// the shell visually enabled. See [`Self::input_disabled`] field docs.
+    /// Implies the same effect as `disabled(true)` on the `Input` component
+    /// without the `opacity(0.5)` / `cursor_not_allowed()` dimming.
+    pub fn input_disabled(mut self, v: bool) -> Self {
+        self.input_disabled = v;
         self
     }
 
@@ -167,6 +183,9 @@ impl RenderOnce for StyledInput {
         let focused = self.focused;
         let height = self.height;
         let disabled = self.disabled;
+        // The underlying Input widget is disabled when either flag is set —
+        // `disabled` dims the whole shell, `input_disabled` only blocks edits.
+        let input_disabled = self.disabled || self.input_disabled;
         let multi_line = self.multi_line;
 
         // Background priority: disabled > focus > rest.
@@ -267,6 +286,7 @@ impl RenderOnce for StyledInput {
                         Input::new(&state)
                             .appearance(false)
                             .bordered(false)
+                            .disabled(input_disabled)
                             .when_some(input_size, |input, size| input.with_size(size))
                             .when(multi_line, |input| input.h_full()),
                     ),

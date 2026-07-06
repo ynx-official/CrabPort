@@ -14,7 +14,7 @@ use crate::components::notification::{Notification, NotificationLevel};
 use crate::views::hosts::{AuthKind, ConnectionFormState, ConnectionHost, ConnectionKind};
 use crabport_core::credential::{
     CredentialEntry, CredentialKind as CoreCredentialKind, HostEntry, HostKind as CoreHostKind,
-    ProxyConfig, ProxyEntry,
+    PrivateKeyKind, ProxyConfig, ProxyEntry,
 };
 
 use super::CrabportApp;
@@ -65,6 +65,7 @@ impl CrabportApp {
                         passphrase,
                         auth_kind,
                         private_key,
+                        private_key_kind,
                         proxy_config,
                     ) = {
                         let f = app.connection_form.as_ref().unwrap();
@@ -75,23 +76,25 @@ impl CrabportApp {
                         let pw = f.pass_text(cx);
                         let pp = f.passphrase_text(cx);
                         let ak = f.auth_kind;
-                        let pk = f.private_key_text(cx);
+                        let (pk, pk_kind) = f.private_key_value(cx);
                         let pc = f.proxy_config(cx);
-                        (n, h, p, u, pw, pp, ak, pk, pc)
+                        (n, h, p, u, pw, pp, ak, pk, pk_kind, pc)
                     };
                     app.close_connection_form(cx);
 
                     // Persist credential for this host
-                    let (cred_kind, secret, pk) = match auth_kind {
+                    let (cred_kind, secret, pk, pk_kind) = match auth_kind {
                         AuthKind::Password => (
                             CoreCredentialKind::Password,
                             password.clone(),
                             String::new(),
+                            PrivateKeyKind::Content,
                         ),
                         AuthKind::Certificate => (
                             CoreCredentialKind::Certificate,
                             passphrase.clone(),
                             private_key.clone(),
+                            private_key_kind,
                         ),
                     };
                     let cred = CredentialEntry {
@@ -101,6 +104,7 @@ impl CrabportApp {
                         anonymous: true,
                         secret,
                         private_key: pk,
+                        private_key_kind: pk_kind,
                         public_key: String::new(),
                         certificate: String::new(),
                     };

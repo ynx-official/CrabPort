@@ -6,7 +6,7 @@
 
 use rusqlite::{OptionalExtension, params};
 
-use crate::credential::{CredentialEntry, CredentialKind, HostEntry};
+use crate::credential::{CredentialEntry, CredentialKind, HostEntry, PrivateKeyKind};
 use crate::crypto;
 use crate::store::StoreError;
 
@@ -20,7 +20,7 @@ impl Store {
     pub fn credentials(&self) -> Result<Vec<CredentialEntry>, StoreError> {
         let mut stmt = self
             .db
-            .prepare("SELECT id, name, kind, anonymous, secret, private_key, public_key, certificate FROM credentials ORDER BY id")
+            .prepare("SELECT id, name, kind, anonymous, secret, private_key, private_key_kind, public_key, certificate FROM credentials ORDER BY id")
             .map_err(|e| StoreError::Db(e.to_string()))?;
 
         let key = self.enc_key.clone();
@@ -30,8 +30,9 @@ impl Store {
                 let anon: bool = row.get::<_, i64>(3)? != 0;
                 let secret_blob: Vec<u8> = row.get(4)?;
                 let pk_blob: Vec<u8> = row.get(5)?;
-                let pubk_blob: Vec<u8> = row.get(6)?;
-                let cert_blob: Vec<u8> = row.get(7)?;
+                let pk_kind_str: String = row.get(6)?;
+                let pubk_blob: Vec<u8> = row.get(7)?;
+                let cert_blob: Vec<u8> = row.get(8)?;
 
                 // Decrypt outside query_map to avoid capturing self
                 let secret = if secret_blob.is_empty() {
@@ -70,6 +71,7 @@ impl Store {
                     anonymous: anon,
                     secret,
                     private_key,
+                    private_key_kind: parse_pk_kind(&pk_kind_str),
                     public_key,
                     certificate,
                 })
@@ -91,13 +93,14 @@ impl Store {
 
         self.db
             .execute(
-                "INSERT INTO credentials (name, kind, anonymous, secret, private_key, public_key, certificate) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                "INSERT INTO credentials (name, kind, anonymous, secret, private_key, private_key_kind, public_key, certificate) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
                 params![
                     cred.name,
                     cred_kind_str(cred.kind),
                     cred.anonymous as i64,
                     secret_enc,
                     pk_enc,
+                    pk_kind_str(cred.private_key_kind),
                     pubk_enc,
                     cert_enc,
                 ],
@@ -121,13 +124,14 @@ impl Store {
 
         self.db
             .execute(
-                "UPDATE credentials SET name=?1, kind=?2, anonymous=?3, secret=?4, private_key=?5, public_key=?6, certificate=?7 WHERE id=?8",
+                "UPDATE credentials SET name=?1, kind=?2, anonymous=?3, secret=?4, private_key=?5, private_key_kind=?6, public_key=?7, certificate=?8 WHERE id=?9",
                 params![
                     cred.name,
                     cred_kind_str(cred.kind),
                     cred.anonymous as i64,
                     secret_enc,
                     pk_enc,
+                    pk_kind_str(cred.private_key_kind),
                     pubk_enc,
                     cert_enc,
                     cred.id,
@@ -140,7 +144,7 @@ impl Store {
     pub fn find_credential(&self, id: i64) -> Result<Option<CredentialEntry>, StoreError> {
         let mut stmt = self
             .db
-            .prepare("SELECT id, name, kind, anonymous, secret, private_key, public_key, certificate FROM credentials WHERE id=?1")
+            .prepare("SELECT id, name, kind, anonymous, secret, private_key, private_key_kind, public_key, certificate FROM credentials WHERE id=?1")
             .map_err(|e| StoreError::Db(e.to_string()))?;
 
         let key = self.enc_key.clone();
@@ -149,8 +153,9 @@ impl Store {
             let anon: bool = row.get::<_, i64>(3)? != 0;
             let secret_blob: Vec<u8> = row.get(4)?;
             let pk_blob: Vec<u8> = row.get(5)?;
-            let pubk_blob: Vec<u8> = row.get(6)?;
-            let cert_blob: Vec<u8> = row.get(7)?;
+            let pk_kind_str: String = row.get(6)?;
+            let pubk_blob: Vec<u8> = row.get(7)?;
+            let cert_blob: Vec<u8> = row.get(8)?;
 
             let secret = if secret_blob.is_empty() {
                 String::new()
@@ -188,6 +193,7 @@ impl Store {
                 anonymous: anon,
                 secret,
                 private_key,
+                private_key_kind: parse_pk_kind(&pk_kind_str),
                 public_key,
                 certificate,
             })
@@ -218,5 +224,19 @@ fn parse_cred_kind(s: &str) -> CredentialKind {
     match s {
         "Certificate" => CredentialKind::Certificate,
         _ => CredentialKind::Password,
+    }
+}
+
+fn pk_kind_str(k: PrivateKeyKind) -> &'static str {
+    match k {
+        PrivateKeyKind::Content => "Content",
+        PrivateKeyKind::Path => "Path",
+    }
+}
+
+fn parse_pk_kind(s: &str) -> PrivateKeyKind {
+    match s {
+        "Path" => PrivateKeyKind::Path,
+        _ => PrivateKeyKind::Content,
     }
 }

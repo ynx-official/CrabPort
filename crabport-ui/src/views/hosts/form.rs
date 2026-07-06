@@ -12,6 +12,7 @@ use crate::color::*;
 use crate::components::button::Button;
 use crate::components::input::{StyledInput, StyledPasswordInput};
 use crate::components::tabs::{TabPane, Tabs};
+use crabport_core::credential::PrivateKeyKind;
 
 // ---------------------------------------------------------------------------
 // Connection type
@@ -76,6 +77,11 @@ pub struct ConnectionFormState {
     // Certificate-mode: passphrase + private key
     pub passphrase_input: Entity<InputState>,
     pub private_key_input: Entity<InputState>,
+    /// Read-only file path picked by the "Browse…" button. Either this or
+    /// `private_key_input` (pasted key content) must be filled to pass
+    /// certificate validation. The path is stored verbatim and resolved by
+    /// `crabport_ssh::keys::decode_private_key` at connect time.
+    pub private_key_path_input: Entity<InputState>,
     // Proxy mode + custom proxy URL
     pub proxy_kind: ProxyKind,
     pub proxy_url_input: Entity<InputState>,
@@ -90,6 +96,7 @@ pub struct ConnectionFormState {
     pub pass_focused: bool,
     pub passphrase_focused: bool,
     pub private_key_focused: bool,
+    pub private_key_path_focused: bool,
     pub proxy_url_focused: bool,
     pub editing: bool,
     /// Per-field validation errors. Populated by `validate()` and rendered
@@ -116,6 +123,10 @@ impl ConnectionFormState {
             state
         });
         let private_key_input = cx.new(|cx| InputState::new(window, cx).multi_line(true).rows(5));
+        // Read-only path field — never focused for typing, only filled via
+        // the "Browse…" button. Kept as an `InputState` so the existing
+        // `StyledInput` chrome (label / error / disabled styling) applies.
+        let private_key_path_input = cx.new(|cx| InputState::new(window, cx));
         let proxy_url_input = cx.new(|cx| InputState::new(window, cx));
 
         Self {
@@ -129,6 +140,7 @@ impl ConnectionFormState {
             pass_input,
             passphrase_input,
             private_key_input,
+            private_key_path_input,
             proxy_kind: ProxyKind::None,
             proxy_url_input,
             proxy_id: None,
@@ -139,6 +151,7 @@ impl ConnectionFormState {
             pass_focused: false,
             passphrase_focused: false,
             private_key_focused: false,
+            private_key_path_focused: false,
             proxy_url_focused: false,
             editing: false,
             errors: ValidationErrors::default(),
@@ -190,6 +203,32 @@ impl ConnectionFormState {
         self.private_key_input.read(cx).text().to_string()
     }
 
+    /// The private-key value to persist into `CredentialEntry.private_key`,
+    /// paired with the [`PrivateKeyKind`] that tells the store / SSH layer
+    /// how to interpret it.
+    ///
+    /// Preference order: pasted content (`private_key_input`) first, then the
+    /// file path picked via "Browse…". Either satisfies certificate auth —
+    /// `crabport_ssh::keys::decode_private_key` resolves both PEM content and
+    /// a filesystem path — but we record which one was used so the edit-host
+    /// flow can restore the value into the correct field. Returns an empty
+    /// string + `Content` when neither is set.
+    pub fn private_key_value(&self, cx: &App) -> (String, PrivateKeyKind) {
+        let pasted = self.private_key_text(cx);
+        if !pasted.trim().is_empty() {
+            return (pasted, PrivateKeyKind::Content);
+        }
+        let path = self.private_key_path_text(cx);
+        if !path.trim().is_empty() {
+            return (path, PrivateKeyKind::Path);
+        }
+        (String::new(), PrivateKeyKind::Content)
+    }
+
+    pub fn private_key_path_text(&self, cx: &App) -> String {
+        self.private_key_path_input.read(cx).text().to_string()
+    }
+
     pub fn proxy_url_text(&self, cx: &App) -> String {
         self.proxy_url_input.read(cx).text().to_string()
     }
@@ -200,7 +239,9 @@ impl ConnectionFormState {
     /// Rules:
     /// - SSH / Telnet: host and username are required.
     /// - SSH + Password auth: password is required.
-    /// - SSH + Certificate auth: private key is required (passphrase optional).
+    /// - SSH + Certificate auth: a private key is required — either pasted
+    ///   key content OR a key file path picked via "Browse…" (passphrase
+    ///   is optional).
     /// - Proxy = Custom: proxy URL is required.
     /// - Name is optional in all modes.
     /// - Serial has no required fields yet (placeholder backend).
@@ -225,7 +266,10 @@ impl ConnectionFormState {
                     }
                 }
                 AuthKind::Certificate => {
-                    if self.private_key_text(cx).trim().is_empty() {
+                    // Either pasted key content or a picked file path satisfies
+                    // the requirement; `decode_private_key` resolves both.
+                    let (pk_value, _pk_kind) = self.private_key_value(cx);
+                    if pk_value.trim().is_empty() {
                         errors.private_key =
                             Some(t!("connection_form.error_private_key_required").into());
                     }
@@ -325,6 +369,7 @@ pub struct ConnectionFormView {
     pass_input: Entity<InputState>,
     passphrase_input: Entity<InputState>,
     private_key_input: Entity<InputState>,
+    private_key_path_input: Entity<InputState>,
     proxy_kind: ProxyKind,
     proxy_url_input: Entity<InputState>,
     name_focused: bool,
@@ -334,6 +379,7 @@ pub struct ConnectionFormView {
     pass_focused: bool,
     passphrase_focused: bool,
     private_key_focused: bool,
+    private_key_path_focused: bool,
     proxy_url_focused: bool,
     editing: bool,
     errors: ValidationErrors,
@@ -355,6 +401,7 @@ impl ConnectionFormView {
             pass_input: state.pass_input.clone(),
             passphrase_input: state.passphrase_input.clone(),
             private_key_input: state.private_key_input.clone(),
+            private_key_path_input: state.private_key_path_input.clone(),
             proxy_kind: state.proxy_kind,
             proxy_url_input: state.proxy_url_input.clone(),
             name_focused: state.name_focused,
@@ -364,6 +411,7 @@ impl ConnectionFormView {
             pass_focused: state.pass_focused,
             passphrase_focused: state.passphrase_focused,
             private_key_focused: state.private_key_focused,
+            private_key_path_focused: state.private_key_path_focused,
             proxy_url_focused: state.proxy_url_focused,
             editing: state.editing,
             errors: state.errors.clone(),
@@ -393,6 +441,7 @@ impl RenderOnce for ConnectionFormView {
                 self.pass_input,
                 self.passphrase_input,
                 self.private_key_input,
+                self.private_key_path_input,
                 self.proxy_kind,
                 self.proxy_url_input,
                 self.name_focused,
@@ -402,6 +451,7 @@ impl RenderOnce for ConnectionFormView {
                 self.pass_focused,
                 self.passphrase_focused,
                 self.private_key_focused,
+                self.private_key_path_focused,
                 self.proxy_url_focused,
                 self.errors,
                 self.app,
@@ -464,6 +514,7 @@ fn render_dialog(
     pass_input: Entity<InputState>,
     passphrase_input: Entity<InputState>,
     private_key_input: Entity<InputState>,
+    private_key_path_input: Entity<InputState>,
     proxy_kind: ProxyKind,
     proxy_url_input: Entity<InputState>,
     name_focused: bool,
@@ -473,6 +524,7 @@ fn render_dialog(
     pass_focused: bool,
     passphrase_focused: bool,
     private_key_focused: bool,
+    private_key_path_focused: bool,
     proxy_url_focused: bool,
     errors: ValidationErrors,
     app: Entity<CrabportApp>,
@@ -594,20 +646,26 @@ fn render_dialog(
                                             WithCertificateForm {
                                                 passphrase_input,
                                                 private_key_input,
+                                                private_key_path_input,
                                                 passphrase_focused,
                                                 private_key_focused,
+                                                private_key_path_focused,
                                                 private_key_error: errors.private_key.clone(),
+                                                app: app.clone(),
                                             },
                                         )
                                         .height(px({
-                                            // Certificate pane: passphrase field (57) +
-                                            // gap_4 (16) + private_key textarea (125/148).
-                                            let pk_h = if errors.private_key.is_some() {
-                                                148.0
-                                            } else {
-                                                125.0
-                                            };
-                                            57.0 + 16.0 + pk_h
+                                            // Certificate pane height =
+                                            //   passphrase field (57 / 80 w/ error)
+                                            // + gap_4 (16)
+                                            // + private-key path field (57 / 80 w/ error)
+                                            // + gap_4 (16)
+                                            // + private-key content textarea (125 / 148 w/ error)
+                                            let has_err = errors.private_key.is_some();
+                                            let pass_h = if has_err { 80.0 } else { 57.0 };
+                                            let path_h = if has_err { 80.0 } else { 57.0 };
+                                            let pk_h = if has_err { 148.0 } else { 125.0 };
+                                            pass_h + 16.0 + path_h + 16.0 + pk_h
                                         })),
                                     )
                                     .on_change({
@@ -659,14 +717,18 @@ fn render_dialog(
                         let auth_pane = match auth_kind {
                             AuthKind::Password => field_h(errors.pass.is_some()),
                             AuthKind::Certificate => {
-                                // passphrase (57, no error check) + gap_4 (16) +
-                                // private_key textarea (125 or 148 with error).
-                                let pk_h = if errors.private_key.is_some() {
-                                    148.0
-                                } else {
-                                    125.0
-                                };
-                                57.0 + 16.0 + pk_h
+                                // passphrase (57 / 80 w/ error) + gap_4 (16) +
+                                // private-key file path field (57 / 80 w/ error)
+                                // + gap_4 (16) + private-key content textarea
+                                // (125 / 148 w/ error). MUST match the height
+                                // assigned to the cert `TabPane` above, otherwise
+                                // the parent SSH pane under-sizes and the proxy
+                                // section below gets clipped/pushed off.
+                                let has_err = errors.private_key.is_some();
+                                let pass_h = field_h(has_err);
+                                let path_h = field_h(has_err);
+                                let pk_h = if has_err { 148.0 } else { 125.0 };
+                                pass_h + 16.0 + path_h + 16.0 + pk_h
                             }
                         };
 

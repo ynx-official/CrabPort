@@ -506,10 +506,25 @@ pub struct CredentialEntry {
     /// Certificate-only fields (empty strings when not applicable).
     #[serde(default)]
     pub private_key: String,
+    /// How [`private_key`] should be interpreted for Certificate credentials:
+    /// the literal PEM key material (`Content`) or a filesystem path to a
+    /// key file (`Path`). Ignored for Password credentials. Defaults to
+    /// `Content` so pre-existing rows (which store pasted PEM) keep working.
+    #[serde(default)]
+    pub private_key_kind: PrivateKeyKind,
     #[serde(default)]
     pub public_key: String,
     #[serde(default)]
     pub certificate: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PrivateKeyKind {
+    /// `private_key` holds the literal PEM key material.
+    #[default]
+    Content,
+    /// `private_key` holds a filesystem path to a key file.
+    Path,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
