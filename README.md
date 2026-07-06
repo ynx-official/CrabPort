@@ -19,7 +19,7 @@
 
 ## 简介
 
-CrabPort 旨在实现一个简单易用的跨平台 SSH 客户端，集终端与 SFTP 文件管理于一体。使用 Rust 编写，UI 基于 [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui)（Zed 编辑器的 GPU 渲染框架）。
+CrabPort 旨在实现一个简单易用的跨平台 SSH / Telnet 客户端，集终端与 SFTP 文件管理于一体。使用 Rust 编写，UI 基于 [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui)（Zed 编辑器的 GPU 渲染框架）。
 
 ### 核心特性
 
@@ -29,6 +29,7 @@ CrabPort 旨在实现一个简单易用的跨平台 SSH 客户端，集终端与
 - **代理连接** — SOCKS5 / HTTP(S) 代理，按主机独立配置
 - **凭据加密存储** — AES-256-GCM 本地加密
 - **命令历史与代码片段** — 自动捕获、搜索、快速执行
+- **可配置主题色彩** — 多套预设主题，`config.toml` 驱动
 - **跨平台** — macOS / Linux / Windows，x64 与 arm64
 
 ## 截图
@@ -120,59 +121,6 @@ cargo install cargo-bundle --locked
 
 > Windows 暂不使用 cargo-bundle 打包：其 v0.11.0 的 MSI 打包器存在一个将字符串写入二进制列的 bug，因此 CI 与本地均直接压缩 `.exe` 分发。
 
-## 项目结构
-
-CrabPort 采用 Cargo workspace 组织，各 crate 职责清晰：
-
-```
-CrabPort/
-├── src/                    # 二进制入口
-│   └── main.rs             # 启动 GPUI Application
-├── crabport-core/          # 核心基础设施
-│   ├── credential.rs       # 主机 / 凭据 / 代理 / 隧道数据模型
-│   ├── config.rs           # config.toml 配置读写（LazyLock 全局）
-│   ├── crypto.rs           # AES-256-GCM 加解密
-│   ├── keybind.rs          # 终端按键映射与解析
-│   ├── store.rs            # SQLite 持久化层
-│   ├── profile.rs          # 用户配置目录
-│   └── log.rs              # 日志初始化
-├── crabport-ssh/           # SSH 后端
-│   ├── backend.rs          # russh 会话管理
-│   ├── handler.rs          # 连接回调与主机密钥验证
-│   ├── keys.rs             # 私钥解析（OpenSSH/PEM）
-│   ├── known_hosts.rs      # known_hosts 持久化
-│   ├── monitor.rs          # PTY 数据桥接
-│   ├── crabport_tunnel.rs  # TunnelManager / 隧道启停与转发表
-│   ├── owned_session.rs    # 会话句柄封装
-│   ├── session.rs          # 会话连接流程（含代理拨号）
-│   └── transfer/           # SFTP 传输调度
-├── crabport-sftp/          # SFTP 后端
-│   ├── api.rs              # SFTP 操作抽象 trait
-│   ├── backend.rs          # russh-sftp 实现
-│   ├── archive.rs          # 目录打包/解包（tar+gz）
-│   └── transfer.rs         # 分块传输
-├── crabport-terminal/      # 终端抽象
-│   └── terminal.rs         # alacritty_terminal 封装
-├── crabport-proxy/         # 代理拨号（SOCKS5 / HTTP CONNECT / HTTPS CONNECT）
-│   └── lib.rs              # 返回统一的 AsyncRead+AsyncWrite 流
-├── crabport-tunnel/        # 隧道数据类型与反向转发表
-│   └── lib.rs              # TunnelInfo / ReverseForwardRegistry 等
-└── crabport-ui/            # GPUI 界面层
-    ├── src/
-    │   ├── app.rs          # 主窗口与标签页管理
-    │   ├── views/
-    │   │   ├── terminal/   # 终端视图（渲染、选区、字体、配色）
-    │   │   ├── panel/      # 右侧面板（SFTP/历史/片段）
-    │   │   ├── hosts/      # 主机列表与连接表单（含代理配置）
-    │   │   ├── tunnels.rs  # 隧道管理视图（Local/Remote/Dynamic）
-    │   │   └── snippets.rs # 片段管理
-    │   ├── windows/        # 设置面板、关于等辅助窗口
-    │   ├── layouts/        # 布局组件（侧边栏、命令面板、连接表单）
-    │   └── components/     # 可复用 UI 组件
-    ├── assets/             # 图标等静态资源
-    └── i18n/               # 多语言翻译（zh-CN / en）
-```
-
 ## 数据存储位置
 
 应用数据存储在系统标准目录下：
@@ -209,10 +157,11 @@ CrabPort/
 - [x] 设置面板（语言）
 - [x] 端口转发 / SSH 隧道管理（Local / Remote / Dynamic）
 - [x] 代理连接（SOCKS5 / HTTP CONNECT / HTTPS CONNECT）
-- [x] Telnet / 串口连接类型
-- [ ] 设置面板（主题、字体、快捷键自定义）
+- [x] Telnet 连接类型
+- [x] 可配置主题色彩
+- [ ] 设置面板（字体、快捷键自定义）
 - [ ] 终端会话同步（多窗口共享）
-- [ ] 自定义配色方案
+- [ ] 串口连接类型
 - [ ] 插件系统
 
 ## 许可证

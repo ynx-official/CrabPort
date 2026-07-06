@@ -397,6 +397,14 @@ pub fn open_main_window(cx: &mut App) {
         cx.new(|cx| {
             let app = cx.new(|cx| CrabportApp::new(_window, cx));
             app.update(cx, |app, cx| app.wire(cx));
+
+            // Quit the application when this main window is closed.
+            // `cx.on_release` fires for this specific window, not all windows.
+            cx.on_release(|_, cx| {
+                cx.quit();
+            })
+            .detach();
+
             gpui_component::Root::new(app, _window, cx)
         })
     })

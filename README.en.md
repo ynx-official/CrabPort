@@ -1,7 +1,7 @@
 # CrabPort
 
 <p align="center">
-  <strong>A modern cross-platform SSH / SFTP client built with Rust + GPUI</strong>
+  <strong>A modern cross-platform SSH / Telnet client built with Rust + GPUI</strong>
 </p>
 
 <p align="center">
@@ -19,7 +19,7 @@
 
 ## Overview
 
-CrabPort aims to be a simple and easy-to-use cross-platform SSH client, integrating terminal and SFTP file management in one app. It is written in Rust, with a UI built on [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) (the GPU-accelerated rendering framework powering the Zed editor).
+CrabPort aims to be a simple and easy-to-use cross-platform SSH / Telnet client, integrating terminal and SFTP file management in one app. It is written in Rust, with a UI built on [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) (the GPU-accelerated rendering framework powering the Zed editor).
 
 ### Key Features
 
@@ -29,6 +29,7 @@ CrabPort aims to be a simple and easy-to-use cross-platform SSH client, integrat
 - **Proxy connections** — SOCKS5 / HTTP(S) proxy, per-host config
 - **Encrypted credential storage** — AES-256-GCM at rest
 - **Command history & snippets** — Auto-capture, search, and quick execution
+- **Configurable theme colors** — Multiple presets, driven by `config.toml`
 - **Cross-platform** — macOS / Linux / Windows, x64 and arm64
 
 ## Screenshots
@@ -120,59 +121,6 @@ cargo install cargo-bundle --locked
 
 > Windows does not use cargo-bundle: its v0.11.0 MSI bundler has a bug that inserts a string into a binary column, so both CI and local builds ship a zipped `.exe` instead.
 
-## Project Structure
-
-CrabPort is organized as a Cargo workspace with cleanly separated crates:
-
-```
-CrabPort/
-├── src/                    # Binary entry point
-│   └── main.rs             # Bootstraps the GPUI Application
-├── crabport-core/          # Core infrastructure
-│   ├── credential.rs       # Host / credential / proxy / tunnel data models
-│   ├── config.rs           # config.toml read/write (LazyLock global)
-│   ├── crypto.rs           # AES-256-GCM encrypt/decrypt
-│   ├── keybind.rs          # Terminal key bindings & resolution
-│   ├── store.rs            # SQLite persistence layer
-│   ├── profile.rs          # User config directory
-│   └── log.rs              # Logging initialization
-├── crabport-ssh/           # SSH backend
-│   ├── backend.rs          # russh session management
-│   ├── handler.rs          # Connection callbacks & host-key verification
-│   ├── keys.rs             # Private-key parsing (OpenSSH/PEM)
-│   ├── known_hosts.rs      # known_hosts persistence
-│   ├── monitor.rs          # PTY data bridging
-│   ├── crabport_tunnel.rs  # TunnelManager / tunnel lifecycle & forward table
-│   ├── owned_session.rs    # Session handle wrapper
-│   ├── session.rs          # Session connect flow (with proxy dialing)
-│   └── transfer/           # SFTP transfer dispatch
-├── crabport-sftp/          # SFTP backend
-│   ├── api.rs              # SFTP operation trait
-│   ├── backend.rs          # russh-sftp implementation
-│   ├── archive.rs          # Directory pack/unpack (tar+gz)
-│   └── transfer.rs         # Chunked transfer
-├── crabport-terminal/      # Terminal abstraction
-│   └── terminal.rs         # alacritty_terminal wrapper
-├── crabport-proxy/         # Proxy dialing (SOCKS5 / HTTP CONNECT / HTTPS CONNECT)
-│   └── lib.rs              # Returns a unified AsyncRead+AsyncWrite stream
-├── crabport-tunnel/        # Tunnel data types & reverse-forward registry
-│   └── lib.rs              # TunnelInfo / ReverseForwardRegistry, etc.
-└── crabport-ui/            # GPUI interface layer
-    ├── src/
-    │   ├── app.rs          # Main window & tab management
-    │   ├── views/
-    │   │   ├── terminal/   # Terminal view (render, selection, fonts, colors)
-    │   │   ├── panel/      # Right-hand panel (SFTP/History/Snippets)
-    │   │   ├── hosts/      # Host list & connection form (with proxy config)
-    │   │   ├── tunnels.rs  # Tunnel management view (Local/Remote/Dynamic)
-    │   │   └── snippets.rs # Snippet management
-    │   ├── windows/        # Settings panel, About, and other aux windows
-    │   ├── layouts/        # Layout components (sidebar, command palette, connection form)
-    │   └── components/     # Reusable UI components
-    ├── assets/             # Icons and static assets
-    └── i18n/               # Translations (zh-CN / en)
-```
-
 ## Data Storage Locations
 
 App data lives under the platform-standard directory:
@@ -209,10 +157,11 @@ Contains:
 - [x] Settings panel (language)
 - [x] Port forwarding / SSH tunnel management (Local / Remote / Dynamic)
 - [x] Proxy connections (SOCKS5 / HTTP CONNECT / HTTPS CONNECT)
-- [x] Telnet / Serial connection types
-- [ ] Settings panel (theme, fonts, custom shortcuts)
+- [x] Telnet connection type
+- [x] Configurable theme colors
+- [ ] Settings panel (fonts, custom shortcuts)
 - [ ] Terminal session sync (shared across windows)
-- [ ] Custom color schemes
+- [ ] Serial connection type
 - [ ] Plugin system
 
 ## License

@@ -73,11 +73,5 @@ fn main() {
             cx.set_menus(crabport_ui::menus::app_menus());
 
             open_main_window(cx);
-
-            // NOTE: Previously the app called `std::process::exit(0)` on any
-            // window close. That is incompatible with multi-window support
-            // (closing a secondary window would kill the whole app). GPUI's
-            // default behavior is to exit the process once the last window is
-            // closed, which is what we want now.
         });
 }

@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "CrabPort"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "crabport-core",
  "crabport-ui",
@@ -1365,7 +1365,6 @@ dependencies = [
  "anyhow",
  "async-compression",
  "flate2",
- "futures",
  "russh",
  "russh-sftp",
  "tar",
@@ -1403,7 +1402,6 @@ dependencies = [
  "crabport-proxy",
  "crabport-terminal",
  "parking_lot",
- "smol",
  "tokio",
  "tracing",
 ]
