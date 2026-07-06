@@ -87,18 +87,38 @@ impl CrabportApp {
                 .flatten()
         });
 
-        self.add_ssh_tab(
-            &host.name,
-            Some(host_id),
-            &host.host,
-            host.port,
-            &host.username,
-            &password,
-            private_key,
-            passphrase,
-            proxy_config,
-            cx,
-        );
+        // Dispatch to the matching backend by connection kind. SSH keeps
+        // its full auth (password / private key / passphrase); Telnet uses
+        // password-only auth (credentials are sent via the terminal prompt
+        // in v1). Serial has no backend yet.
+        match host.kind {
+            crate::views::hosts::ConnectionKind::Telnet => {
+                self.add_telnet_tab(
+                    &host.name,
+                    Some(host_id),
+                    &host.host,
+                    host.port,
+                    &host.username,
+                    &password,
+                    proxy_config,
+                    cx,
+                );
+            }
+            _ => {
+                self.add_ssh_tab(
+                    &host.name,
+                    Some(host_id),
+                    &host.host,
+                    host.port,
+                    &host.username,
+                    &password,
+                    private_key,
+                    passphrase,
+                    proxy_config,
+                    cx,
+                );
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -135,6 +155,15 @@ impl CrabportApp {
         });
 
         let mut form = ConnectionFormState::new(window, cx);
+
+        // Restore the connection type so the form opens on the correct tab
+        // (SSH / Telnet / Serial). Without this the form always defaults to
+        // SSH and a saved Telnet host would appear as SSH when edited.
+        form.kind = match h.kind {
+            crate::views::hosts::ConnectionKind::SSH => ConnectionKind::SSH,
+            crate::views::hosts::ConnectionKind::Telnet => ConnectionKind::Telnet,
+            crate::views::hosts::ConnectionKind::Serial => ConnectionKind::Serial,
+        };
 
         form.name_input.update(cx, |state, cx| {
             state.set_value(&h.name, window, cx);
@@ -214,7 +243,7 @@ impl CrabportApp {
 
         form.on_connect = Some(Rc::new({
             let app = app.clone();
-            move |_kind: ConnectionKind, _w: &mut Window, cx: &mut App| {
+            move |kind: ConnectionKind, _w: &mut Window, cx: &mut App| {
                 #[cfg(debug_assertions)]
                 tracing::info!(
                     "edit_host: on_connect fired — editing_proxy_id={:?}",
@@ -302,7 +331,11 @@ impl CrabportApp {
                         port: port_num,
                         username: username.clone(),
                         credential_id: Some(new_cred_id),
-                        kind: CoreHostKind::Ssh,
+                        kind: match kind {
+                            ConnectionKind::Telnet => CoreHostKind::Telnet,
+                            ConnectionKind::Serial => CoreHostKind::Serial,
+                            ConnectionKind::SSH => CoreHostKind::Ssh,
+                        },
                         last_login: None,
                         favorite: false,
                         proxy_id: upsert_proxy_for_host(&proxy_config, editing_proxy_id, cx),

@@ -107,6 +107,26 @@ pub trait CrabPortTerminal: Send + Sync {
         false
     }
 
+    /// Whether this backend supports command-history capture + paste-back.
+    /// Defaults to `true` because history lives on `TerminalSession` (not the
+    /// backend) and only needs `write`, which every backend implements.
+    fn allow_history(&self) -> bool {
+        true
+    }
+
+    /// Whether this backend supports the snippets panel (run / paste via
+    /// `write_raw`). Defaults to `true` for the same reason as `allow_history`.
+    fn allow_snippets(&self) -> bool {
+        true
+    }
+
+    /// Whether this backend can lend its connection for borrowed SSH tunnels.
+    /// Defaults to `false`; only SSH backends (which implement `CrabPortTunnel`)
+    /// override this to `true`.
+    fn allow_tunnels(&self) -> bool {
+        false
+    }
+
     /// Current SFTP directory entries. Returns None if not yet loaded.
     fn sftp_entries(&self) -> Option<std::sync::Arc<Vec<(String, bool)>>> {
         None
@@ -212,6 +232,28 @@ impl EventListener for EventProxy {
 /// recent use).
 const MAX_COMMAND_HISTORY: usize = 300;
 
+/// State of the input-stream ANSI escape parser used by
+/// [`TerminalSession::capture_command`].
+///
+/// Arrow keys, Home/End, Delete, PageUp/Down, etc. emit multi-byte
+/// sequences (`ESC [ A` for ↑, `ESC [ C` for →, `ESC O c` for some
+/// keypads, …). Their printable tail (`[A`, `[C`, …) must NOT leak into
+/// the command buffer, so we run a tiny state machine that skips the
+/// whole sequence. The state is persisted across `write` calls because a
+/// single key press may arrive split across multiple packets.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum CaptureState {
+    #[default]
+    Normal,
+    /// Saw `ESC` — waiting for the next byte to tell us what kind of
+    /// sequence this is.
+    Esc,
+    /// Inside a CSI (`ESC [`) or SS3 (`ESC O`) sequence, waiting for the
+    /// final byte (0x40..=0x7e). Parameter/intermediate bytes
+    /// (0x20..=0x3f) keep us in this state.
+    AwaitFinal,
+}
+
 pub struct TerminalSession {
     backend: Arc<dyn CrabPortTerminal>,
     term: Arc<FairMutex<Term<EventProxy>>>,
@@ -221,10 +263,12 @@ pub struct TerminalSession {
     /// Command history, most-recent-first. Capped at [`MAX_COMMAND_HISTORY`]
     /// entries; the oldest is evicted when full.
     command_history: Arc<Mutex<VecDeque<String>>>,
-    /// In-progress input line being accumulated by [`Self::write`]. Submitted
-    /// to `command_history` on Enter (CR/LF). Backspace deletes the last
-    /// char; other control bytes are ignored.
-    line_buffer: Arc<Mutex<String>>,
+    /// In-progress input line + ANSI escape parser state, accumulated by
+    /// [`Self::write`] and submitted to `command_history` on Enter (CR/LF).
+    /// Backspace deletes the last char; ANSI escape sequences (arrow keys,
+    /// Home/End, Delete, …) are skipped by the [`CaptureState`] machine so
+    /// their printable tail (`[A`, `[C`, …) never pollutes the buffer.
+    line_buffer: Arc<Mutex<(String, CaptureState)>>,
     /// Optional callback invoked whenever a new command is captured. The UI
     /// layer (TerminalView) uses this to persist the command to the Store
     /// — TerminalSession itself stays free of any storage dependency.
@@ -250,7 +294,7 @@ impl TerminalSession {
             started: AtomicBool::new(false),
             _wakeup_rx,
             command_history: Arc::new(Mutex::new(VecDeque::with_capacity(MAX_COMMAND_HISTORY))),
-            line_buffer: Arc::new(Mutex::new(String::new())),
+            line_buffer: Arc::new(Mutex::new((String::new(), CaptureState::default()))),
             on_command: Arc::new(Mutex::new(None)),
         }
     }
@@ -390,65 +434,106 @@ impl TerminalSession {
 
     /// Best-effort command capture from the raw input stream.
     ///
-    /// Accumulates printable bytes into `line_buffer`, treats Backspace
-    /// (DEL `0x7f` or BS `0x08`) as a one-char deletion, and submits the
-    /// buffer as a history entry on CR/LF (`0x0d` / `0x0a`). Empty results
-    /// and exact-duplicates of the most recent entry are skipped.
+    /// Runs a small state machine (see [`CaptureState`]) over the bytes so
+    /// that ANSI escape sequences emitted by editing keys — arrow keys
+    /// (`ESC [ A/B/C/D`), Home/End, Delete, PageUp/Down, etc. — are skipped
+    /// in full instead of leaking their printable tail (`[A`, `[C`, …) into
+    /// the buffer. The state persists across `write` calls because a single
+    /// key press may arrive split across multiple packets.
     ///
-    /// This is intentionally simple — it doesn't parse ANSI escapes or
-    /// track cursor movement, so commands edited with arrow keys / Ctrl-U
-    /// may be captured with noise. For typical typed-and-Enter usage it's
-    /// accurate enough, and the cost (a lock + small alloc) is negligible.
+    /// Printable ASCII (`0x20..=0x7e`) and UTF-8 multibyte bytes
+    /// (`0x80..=0xff`) are appended; Backspace (DEL `0x7f` / BS `0x08`)
+    /// deletes the last char; CR/LF submits the buffer. Empty results and
+    /// exact-duplicates of the most recent entry are skipped.
+    ///
+    /// This is intentionally simple — it doesn't mirror the PTY's idea of
+    /// the current line, so commands recalled with `↑` and then edited
+    /// won't be captured perfectly (the buffer only reflects what the user
+    /// typed in this session, not what readline echoed back). But it's
+    /// accurate for the common typed-and-Enter case, and the cost (a couple
+    /// of locks + a small alloc) is negligible.
     fn capture_command(&self, data: &[u8]) {
         let mut history = self.command_history.lock();
-        let mut buf = self.line_buffer.lock();
+        let mut line = self.line_buffer.lock();
+        let (buf, state) = &mut *line;
         for &b in data {
-            match b {
-                // CR or LF — submit the line.
-                0x0d | 0x0a => {
-                    let cmd = buf.trim().to_string();
-                    buf.clear();
-                    if cmd.is_empty() {
-                        continue;
+            match *state {
+                CaptureState::Normal => match b {
+                    // CR or LF — submit the line.
+                    0x0d | 0x0a => {
+                        let cmd = buf.trim().to_string();
+                        buf.clear();
+                        if cmd.is_empty() {
+                            continue;
+                        }
+                        // LRU dedup: if the command already exists in
+                        // history, remove it from its current position so it
+                        // can be re-inserted at the front (most-recently-used).
+                        // This mirrors the Store's `updated_at` promotion.
+                        if let Some(pos) = history.iter().position(|c| c == &cmd) {
+                            history.remove(pos);
+                        }
+                        if history.len() >= MAX_COMMAND_HISTORY {
+                            history.pop_back();
+                        }
+                        history.push_front(cmd.clone());
+                        // Notify the UI layer so it can persist the command.
+                        // The callback is cloned out of the Mutex to avoid
+                        // calling it while holding the lock.
+                        let cb = self.on_command.lock().clone();
+                        if let Some(cb) = cb {
+                            cb(&cmd);
+                        }
                     }
-                    // LRU dedup: if the command already exists in
-                    // history, remove it from its current position so it
-                    // can be re-inserted at the front (most-recently-used).
-                    // This mirrors the Store's `updated_at` promotion.
-                    if let Some(pos) = history.iter().position(|c| c == &cmd) {
-                        history.remove(pos);
+                    // Backspace / DEL — delete the last char.
+                    0x08 | 0x7f => {
+                        buf.pop();
                     }
-                    if history.len() >= MAX_COMMAND_HISTORY {
-                        history.pop_back();
+                    // ESC — start of an ANSI escape sequence (arrow keys,
+                    // Home/End, etc.). Switch to `Esc` and drop this byte so
+                    // the sequence's printable tail (`[A`, `[C`, …) never
+                    // reaches the buffer.
+                    0x1b => {
+                        *state = CaptureState::Esc;
                     }
-                    history.push_front(cmd.clone());
-                    // Notify the UI layer so it can persist the command.
-                    // The callback is cloned out of the Mutex to avoid
-                    // calling it while holding the lock.
-                    let cb = self.on_command.lock().clone();
-                    if let Some(cb) = cb {
-                        cb(&cmd);
+                    // Printable ASCII.
+                    0x20..=0x7e => {
+                        buf.push(b as char);
                     }
-                }
-                // Backspace / DEL — delete the last char.
-                0x08 | 0x7f => {
-                    buf.pop();
-                }
-                // Other control bytes — ignore (don't pollute the buffer).
-                0x00..=0x1f | 0x7f..=0xff if b != 0x09 => {
-                    // 0x09 (Tab) is technically control but we keep it so
-                    // shell completion entries are captured as-typed.
-                }
-                // Printable ASCII.
-                0x20..=0x7e => {
-                    buf.push(b as char);
-                }
-                // High bytes (UTF-8 continuation / lead) — push raw so
-                // non-ASCII commands aren't lost. We don't validate UTF-8
-                // here; the buffer is only for display, not execution.
-                _ => {
-                    buf.push(b as char);
-                }
+                    // High bytes (UTF-8 continuation / lead) — push raw so
+                    // non-ASCII commands aren't lost. We don't validate UTF-8
+                    // here; the buffer is only for display, not execution.
+                    0x80..=0xff => {
+                        buf.push(b as char);
+                    }
+                    // Other control bytes (Tab, SI/SO, etc.) — ignore.
+                    _ => {}
+                },
+                CaptureState::Esc => match b {
+                    // CSI (`ESC [`) or SS3 (`ESC O`) — wait for the final
+                    // byte (and any intermediate parameter bytes).
+                    b'[' | b'O' => {
+                        *state = CaptureState::AwaitFinal;
+                    }
+                    // Any other byte after ESC is a two-char sequence
+                    // (e.g. `ESC =`). Consume it and return to Normal.
+                    _ => {
+                        *state = CaptureState::Normal;
+                    }
+                },
+                CaptureState::AwaitFinal => match b {
+                    // Parameter / intermediate bytes (0x20..=0x3f) — keep
+                    // waiting for the final byte.
+                    0x20..=0x3f => {}
+                    // Final byte (0x40..=0x7e) — sequence complete.
+                    0x40..=0x7e => {
+                        *state = CaptureState::Normal;
+                    }
+                    // Unexpected byte — bail back to Normal.
+                    _ => {
+                        *state = CaptureState::Normal;
+                    }
+                },
             }
         }
     }
@@ -479,6 +564,18 @@ impl TerminalSession {
 
     pub fn allow_sftp(&self) -> bool {
         self.backend.allow_sftp()
+    }
+
+    pub fn allow_history(&self) -> bool {
+        self.backend.allow_history()
+    }
+
+    pub fn allow_snippets(&self) -> bool {
+        self.backend.allow_snippets()
+    }
+
+    pub fn allow_tunnels(&self) -> bool {
+        self.backend.allow_tunnels()
     }
 
     pub fn sftp_entries(&self) -> Option<std::sync::Arc<Vec<(String, bool)>>> {

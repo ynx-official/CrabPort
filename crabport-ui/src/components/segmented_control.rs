@@ -174,6 +174,15 @@ impl RenderOnce for SegmentedControl {
                 // we ease into a semi-transparent surface_hover() (alpha ~0.5)
                 // for a subtle wash rather than a solid block. Active state is
                 // signalled by the sliding indicator, not bg.
+                //
+                // text_color is also driven through `transition_when_else`
+                // (active → text_primary, inactive → text_muted) because
+                // `with_transition` caches the element's style state and
+                // replays `state.cur` on each render — a statically-set
+                // `.text_color(...)` would be overwritten by the cached value
+                // and never follow `is_active` changes after the first render.
+                let active_color = text_primary();
+                let inactive_color = text_muted();
                 let mut tab = div()
                     .id(tab_id.clone())
                     .flex_1()
@@ -185,7 +194,11 @@ impl RenderOnce for SegmentedControl {
                     .py_1()
                     .rounded_sm()
                     .text_sm()
-                    .text_color(rgb(if is_active { text_primary() } else { text_muted() }))
+                    .text_color(rgb(if is_active {
+                        active_color
+                    } else {
+                        inactive_color
+                    }))
                     .bg(rgba(0x24273a00))
                     .with_transition(tab_id)
                     .transition_on_hover(
@@ -198,14 +211,24 @@ impl RenderOnce for SegmentedControl {
                                 state.bg(rgba(0x24273a00))
                             }
                         },
+                    )
+                    .transition_when_else(
+                        is_active,
+                        Duration::from_millis(150),
+                        EaseInOutQuad,
+                        move |state| state.text_color(rgb(active_color)),
+                        move |state| state.text_color(rgb(inactive_color)),
                     );
 
-                // Optional icon. Color is static (GPUI svg can't animate
-                // text_color via gpui-animation — `TransitionExt` requires
-                // `ParentElement`). The hover background above provides the
-                // visual feedback instead.
+                // Optional icon. Color is static — svg doesn't implement
+                // `ParentElement` so it can't use gpui-animation's
+                // `with_transition` / `transition_when_else` yet.
                 if let Some(path) = icon_path {
-                    let icon_color = if is_active { text_primary() } else { text_muted() };
+                    let icon_color = if is_active {
+                        text_primary()
+                    } else {
+                        text_muted()
+                    };
                     tab = tab.child(
                         svg()
                             .path(path)

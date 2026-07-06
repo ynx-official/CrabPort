@@ -47,7 +47,7 @@ impl CrabportApp {
 
         form.on_connect = Some(Rc::new({
             let a = app.clone();
-            move |_kind: ConnectionKind, _w: &mut Window, cx: &mut App| {
+            move |kind: ConnectionKind, _w: &mut Window, cx: &mut App| {
                 a.update(cx, |app, cx| {
                     // Validate required fields before doing anything. If the
                     // form is invalid, per-field errors are shown and a toast
@@ -122,7 +122,11 @@ impl CrabportApp {
                         port: port_num,
                         username: username.clone(),
                         credential_id: Some(cred_id),
-                        kind: CoreHostKind::Ssh,
+                        kind: match kind {
+                            ConnectionKind::Telnet => CoreHostKind::Telnet,
+                            ConnectionKind::Serial => CoreHostKind::Serial,
+                            ConnectionKind::SSH => CoreHostKind::Ssh,
+                        },
                         last_login: None,
                         favorite: false,
                         proxy_id,
@@ -135,7 +139,7 @@ impl CrabportApp {
                         host: host.to_string(),
                         port: port_num,
                         username: username.to_string(),
-                        kind: crate::views::hosts::ConnectionKind::SSH,
+                        kind,
                         credential_id: Some(cred_id),
                         last_login: None,
                         favorite: false,
@@ -156,21 +160,40 @@ impl CrabportApp {
                             },
                         ),
                     };
-                    app.add_ssh_tab(
-                        &name,
-                        Some(row_id),
-                        &host,
-                        port_num,
-                        &username,
-                        match auth_kind {
-                            AuthKind::Password => &password,
-                            AuthKind::Certificate => "",
-                        },
-                        private_key_arg,
-                        passphrase_arg,
-                        proxy_config,
-                        cx,
-                    );
+                    // Dispatch to the matching backend by connection kind.
+                    // Telnet uses password-only auth; SSH keeps its full
+                    // password / private-key / passphrase flow.
+                    match kind {
+                        ConnectionKind::Telnet => {
+                            app.add_telnet_tab(
+                                &name,
+                                Some(row_id),
+                                &host,
+                                port_num,
+                                &username,
+                                &password,
+                                proxy_config,
+                                cx,
+                            );
+                        }
+                        _ => {
+                            app.add_ssh_tab(
+                                &name,
+                                Some(row_id),
+                                &host,
+                                port_num,
+                                &username,
+                                match auth_kind {
+                                    AuthKind::Password => &password,
+                                    AuthKind::Certificate => "",
+                                },
+                                private_key_arg,
+                                passphrase_arg,
+                                proxy_config,
+                                cx,
+                            );
+                        }
+                    }
                     cx.notify();
                 });
             }

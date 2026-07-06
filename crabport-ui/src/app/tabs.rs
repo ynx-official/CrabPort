@@ -12,6 +12,8 @@ use crate::components::notification::{Notification, NotificationLevel};
 use crate::views::terminal::TerminalView;
 use crabport_ssh::backend::SshBackend;
 use crabport_ssh::session::SshConnectionInfo;
+use crabport_telnet::backend::TelnetBackend;
+use crabport_telnet::session::TelnetConnectionInfo;
 use crabport_terminal::terminal::SftpTransferKind;
 
 impl CrabportApp {
@@ -270,6 +272,89 @@ impl CrabportApp {
         // SSH connection.
         terminal_view.update(cx, |view, _cx| {
             view.set_tunnel_source(tunnel_source);
+        });
+
+        self.terminal_views.insert(id, terminal_view);
+
+        self.active_tab_id = id;
+        id
+    }
+
+    /// Open a Telnet terminal tab. Mirrors `add_ssh_tab` but uses the
+    /// `TelnetBackend` (raw TCP + IAC negotiation, no SFTP / tunnels).
+    /// Credentials are not auto-sent in v1 — the server's `login:` /
+    /// `Password:` prompts pass through to the terminal so the user types
+    /// them. The password field is still persisted so saved hosts reconnect
+    /// without re-entry (a future auto-login flow can consume it).
+    pub fn add_telnet_tab(
+        &mut self,
+        name: &str,
+        host_id: Option<i64>,
+        host: &str,
+        port: u16,
+        username: &str,
+        password: &str,
+        proxy: Option<crabport_core::credential::ProxyConfig>,
+        cx: &mut Context<Self>,
+    ) -> u64 {
+        let id = self.next_tab_id;
+        self.next_tab_id += 1;
+        self.tabs.push(Tab {
+            id,
+            title: name.to_string(),
+            kind: TabKind::Terminal,
+            is_remote: true,
+        });
+
+        let mut info = TelnetConnectionInfo::new(host, username, password).with_port(port);
+        if let Some(p) = proxy {
+            info = info.with_proxy(p);
+        }
+
+        let cols: usize = 80;
+        let rows: usize = 24;
+
+        // Telnet has no host-key verification, but the connection overlay is
+        // still used for status logging ("Connecting to …", "TCP connection
+        // established").
+        let overlay: crate::views::terminal::connection_overlay::SharedOverlayState =
+            std::sync::Arc::new(parking_lot::Mutex::new(
+                crate::views::terminal::connection_overlay::ConnectionOverlayState::new(),
+            ));
+        let overlay_cb = overlay.clone();
+
+        let backend = Arc::new(TelnetBackend::new(
+            info,
+            cols as u16,
+            rows as u16,
+            Arc::new(move |msg: String| {
+                overlay_cb.lock().log(
+                    crate::views::terminal::connection_overlay::ConnectionLogLevel::Info,
+                    msg,
+                );
+            }),
+        ));
+        let terminal_view = cx.new(|cx| {
+            TerminalView::with_backend_and_host_and_overlay(
+                backend,
+                cols,
+                rows,
+                format!("{}@{}", username, host),
+                host_id,
+                overlay,
+                None, // no SshConnectionInfo for telnet
+                id,
+                cx,
+            )
+        });
+        // Auto-close the tab when the telnet session ends.
+        let app_handle = cx.entity().clone();
+        terminal_view.update(cx, |view, _cx| {
+            view.set_on_backend_closed(move |cx| {
+                app_handle.update(cx, |app, cx| {
+                    app.close_tab(id, cx);
+                });
+            });
         });
 
         self.terminal_views.insert(id, terminal_view);

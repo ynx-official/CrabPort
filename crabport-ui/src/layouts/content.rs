@@ -8,10 +8,11 @@ use crate::app::AppCtx;
 use crate::app::{CrabportApp, SidebarItem, Tab, TabKind};
 use crate::color::*;
 use crate::components::dialog::{AlertSeverity, AlertState};
-use crate::layouts::panel::render_panel;
+use crate::layouts::panel::{PanelCaps, render_panel};
 use crate::layouts::tabbar::render_tab_bar;
 use crate::layouts::terminal_toolbar::render_terminal_toolbar;
 use crate::views::hosts::{ConnectionFormState, ConnectionHost};
+use crate::views::panel::PanelKind;
 use crate::views::terminal::TerminalView;
 
 pub fn render_content(
@@ -22,10 +23,11 @@ pub fn render_content(
     terminal_views: &HashMap<u64, Entity<TerminalView>>,
     hosts: &[ConnectionHost],
     form_entity: Option<&ConnectionFormState>,
-    // Active index of the right-hand panel tab strip (SFTP / History /
-    // Snippets). Read by the caller (which owns the `CrabportApp` borrow)
-    // and passed in to avoid a nested `handle.read_with` during render.
-    panel_active_tab: usize,
+    // Active panel pane the user last selected (semantic identity, not a
+    // positional index — see `PanelKind`). Read by the caller (which owns
+    // the `CrabportApp` borrow) and passed in to avoid a nested
+    // `handle.read_with` during render.
+    panel_active_tab: PanelKind,
     // Pre-read by the caller (which owns the `CrabportApp` borrow) to avoid
     // a nested `handle.read_with` during render — same reason as
     // `panel_active_tab`.
@@ -381,8 +383,36 @@ pub fn render_content(
         None
     };
 
-    let has_sftp = !sftp_entries.is_empty();
-    let is_remote = active_tab.map(|t| t.is_remote).unwrap_or(false);
+    // ---- Panel capability flags ----
+    //
+    // Each right-hand panel pane is shown only when the active terminal's
+    // backend reports the matching capability. This replaces the old
+    // `has_sftp || is_remote` gate so a Telnet tab shows History + Snippets
+    // (no SFTP / Tunnels) while an SSH tab shows all four, and a local PTY
+    // tab shows History + Snippets.
+    // `is_remote` is retained for the tunnels-panel comment context but no
+    // longer gates panel visibility — `cap_tunnels` (from the backend's
+    // `allow_tunnels()`) is the source of truth now.
+    let _is_remote = active_tab.map(|t| t.is_remote).unwrap_or(false);
+    let (cap_sftp, cap_history, cap_snippets, cap_tunnels) = if is_terminal {
+        active_tab
+            .and_then(|tab| terminal_views.get(&tab.id))
+            .map(|entity| {
+                entity.read_with(cx, |view, _cx| {
+                    (
+                        view.allow_sftp(),
+                        view.allow_history(),
+                        view.allow_snippets(),
+                        view.allow_tunnels(),
+                    )
+                })
+            })
+            .unwrap_or((false, false, false, false))
+    } else {
+        (false, false, false, false)
+    };
+    // SFTP panel visibility follows the backend's capability (`cap_sftp`),
+    // used directly below — no separate `has_sftp` alias needed.
     sftp_panel.update(cx, |panel, cx| {
         panel.set_state(
             sftp_entries,
@@ -404,9 +434,10 @@ pub fn render_content(
     // Wire the tunnel list + start/stop callbacks. Start routes to
     // `app.start_tunnel_borrowed(tunnel_id, tab_id, cx)` so the tunnel
     // reuses the active tab's SSH connection. Stop routes to
-    // `app.stop_tunnel`. Only wire for remote (SSH) tabs — local PTY
-    // backends expose no tunnel source, so borrowed tunnels can't start.
-    let tunnels_on_start: Option<Rc<dyn Fn(i64, &mut App)>> = if is_terminal && is_remote {
+    // `app.stop_tunnel`. Only wire `on_start` for backends that can lend
+    // their connection (`cap_tunnels`) — a local PTY or Telnet backend
+    // exposes no tunnel source, so borrowed tunnels can't start.
+    let tunnels_on_start: Option<Rc<dyn Fn(i64, &mut App)>> = if is_terminal && cap_tunnels {
         let handle_for_start = handle.clone();
         let tab_id = active_tab_id;
         Some(Rc::new(move |tunnel_id: i64, cx: &mut App| {
@@ -603,18 +634,49 @@ pub fn render_content(
                 .child(view)
                 .child({
                     let handle_for_panel = handle.clone();
+                    // Capture the capability flags so the `on_change` closure
+                    // can recompute the visible-pane-kind list and map the
+                    // positional index back to a `PanelKind`. The flags are a
+                    // snapshot from this render — if the active tab changes
+                    // the next render rebuilds the closure with fresh flags.
+                    let c_sftp = cap_sftp;
+                    let c_history = cap_history;
+                    let c_snippets = cap_snippets;
+                    let c_tunnels = cap_tunnels;
                     render_panel(
                         is_terminal,
                         panel_active_tab,
-                        has_sftp || is_remote,
+                        PanelCaps {
+                            sftp: c_sftp,
+                            history: c_history,
+                            snippets: c_snippets,
+                            tunnels: c_tunnels,
+                        },
                         sftp_panel.clone(),
                         snippets_panel.clone(),
                         history_panel.clone(),
                         tunnels_panel.clone(),
                         Some(std::rc::Rc::new(move |idx, _w, cx| {
+                            // Rebuild the visible-kind list in the same fixed
+                            // order as `render_panel` so the index aligns.
+                            let mut kinds: Vec<PanelKind> = Vec::with_capacity(4);
+                            if c_sftp {
+                                kinds.push(PanelKind::Sftp);
+                            }
+                            if c_history {
+                                kinds.push(PanelKind::History);
+                            }
+                            if c_snippets {
+                                kinds.push(PanelKind::Snippets);
+                            }
+                            if c_tunnels {
+                                kinds.push(PanelKind::Tunnels);
+                            }
                             handle_for_panel.update(cx, |app, cx| {
-                                app.panel_active_tab = idx;
-                                cx.notify();
+                                if let Some(k) = kinds.get(idx).copied() {
+                                    app.panel_active_tab = k;
+                                    cx.notify();
+                                }
                             });
                         })),
                     )

@@ -239,6 +239,8 @@ impl ConnectionFormState {
     /// Rules:
     /// - SSH / Telnet: host and username are required.
     /// - SSH + Password auth: password is required.
+    /// - Telnet: password is required (credentials are sent via the terminal
+    ///   prompt in v1, but we still require one so saved hosts reconnect).
     /// - SSH + Certificate auth: a private key is required — either pasted
     ///   key content OR a key file path picked via "Browse…" (passphrase
     ///   is optional).
@@ -276,6 +278,10 @@ impl ConnectionFormState {
                     // passphrase is optional — no check.
                 }
             }
+        }
+
+        if self.kind == ConnectionKind::Telnet && self.pass_text(cx).trim().is_empty() {
+            errors.pass = Some(t!("connection_form.error_password_required").into());
         }
 
         if self.proxy_kind == ProxyKind::Custom && self.proxy_url_text(cx).trim().is_empty() {
@@ -782,6 +788,19 @@ fn render_dialog(
                                         .when_some(errors.user.clone(), |el, e| el.error(e)),
                                 ),
                             )
+                            // Password (telnet sends credentials via the
+                            // terminal prompt in v1, but we still capture +
+                            // persist it so saved hosts can reconnect without
+                            // re-typing.)
+                            .child(
+                                div().child(
+                                    StyledPasswordInput::new("telnet-password", pass_input.clone())
+                                        .label(t!("connection_form.password").to_string())
+                                        .focused(pass_focused)
+                                        .when_some(errors.pass.clone(), |el, e| el.error(e))
+                                        .on_toggle(|_, _| {}),
+                                ),
+                            )
                             // Proxy tabs
                             .child(WithProxyForm {
                                 proxy_url_input: proxy_url_input.clone(),
@@ -798,10 +817,13 @@ fn render_dialog(
                         } else {
                             0.0
                         };
-                        // host+port row + gap_4 + username + gap_4 + proxy section
+                        // host+port row + gap_4 + username + gap_4 +
+                        // password + gap_4 + proxy section
                         field_h(errors.host.is_some())
                             + 16.0
                             + field_h(errors.user.is_some())
+                            + 16.0
+                            + field_h(errors.pass.is_some())
                             + 16.0
                             + 21.0   // "Proxy" label (text_xs + 2px rounding)
                             + 4.0    // gap_1
@@ -825,7 +847,7 @@ fn render_dialog(
                 )
                 .on_change({
                     let app = app.clone();
-                    move |index, _w, cx| {
+                    move |index, w, cx| {
                         app.update(cx, |app, cx| {
                             if let Some(ref mut form) = app.connection_form {
                                 form.kind = match index {
@@ -833,6 +855,22 @@ fn render_dialog(
                                     1 => ConnectionKind::Telnet,
                                     _ => ConnectionKind::Serial,
                                 };
+                                // Adjust the default port to match the new
+                                // connection type (SSH 22 / Telnet 23) — but
+                                // only when the user hasn't overridden it.
+                                // We treat the current value as default if it
+                                // matches either standard port.
+                                let cur = form.port_text(cx);
+                                let new_port = match form.kind {
+                                    ConnectionKind::SSH => "22",
+                                    ConnectionKind::Telnet => "23",
+                                    ConnectionKind::Serial => "22",
+                                };
+                                if cur == "22" || cur == "23" || cur.is_empty() {
+                                    form.port_input.update(cx, |state, cx| {
+                                        state.set_value(new_port, w, cx);
+                                    });
+                                }
                                 cx.notify();
                             }
                         });

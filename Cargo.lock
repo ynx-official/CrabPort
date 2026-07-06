@@ -1394,6 +1394,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "crabport-telnet"
+version = "0.1.0"
+dependencies = [
+ "async-broadcast",
+ "async-channel 2.5.0",
+ "crabport-core",
+ "crabport-proxy",
+ "crabport-terminal",
+ "parking_lot",
+ "smol",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "crabport-terminal"
 version = "0.1.0"
 dependencies = [
@@ -1423,6 +1438,7 @@ dependencies = [
  "crabport-core",
  "crabport-sftp",
  "crabport-ssh",
+ "crabport-telnet",
  "crabport-terminal",
  "gpui",
  "gpui-animation",

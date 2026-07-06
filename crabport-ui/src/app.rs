@@ -61,9 +61,11 @@ pub struct CrabportApp {
     pub terminal_views: HashMap<u64, Entity<TerminalView>>,
     pub hosts: Vec<ConnectionHost>,
     pub connection_form: Option<ConnectionFormState>,
-    /// Active index of the right-hand panel's tab strip (SFTP / History /
-    /// Snippets). Driven by `Tabs::on_change` in `render_panel`.
-    pub panel_active_tab: usize,
+    /// Which right-hand panel pane the user last selected. Stored as a
+    /// semantic [`PanelKind`] (not a positional index) so the selection
+    /// survives switches between terminal backends whose pane sets differ
+    /// (e.g. SSH shows all four; Telnet shows only History + Snippets).
+    pub panel_active_tab: crate::views::panel::PanelKind,
     /// Tunnel form window state (singleton dialog for creating/editing a
     /// tunnel config). `None` when the dialog is closed.
     pub tunnel_form: Option<crate::views::tunnels::TunnelFormState>,
@@ -208,7 +210,7 @@ impl CrabportApp {
             terminal_views: HashMap::new(),
             hosts,
             connection_form: None,
-            panel_active_tab: 0,
+            panel_active_tab: crate::views::panel::PanelKind::default(),
             tunnel_form: None,
             snippet_form: None,
             app_ctx,

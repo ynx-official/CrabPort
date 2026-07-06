@@ -470,6 +470,18 @@ impl TerminalView {
         self.session.allow_sftp()
     }
 
+    pub fn allow_history(&self) -> bool {
+        self.session.allow_history()
+    }
+
+    pub fn allow_snippets(&self) -> bool {
+        self.session.allow_snippets()
+    }
+
+    pub fn allow_tunnels(&self) -> bool {
+        self.session.allow_tunnels()
+    }
+
     pub fn sftp_entries(&self) -> Option<std::sync::Arc<Vec<(String, bool)>>> {
         self.session.sftp_entries()
     }
