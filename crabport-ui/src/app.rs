@@ -341,7 +341,7 @@ impl Render for CrabportApp {
         // ---- Root ----
         div()
             .size_full()
-            .bg(rgb(BG_BASE))
+            .bg(rgb(bg_base()))
             .flex()
             .flex_row()
             .key_context("App")

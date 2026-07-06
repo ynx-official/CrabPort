@@ -31,6 +31,10 @@ pub struct Button {
     bg_disabled: u32,
     border: u32,
     text_disabled: u32,
+    /// Override for the icon's `text_color`. When `Some`, the svg uses this
+    /// instead of the default selected/muted heuristic — used by
+    /// `.primary()` so the icon stays light on a colored background.
+    icon_color: Option<u32>,
 }
 
 impl Styled for Button {
@@ -59,12 +63,13 @@ impl Button {
             disabled: None,
             centered: false,
             multiline: false,
-            bg: BTN_BG,
-            bg_hover: BTN_BG_HOVER,
-            bg_selected: BTN_BG_SELECTED,
-            bg_disabled: BTN_BG_DISABLED,
-            border: BTN_BORDER,
-            text_disabled: BTN_TEXT_DISABLED,
+            bg: btn_bg(),
+            bg_hover: btn_bg_hover(),
+            bg_selected: btn_bg_selected(),
+            bg_disabled: btn_bg_disabled(),
+            border: btn_border(),
+            text_disabled: btn_text_disabled(),
+            icon_color: None,
         }
     }
 
@@ -72,24 +77,29 @@ impl Button {
 
     pub fn tab(self) -> Self {
         Self {
-            bg: TAB_BTN_BG,
-            bg_hover: TAB_BTN_BG_HOVER,
-            bg_selected: TAB_BTN_BG_SELECTED,
-            bg_disabled: TAB_BTN_BG_DISABLED,
-            border: TAB_BTN_BORDER,
-            text_disabled: TAB_BTN_TEXT_DISABLED,
+            bg: tab_btn_bg(),
+            bg_hover: tab_btn_bg_hover(),
+            bg_selected: tab_btn_bg_selected(),
+            bg_disabled: tab_btn_bg_disabled(),
+            border: tab_btn_border(),
+            text_disabled: tab_btn_text_disabled(),
             ..self
         }
     }
 
     pub fn primary(self) -> Self {
         Self {
-            bg: BTN_PRIMARY_BG,
-            bg_hover: BTN_PRIMARY_BG_HOVER,
-            bg_selected: BTN_PRIMARY_BG_SELECTED,
-            bg_disabled: BTN_PRIMARY_BG_DISABLED,
-            border: BTN_PRIMARY_BORDER,
-            text_disabled: BTN_PRIMARY_TEXT_DISABLED,
+            bg: btn_primary_bg(),
+            bg_hover: btn_primary_bg_hover(),
+            bg_selected: btn_primary_bg_selected(),
+            bg_disabled: btn_primary_bg_disabled(),
+            border: btn_primary_border(),
+            text_disabled: btn_primary_text_disabled(),
+            // The primary button sits on a saturated accent fill, so the
+            // icon must be light — same family as text_primary — regardless
+            // of selection state. Without this, the default muted icon
+            // disappears against the colored background.
+            icon_color: Some(text_primary()),
             ..self
         }
     }
@@ -98,12 +108,12 @@ impl Button {
     /// a subtle surface background. Good for icon-only action buttons nested
     /// inside rows (edit / delete / etc.).
     pub fn ghost(mut self) -> Self {
-        self.bg = BTN_GHOST_BG;
-        self.bg_hover = BTN_GHOST_BG_HOVER;
-        self.bg_selected = BTN_GHOST_BG_SELECTED;
-        self.bg_disabled = BTN_GHOST_BG_DISABLED;
-        self.border = BTN_GHOST_BORDER;
-        self.text_disabled = BTN_GHOST_TEXT_DISABLED;
+        self.bg = btn_ghost_bg();
+        self.bg_hover = btn_ghost_bg_hover();
+        self.bg_selected = btn_ghost_bg_selected();
+        self.bg_disabled = btn_ghost_bg_disabled();
+        self.border = btn_ghost_border();
+        self.text_disabled = btn_ghost_text_disabled();
         self
     }
 
@@ -143,6 +153,14 @@ impl Button {
 
     pub fn icon(mut self, path: impl Into<SharedString>) -> Self {
         self.icon = Some(path.into());
+        self
+    }
+
+    /// Override the icon's `text_color`. Use when a button sits on a
+    /// colored background where the default muted icon would be unreadable
+    /// (e.g. a primary button on a saturated accent fill).
+    pub fn icon_color(mut self, color: u32) -> Self {
+        self.icon_color = Some(color);
         self
     }
 
@@ -241,12 +259,15 @@ impl RenderOnce for Button {
         // Icon color follows the selection state so unselected tabs read as
         // muted and the active tab pops. GPUI's svg does not inherit
         // text_color from the parent div, so this must be set on the svg
-        // itself.
-        let icon_color = if self.selected.unwrap_or_default() {
-            TEXT_PRIMARY
-        } else {
-            TEXT_MUTED
-        };
+        // itself. A primary button overrides this to keep the icon light on
+        // a colored fill.
+        let icon_color = self.icon_color.unwrap_or_else(|| {
+            if self.selected.unwrap_or_default() {
+                text_primary()
+            } else {
+                text_muted()
+            }
+        });
 
         // Icon
         let icon_el = self.icon.map(|path| {
@@ -317,7 +338,7 @@ impl RenderOnce for Button {
                                 svg()
                                     .path("icons/close.svg")
                                     .size_3p5()
-                                    .text_color(rgb(TEXT_PRIMARY)),
+                                    .text_color(rgb(text_primary())),
                             )
                             .on_click({
                                 let on_close = self.on_close.clone();
@@ -328,7 +349,7 @@ impl RenderOnce for Button {
                                     cx.stop_propagation();
                                 }
                             })
-                            .bg(rgb(SURFACE_ACTIVE)),
+                            .bg(rgb(surface_active())),
                     )
                     .with_transition(close_opacity_id)
                     .transition_on_hover(Duration::from_millis(100), Linear, |hovered, el| {
@@ -358,7 +379,7 @@ impl RenderOnce for Button {
                     .cursor_not_allowed()
             },
             move |this| {
-                this.text_color(rgb(TEXT_PRIMARY))
+                this.text_color(rgb(text_primary()))
                     .when_some(self.on_hover, |this, on_hover| {
                         this.on_hover(move |h, w, a| (on_hover)(h, w, a))
                     })

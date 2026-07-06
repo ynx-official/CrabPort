@@ -209,6 +209,11 @@ window:
       section_language: "Language"
       language_en: "English"
       language_zh_cn: "简体中文"
+      section_theme: "Theme"
+      theme_desc: "Choose a color preset. Individual colors can be tweaked in config.toml."
+      theme_modern_dark: "Modern Dark"
+      theme_mocha: "Catppuccin Mocha"
+      theme_tokyo_night: "Tokyo Night"
 menu:
   app_name: "CrabPort"
   about: "About CrabPort"

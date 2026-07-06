@@ -172,7 +172,7 @@ impl RenderOnce for Dropdown {
         let chevron = svg()
             .path("icons/chevron-down.svg")
             .size_4()
-            .text_color(rgb(TEXT_MUTED))
+            .text_color(rgb(text_muted()))
             .with_transformation(Transformation::rotate(radians(if is_open {
                 PI
             } else {
@@ -189,9 +189,9 @@ impl RenderOnce for Dropdown {
             .h_9()
             .px_3()
             .rounded_md()
-            .bg(rgb(if disabled { INPUT_BG_DISABLED } else { BG_BASE }))
+            .bg(rgb(if disabled { input_bg_disabled() } else { bg_base() }))
             .border_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(border()))
             .when_else(
                 disabled,
                 |el| el.cursor_not_allowed().opacity(0.5),
@@ -201,9 +201,9 @@ impl RenderOnce for Dropdown {
                 div()
                     .text_sm()
                     .text_color(rgb(if disabled {
-                        INPUT_TEXT_DISABLED
+                        input_text_disabled()
                     } else {
-                        TEXT_PRIMARY
+                        text_primary()
                     }))
                     .child(selected_label),
             )
@@ -261,12 +261,12 @@ impl RenderOnce for Dropdown {
                     .cursor_pointer()
                     .text_sm()
                     .text_color(rgb(if is_selected {
-                        TEXT_PRIMARY
+                        text_primary()
                     } else {
-                        TEXT_MUTED
+                        text_muted()
                     }))
-                    .bg(rgb(BG_BASE))
-                    .hover(|s| s.bg(rgb(SURFACE_ACTIVE)))
+                    .bg(rgb(bg_base()))
+                    .hover(|s| s.bg(rgb(surface_active())))
                     .child(item.label)
                     .on_click(move |_e, w, cx| {
                         if let Some(ref f) = cb {
@@ -287,8 +287,8 @@ impl RenderOnce for Dropdown {
             .overflow_hidden()
             .rounded_md()
             .border_1()
-            .border_color(rgb(BORDER))
-            .bg(rgb(BG_BASE))
+            .border_color(rgb(border()))
+            .bg(rgb(bg_base()))
             .opacity(0.)
             .h(px(0.))
             .when(is_open, |el| el.occlude())

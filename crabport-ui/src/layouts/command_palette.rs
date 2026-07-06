@@ -170,7 +170,7 @@ fn render_search_bar(search_state: Option<&Entity<InputState>>) -> AnyElement {
                 svg()
                     .path("icons/search.svg")
                     .size_4()
-                    .text_color(rgb(TEXT_MUTED)),
+                    .text_color(rgb(text_muted())),
             )
             .appearance(false)
             .bordered(false)
@@ -185,13 +185,13 @@ fn render_search_bar(search_state: Option<&Entity<InputState>>) -> AnyElement {
                 svg()
                     .path("icons/search.svg")
                     .size_4()
-                    .text_color(rgb(TEXT_MUTED)),
+                    .text_color(rgb(text_muted())),
             )
             .child(
                 div()
                     .flex_1()
                     .text_sm()
-                    .text_color(rgb(TEXT_MUTED))
+                    .text_color(rgb(text_muted()))
                     .child(t!("new_connection.search").to_string()),
             )
             .into_any_element()
@@ -227,7 +227,7 @@ fn render_overlay(
             is_open,
             Duration::from_millis(150),
             Linear,
-            |el| el.bg(rgba(COMMAND_OVERLAY)),
+            |el| el.bg(rgba(command_overlay())),
             |el| el.bg(rgba(0x00000000)),
         )
 }
@@ -246,9 +246,9 @@ fn render_dialog(
         .id(dialog_id.clone())
         .w(px(520.0))
         .max_h(px(420.0))
-        .bg(rgb(COMMAND_BG))
+        .bg(rgb(command_bg()))
         .border_1()
-        .border_color(rgb(COMMAND_BORDER))
+        .border_color(rgb(command_border()))
         .rounded_lg()
         .shadow_lg()
         .flex()
@@ -275,7 +275,7 @@ fn render_dialog(
                 .px_3()
                 .py_2()
                 .border_b_1()
-                .border_color(rgb(COMMAND_BORDER))
+                .border_color(rgb(command_border()))
                 .child(search),
         )
         // --- Scrollable item list ---
@@ -334,7 +334,7 @@ fn render_hosts_list(
                     },
                 )
             }))
-            .child(div().h_px().bg(rgb(COMMAND_BORDER)).mx_1().my_1())
+            .child(div().h_px().bg(rgb(command_border())).mx_1().my_1())
     })
 }
 
@@ -387,7 +387,7 @@ fn command_item(
         .px_2()
         .py_2()
         .rounded_sm()
-        .bg(rgb(COMMAND_BG))
+        .bg(rgb(command_bg()))
         .when(enabled, |el| {
             el.on_click(move |_e, w, cx| {
                 gpui_animation::reset_transition(&id_for_reset);
@@ -397,16 +397,16 @@ fn command_item(
         .with_transition(id.clone())
         .transition_on_hover(Duration::from_millis(120), Linear, |hovered, el| {
             if *hovered {
-                el.bg(rgb(COMMAND_ITEM_HOVER))
+                el.bg(rgb(command_item_hover()))
             } else {
-                el.bg(rgb(COMMAND_BG))
+                el.bg(rgb(command_bg()))
             }
         })
         .child(
             svg()
                 .path(icon_path)
                 .size_4()
-                .text_color(rgb(TEXT_MUTED))
+                .text_color(rgb(text_muted()))
                 .flex_shrink_0(),
         )
         .child(
@@ -423,7 +423,7 @@ fn command_item(
                         .child(
                             div()
                                 .text_sm()
-                                .text_color(rgb(TEXT_PRIMARY))
+                                .text_color(rgb(text_primary()))
                                 .child(label.clone()),
                         )
                         .when(is_favorite, |el| {
@@ -431,7 +431,7 @@ fn command_item(
                                 svg()
                                     .path("icons/star.svg")
                                     .size_3()
-                                    .text_color(rgb(0xf9e2af)), // TERM_YELLOW
+                                    .text_color(rgb(term_yellow())),
                             )
                         }),
                 )
@@ -439,7 +439,7 @@ fn command_item(
                     el.child(
                         div()
                             .text_xs()
-                            .text_color(rgb(TEXT_MUTED))
+                            .text_color(rgb(text_muted()))
                             .mt_0p5()
                             .child(desc),
                     )
@@ -454,6 +454,6 @@ fn group_label(text: impl Into<SharedString>) -> impl IntoElement {
         .pb_1()
         .text_xs()
         .font_weight(FontWeight::MEDIUM)
-        .text_color(rgb(COMMAND_GROUP_LABEL))
+        .text_color(rgb(command_group_label()))
         .child(text.into())
 }

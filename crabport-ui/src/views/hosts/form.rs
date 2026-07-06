@@ -495,9 +495,9 @@ fn render_dialog(
     div()
         .id(dialog_id.clone())
         .w(px(420.0))
-        .bg(rgb(BG_BASE))
+        .bg(rgb(bg_base()))
         .border_1()
-        .border_color(rgb(BORDER))
+        .border_color(rgb(border()))
         .rounded_lg()
         .shadow_lg()
         .flex()
@@ -524,7 +524,7 @@ fn render_dialog(
             div()
                 .text_lg()
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(TEXT_PRIMARY))
+                .text_color(rgb(text_primary()))
                 .child(t!("connection_form.title").to_string()),
         )
         // Name
@@ -756,7 +756,7 @@ fn render_dialog(
                             .items_center()
                             .justify_center()
                             .text_sm()
-                            .text_color(rgb(TEXT_MUTED))
+                            .text_color(rgb(text_muted()))
                             .child(t!("connection_form.coming_soon").to_string()),
                     )
                     .height(px(80.0)),

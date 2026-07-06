@@ -109,8 +109,8 @@ impl AboutWindow {
             .w(px(160.0))
             .flex_shrink_0()
             .border_r_1()
-            .border_color(rgb(BORDER))
-            .bg(rgb(BG_SIDEBAR))
+            .border_color(rgb(border()))
+            .bg(rgb(bg_sidebar()))
             .flex()
             .flex_col()
             .pt_11()
@@ -146,13 +146,13 @@ impl AboutWindow {
             .child(
                 div()
                     .text_2xl()
-                    .text_color(rgb(TEXT_PRIMARY))
+                    .text_color(rgb(text_primary()))
                     .child("CrabPort"),
             )
             .child(
                 div()
                     .text_sm()
-                    .text_color(rgb(TEXT_MUTED))
+                    .text_color(rgb(text_muted()))
                     .child(format!("v{}", self.version)),
             )
     }
@@ -191,11 +191,11 @@ impl AboutWindow {
                             .gap_2()
                             .px_3()
                             .text_xs()
-                            .text_color(rgb(TEXT_PRIMARY))
+                            .text_color(rgb(text_primary()))
                             .child(Label::new(name.to_string()))
                             .child(
                                 div()
-                                    .text_color(rgb(TEXT_MUTED))
+                                    .text_color(rgb(text_muted()))
                                     .child(Label::new(ver.to_string())),
                             )
                     })
@@ -222,13 +222,13 @@ impl AboutWindow {
                     .child(
                         div()
                             .text_sm()
-                            .text_color(rgb(TEXT_PRIMARY))
+                            .text_color(rgb(text_primary()))
                             .child(t!("window.about.license").to_string()),
                     )
                     .child(
                         div()
                             .text_sm()
-                            .text_color(rgb(TEXT_MUTED))
+                            .text_color(rgb(text_muted()))
                             .child(LICENSE_NAME),
                     ),
             )
@@ -236,7 +236,7 @@ impl AboutWindow {
             .child(
                 div()
                     .text_sm()
-                    .text_color(rgb(TEXT_PRIMARY))
+                    .text_color(rgb(text_primary()))
                     .child(t!("window.about.dependencies").to_string()),
             )
             .child(
@@ -245,8 +245,8 @@ impl AboutWindow {
                     .flex_1()
                     .min_h_0()
                     .border_1()
-                    .border_color(rgb(BORDER))
-                    .bg(rgb(BG_TAB_BAR))
+                    .border_color(rgb(border()))
+                    .bg(rgb(bg_tab_bar()))
                     .rounded_md()
                     .overflow_hidden()
                     .child(deps_list)
@@ -275,7 +275,7 @@ impl Render for AboutWindow {
 
         div()
             .size_full()
-            .bg(rgb(BG_BASE))
+            .bg(rgb(bg_base()))
             .flex()
             .flex_row()
             .child(self.render_sidebar(cx))

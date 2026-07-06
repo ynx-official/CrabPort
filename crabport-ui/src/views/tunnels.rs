@@ -40,12 +40,24 @@ use crate::views::hosts::ConnectionHost;
 
 use crabport_core::credential::TunnelKind;
 
-/// Color accents for the kind badge (subtle tint, not the full primary blue).
-const KIND_LOCAL_COLOR: u32 = 0x89b4fa; // blue-ish
-const KIND_REMOTE_COLOR: u32 = 0xf9c2ff; // mauve-ish
-const KIND_DYNAMIC_COLOR: u32 = 0xf9e2af; // yellow-ish
-const STATUS_RUNNING_COLOR: u32 = 0xa6e3a1; // green
-const STATUS_STOPPED_COLOR: u32 = 0x585b70; // muted
+/// Color accents for the kind badge (subtle tint, not the full primary
+/// blue). Read live from the theme so a preset switch recolors the
+/// badges too.
+fn kind_local_color() -> u32 {
+    term_blue()
+}
+fn kind_remote_color() -> u32 {
+    term_magenta()
+}
+fn kind_dynamic_color() -> u32 {
+    term_yellow()
+}
+fn status_running_color() -> u32 {
+    term_green()
+}
+fn status_stopped_color() -> u32 {
+    text_muted()
+}
 
 /// Tunnels sidebar view. Holds its own hover state so the action buttons can
 /// fade in with easing when the row is hovered — without polluting
@@ -187,7 +199,7 @@ impl Render for TunnelsView {
                         div()
                             .text_lg()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(TEXT_PRIMARY))
+                            .text_color(rgb(text_primary()))
                             .child(t!("sidebar.tunnels").to_string()),
                     )
                     .child(
@@ -205,7 +217,7 @@ impl Render for TunnelsView {
                     ),
             )
             // --- Separator ---
-            .child(div().h_px().bg(rgb(BORDER)).mx_4())
+            .child(div().h_px().bg(rgb(border())).mx_4())
             // --- Tunnels list (or empty state) ---
             .child(
                 div()
@@ -218,7 +230,7 @@ impl Render for TunnelsView {
                         |el| {
                             el.flex().items_center().justify_center().child(
                                 div()
-                                    .text_color(rgb(TEXT_MUTED))
+                                    .text_color(rgb(text_muted()))
                                     .text_sm()
                                     .child(t!("tunnels.empty").to_string()),
                             )
@@ -317,7 +329,7 @@ pub fn render_tunnels_view(on_new: impl Fn(&mut Window, &mut App) + 'static) -> 
                     div()
                         .text_lg()
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(TEXT_PRIMARY))
+                        .text_color(rgb(text_primary()))
                         .child(t!("sidebar.tunnels").to_string()),
                 )
                 .child(
@@ -332,7 +344,7 @@ pub fn render_tunnels_view(on_new: impl Fn(&mut Window, &mut App) + 'static) -> 
                         }),
                 ),
         )
-        .child(div().h_px().bg(rgb(BORDER)).mx_4())
+        .child(div().h_px().bg(rgb(border())).mx_4())
         .child(
             div()
                 .flex_1()
@@ -344,7 +356,7 @@ pub fn render_tunnels_view(on_new: impl Fn(&mut Window, &mut App) + 'static) -> 
                 .justify_center()
                 .child(
                     div()
-                        .text_color(rgb(TEXT_MUTED))
+                        .text_color(rgb(text_muted()))
                         .text_sm()
                         .child(t!("tunnels.empty").to_string()),
                 ),
@@ -378,16 +390,20 @@ fn tunnel_row(
 
     // Kind badge label + accent color + secondary address line.
     let (kind_letter, kind_label, kind_color) = match tunnel.kind {
-        TunnelKind::Local => ("L", t!("tunnels.kind_local").to_string(), KIND_LOCAL_COLOR),
+        TunnelKind::Local => (
+            "L",
+            t!("tunnels.kind_local").to_string(),
+            kind_local_color(),
+        ),
         TunnelKind::Remote => (
             "R",
             t!("tunnels.kind_remote").to_string(),
-            KIND_REMOTE_COLOR,
+            kind_remote_color(),
         ),
         TunnelKind::Dynamic => (
             "D",
             t!("tunnels.kind_dynamic").to_string(),
-            KIND_DYNAMIC_COLOR,
+            kind_dynamic_color(),
         ),
     };
     let bind_display = if tunnel.bind_addr.is_empty() {
@@ -411,11 +427,11 @@ fn tunnel_row(
             t!("tunnels.owned").to_string()
         };
         (
-            STATUS_RUNNING_COLOR,
+            status_running_color(),
             format!("{} ({})", t!("tunnels.running").to_string(), suffix),
         )
     } else {
-        (STATUS_STOPPED_COLOR, t!("tunnels.stopped").to_string())
+        (status_stopped_color(), t!("tunnels.stopped").to_string())
     };
 
     // Wrap the action callbacks in Rc so they can be cloned into both the
@@ -434,7 +450,7 @@ fn tunnel_row(
         .px_3()
         .py_2()
         .rounded_md()
-        .bg(rgb(BG_BASE))
+        .bg(rgb(bg_base()))
         // Right-click context menu: Start/Stop (contextual), Edit, Delete.
         .on_mouse_down(MouseButton::Right, {
             let on_edit = on_edit_rc.clone();
@@ -567,8 +583,8 @@ fn tunnel_row(
             is_highlighted,
             Duration::from_millis(120),
             Linear,
-            |el| el.bg(rgb(SURFACE_ACTIVE)),
-            |el| el.bg(rgb(BG_BASE)),
+            |el| el.bg(rgb(surface_active())),
+            |el| el.bg(rgb(bg_base())),
         )
         // --- Left: kind badge + tunnel info ---
         .child(
@@ -605,19 +621,19 @@ fn tunnel_row(
                             div()
                                 .text_sm()
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(TEXT_PRIMARY))
+                                .text_color(rgb(text_primary()))
                                 .child(tunnel.name.clone()),
                         )
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(TEXT_MUTED))
+                                .text_color(rgb(text_muted()))
                                 .child(address_line),
                         )
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(TEXT_MUTED))
+                                .text_color(rgb(text_muted()))
                                 .child(format!("{} · {}", host_name, kind_label)),
                         ),
                 ),
@@ -637,7 +653,7 @@ fn tunnel_row(
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(TEXT_MUTED))
+                            .text_color(rgb(text_muted()))
                             .child(status_text),
                     ),
             ),

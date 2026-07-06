@@ -3,8 +3,8 @@
 //! A toggle switch component with an animated sliding knob. Visual states:
 //!
 //! ```text
-//!  on       ── BTN_PRIMARY_BG track · white knob on the right
-//!  off      ── SURFACE_ACTIVE track · TEXT_MUTED knob on the left
+//!  on       ── btn_primary_bg() track · white knob on the right
+//!  off      ── surface_active() track · text_muted() knob on the left
 //!  disabled ── muted track, no pointer events
 //! ```
 //!
@@ -95,9 +95,9 @@ impl RenderOnce for Switch {
 
         // Track background: primary accent when on, muted surface when off.
         // Disabled overrides both to a desaturated tone.
-        let track_bg_on = BTN_PRIMARY_BG;
-        let track_bg_off = SURFACE_ACTIVE;
-        let track_bg_disabled = INPUT_BG_DISABLED;
+        let track_bg_on = btn_primary_bg();
+        let track_bg_off = surface_active();
+        let track_bg_disabled = input_bg_disabled();
 
         let track_id = ElementId::Name(format!("{:?}-track", self.id).into());
         let knob_id = ElementId::Name(format!("{:?}-knob", self.id).into());
@@ -109,8 +109,8 @@ impl RenderOnce for Switch {
 
         // Knob color: white when on (sits on the accent), muted when off.
         let knob_on = 0xffffff;
-        let knob_off = TEXT_MUTED;
-        let knob_disabled = BTN_TEXT_DISABLED;
+        let knob_off = text_muted();
+        let knob_disabled = btn_text_disabled();
 
         // ------------------------------------------------------------------
         // Knob — absolute, slides between left and right.

@@ -208,6 +208,11 @@ window:
       section_language: "语言"
       language_en: "English"
       language_zh_cn: "简体中文"
+      section_theme: "主题"
+      theme_desc: "选择配色预设。也可在 config.toml 中细调单个颜色。"
+      theme_modern_dark: "Modern Dark"
+      theme_mocha: "Catppuccin Mocha"
+      theme_tokyo_night: "Tokyo Night"
 menu:
   app_name: "CrabPort"
   about: "关于 CrabPort"

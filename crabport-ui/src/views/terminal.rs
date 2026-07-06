@@ -26,6 +26,7 @@ use gpui::*;
 use parking_lot::Mutex;
 
 use crate::app::{CrabPortTab, TerminalShiftTab, TerminalTab};
+use crate::color::{selection_bg, term_bg, term_cursor, term_fg};
 use crate::views::terminal::color::*;
 use crate::views::terminal::connection_overlay::*;
 use crate::views::terminal::fonts::palette;
@@ -920,7 +921,7 @@ impl Render for TerminalView {
             .size_full()
             .overflow_hidden()
             .cursor_text()
-            .bg(rgb(TERM_BG))
+            .bg(rgb(term_bg()))
             .track_focus(&focus_handle)
             .key_context("CrabPortTerminal")
             .on_action(cx.listener(|this, _: &TerminalTab, _window, cx| {
@@ -1168,7 +1169,7 @@ impl Render for TerminalView {
                         // Single viewport-wide background fill.
                         window.paint_quad(fill(
                             Bounds::new(bounds.origin, bounds.size),
-                            rgb(TERM_BG),
+                            rgb(term_bg()),
                         ));
 
                         let row_count = cache.rows_count;
@@ -1225,7 +1226,7 @@ impl Render for TerminalView {
                                     let wide = cell.flags.contains(Flags::WIDE_CHAR);
 
                                     let bg_color: Option<Hsla> = if is_sel {
-                                        Some(rgb(SELECTION_BG).into())
+                                        Some(rgb(selection_bg()).into())
                                     } else if is_inv {
                                         Some(rgb(cell.fg).into())
                                     } else if cell.custom_bg {
@@ -1344,7 +1345,7 @@ impl Render for TerminalView {
                                 text.len(),
                                 false,
                                 false,
-                                TERM_FG,
+                                term_fg(),
                                 false,
                                 0,
                                 true,
@@ -1775,7 +1776,7 @@ fn paint_cursor(
 ) {
     match shape {
         CursorShape::Block => {
-            let c: Hsla = rgb(TERM_CURSOR).into();
+            let c: Hsla = rgb(term_cursor()).into();
             window.paint_quad(fill(
                 Bounds::new(point(cx_x, cx_y), size(cell_width, line_height)),
                 c.opacity(0.5),
@@ -1784,7 +1785,7 @@ fn paint_cursor(
         CursorShape::HollowBlock => {
             window.paint_quad(outline(
                 Bounds::new(point(cx_x, cx_y), size(cell_width, line_height)),
-                rgb(TERM_CURSOR),
+                rgb(term_cursor()),
                 BorderStyle::Solid,
             ));
         }
@@ -1794,13 +1795,13 @@ fn paint_cursor(
                     point(cx_x, cx_y + line_height - px(2.0)),
                     size(cell_width, px(2.0)),
                 ),
-                rgb(TERM_CURSOR),
+                rgb(term_cursor()),
             ));
         }
         CursorShape::Beam => {
             window.paint_quad(fill(
                 Bounds::new(point(cx_x, cx_y), size(px(1.5), line_height)),
-                rgb(TERM_CURSOR),
+                rgb(term_cursor()),
             ));
         }
         CursorShape::Hidden => {}

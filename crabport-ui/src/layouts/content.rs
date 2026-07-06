@@ -215,7 +215,7 @@ pub fn render_content(
                     .justify_center()
                     .child(
                         div()
-                            .text_color(rgb(TEXT_MUTED))
+                            .text_color(rgb(text_muted()))
                             .child(selected.label().to_string()),
                     )
                     .into_any_element(),
@@ -236,7 +236,7 @@ pub fn render_content(
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(div().text_color(rgb(TEXT_MUTED)).child("Terminal"))
+                    .child(div().text_color(rgb(text_muted())).child("Terminal"))
                     .into_any_element()
             }
         }
@@ -245,7 +245,7 @@ pub fn render_content(
             .flex()
             .items_center()
             .justify_center()
-            .child(div().text_color(rgb(TEXT_MUTED)).child("No tab"))
+            .child(div().text_color(rgb(text_muted())).child("No tab"))
             .into_any_element(),
     };
 
@@ -584,7 +584,7 @@ pub fn render_content(
     div()
         .flex_1()
         .h_full()
-        .bg(rgb(BG_BASE))
+        .bg(rgb(bg_base()))
         .flex()
         .flex_col()
         .child(render_tab_bar(

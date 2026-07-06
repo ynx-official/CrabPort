@@ -19,17 +19,12 @@ const TOOLBAR_HEIGHT: f32 = 36.0;
 
 fn status_color(status: RemoteStatus) -> u32 {
     match status {
-        RemoteStatus::Local => COLOR_LOCAL,
-        RemoteStatus::Connected => COLOR_SUCCESS,
-        RemoteStatus::Connecting => COLOR_WARNING,
-        RemoteStatus::Disconnected => COLOR_ERROR,
+        RemoteStatus::Local => term_bright_black(),
+        RemoteStatus::Connected => term_green(),
+        RemoteStatus::Connecting => term_yellow(),
+        RemoteStatus::Disconnected => term_red(),
     }
 }
-
-const COLOR_LOCAL: u32 = 0x585b70;
-const COLOR_SUCCESS: u32 = 0xa6e3a1;
-const COLOR_WARNING: u32 = 0xf9e2af;
-const COLOR_ERROR: u32 = 0xf38ba8;
 
 // Progress bar dimensions
 const BAR_WIDTH: f32 = 80.0;
@@ -69,9 +64,9 @@ pub fn render_terminal_toolbar(
             |el| el.h(px(TOOLBAR_HEIGHT)),
             |el| el.h_0(),
         )
-        .bg(rgb(BG_TAB_BAR))
+        .bg(rgb(bg_tab_bar()))
         .border_b_1()
-        .border_color(rgb(BORDER))
+        .border_color(rgb(border()))
         .when(show_toolbar, |el| {
             el.child(
                 div()
@@ -82,7 +77,7 @@ pub fn render_terminal_toolbar(
                     .items_center()
                     .px_3()
                     .gap_4()
-                    .text_color(rgb(TEXT_MUTED))
+                    .text_color(rgb(text_muted()))
                     .child(render_connection(status, metrics.latency_ms))
                     .children(render_memory(metrics.memory))
                     .children(render_network(metrics.network))
@@ -141,7 +136,7 @@ fn render_memory(memory: Option<MemoryStats>) -> Option<impl IntoElement> {
                 svg()
                     .path("icons/terminal-toolbar/memory-stick.svg")
                     .size(px(14.0))
-                    .text_color(rgb(TEXT_MUTED)),
+                    .text_color(rgb(text_muted())),
             )
             // Progress bar
             .child(
@@ -149,13 +144,13 @@ fn render_memory(memory: Option<MemoryStats>) -> Option<impl IntoElement> {
                     .w(px(BAR_WIDTH))
                     .h(px(BAR_HEIGHT))
                     .rounded(px(3.0))
-                    .bg(rgb(BORDER))
+                    .bg(rgb(border()))
                     .child(
                         div()
                             .id("memory-bar-fill")
                             .h_full()
                             .rounded(px(3.0))
-                            .bg(rgb(COLOR_ACCENT))
+                            .bg(rgb(color_accent()))
                             .with_transition("memory-bar-fill")
                             .transition_when(
                                 true,
@@ -188,7 +183,7 @@ fn render_network(network: Option<NetworkStats>) -> Option<impl IntoElement> {
                 svg()
                     .path("icons/terminal-toolbar/arrow-up-to-line.svg")
                     .size(px(12.0))
-                    .text_color(rgb(TEXT_MUTED)),
+                    .text_color(rgb(text_muted())),
             )
             .child(div().text_xs().child(format_rate(net.bytes_sent)))
             // Download
@@ -196,7 +191,7 @@ fn render_network(network: Option<NetworkStats>) -> Option<impl IntoElement> {
                 svg()
                     .path("icons/terminal-toolbar/arrow-down-to-line.svg")
                     .size(px(12.0))
-                    .text_color(rgb(TEXT_MUTED)),
+                    .text_color(rgb(text_muted())),
             )
             .child(div().text_xs().child(format_rate(net.bytes_recv))),
     )
@@ -259,12 +254,12 @@ fn render_sftp_progress(progress: Option<SftpProgress>) -> Option<impl IntoEleme
         SftpTransferKind::Upload => t!("sftp.progress.upload").to_string(),
     };
     let (stage_label, stage_color) = match p.stage {
-        SftpTransferStage::Compress => (t!("sftp.progress.compress").to_string(), COLOR_WARNING),
-        SftpTransferStage::Transfer => (t!("sftp.progress.transfer").to_string(), COLOR_ACCENT),
+        SftpTransferStage::Compress => (t!("sftp.progress.compress").to_string(), term_yellow()),
+        SftpTransferStage::Transfer => (t!("sftp.progress.transfer").to_string(), color_accent()),
         SftpTransferStage::Decompress => {
-            (t!("sftp.progress.decompress").to_string(), COLOR_WARNING)
+            (t!("sftp.progress.decompress").to_string(), term_yellow())
         }
-        SftpTransferStage::CleanUp => (t!("sftp.progress.cleanup").to_string(), TEXT_MUTED),
+        SftpTransferStage::CleanUp => (t!("sftp.progress.cleanup").to_string(), text_muted()),
     };
     let icon_path = match p.kind {
         SftpTransferKind::Download => "icons/terminal-toolbar/arrow-down-to-line.svg",
@@ -303,7 +298,7 @@ fn render_sftp_progress(progress: Option<SftpProgress>) -> Option<impl IntoEleme
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(TEXT_MUTED))
+                    .text_color(rgb(text_muted()))
                     .min_w_0()
                     .truncate()
                     .child(format!("{kind_label}: {detail}")),
@@ -313,7 +308,7 @@ fn render_sftp_progress(progress: Option<SftpProgress>) -> Option<impl IntoEleme
                     el.child(
                         div()
                             .text_xs()
-                            .text_color(rgb(TEXT_MUTED))
+                            .text_color(rgb(text_muted()))
                             .flex_shrink_0()
                             .child(format_byte_ratio(b.done, b.total)),
                     )
@@ -341,7 +336,7 @@ fn render_progress_bar(bytes: Option<SftpTransferBytes>, color: u32) -> Option<i
             .w(px(BAR_WIDTH))
             .h(px(BAR_HEIGHT))
             .rounded(px(3.0))
-            .bg(rgb(BORDER))
+            .bg(rgb(border()))
             .flex_shrink_0()
             .child(
                 div()
@@ -473,5 +468,8 @@ fn truncate_path(path: &str, max: usize) -> String {
     }
 }
 
-// Accent color for the memory progress bar fill
-const COLOR_ACCENT: u32 = 0x89b4fa;
+// Accent color for the memory progress bar fill — read live so theme
+// changes are picked up without a recompile.
+fn color_accent() -> u32 {
+    term_blue()
+}
