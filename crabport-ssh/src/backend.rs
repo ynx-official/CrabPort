@@ -11,15 +11,39 @@ use russh::{
 use tokio::task::AbortHandle;
 use tokio::{runtime::Runtime, select, sync::Mutex as TokioMutex};
 
+use crabport_core::credential::ProxyConfig;
 use crabport_sftp::CrabPortSftp;
 use crabport_terminal::terminal::{BackendEvent, RemoteMetrics, RemoteStatus};
 
+use crate::crabport_tunnel::CrabPortTunnel;
 use crate::handler::SshHandler;
 use crate::keys::decode_private_key;
 use crate::known_hosts::KnownHosts;
 use crate::monitor::monitor_loop;
 use crate::session::SshConnectionInfo;
 use crate::transfer::SftpTransferHandle;
+use ::crabport_tunnel::ReverseForwardRegistry;
+
+/// Connect a russh session over a (possibly proxied) stream.
+///
+/// Thin bridge: builds the stream via `crabport_proxy::connect` (direct,
+/// SOCKS5, or HTTP/HTTPS CONNECT), then hands it to
+/// `russh::client::connect_stream`.
+pub(crate) async fn connect_russh<H>(
+    config: Arc<client::Config>,
+    proxy: &Option<ProxyConfig>,
+    target_host: &str,
+    target_port: u16,
+    handler: H,
+) -> Result<client::Handle<H>, H::Error>
+where
+    H: russh::client::Handler + Send + 'static,
+{
+    let stream = crabport_proxy::connect(proxy, target_host, target_port)
+        .await
+        .map_err(|e| <H::Error as From<russh::Error>>::from(russh::Error::from(e)))?;
+    client::connect_stream(config, stream, handler).await
+}
 
 // Re-export the public handler-API types so existing callers using
 // `crabport_ssh::backend::HostKeyInfo` / `HostKeyVerifier` keep working after
@@ -90,6 +114,12 @@ pub struct SshBackend {
     /// bytes / opening new SFTP channels — until the transfer finished on
     /// its own, even after the user closed the terminal tab.
     pub(crate) transfer_tasks: Arc<PlMutex<Vec<AbortHandle>>>,
+    /// Registry of active Remote (`-R`) forwards. Shared (via `Clone`)
+    /// between this backend and its `SshHandler` so the
+    /// `server_channel_open_forwarded_tcpip` callback can dispatch inbound
+    /// remote-forward connections to the local target registered by a
+    /// `TunnelManager` started from this tab's panel.
+    pub(crate) reverse_registry: ReverseForwardRegistry,
 }
 
 impl SshBackend {
@@ -122,6 +152,13 @@ impl SshBackend {
         let transfer_tasks: Arc<PlMutex<Vec<AbortHandle>>> = Arc::new(PlMutex::new(Vec::new()));
         let transfer_tasks_close = transfer_tasks.clone();
 
+        // Reverse-forward registry shared between this backend and its
+        // `SshHandler`: the handler consults it to dispatch inbound
+        // Remote-tunnel connections, the `TunnelManager` (started from this
+        // tab's panel) registers/stops forwards on it.
+        let reverse_registry = ReverseForwardRegistry::new();
+        let reverse_registry_for_handler = reverse_registry.clone();
+
         let event_tx2 = event_tx.clone();
         let monitor2 = monitor.clone();
         let on_status2 = on_status.clone();
@@ -152,10 +189,11 @@ impl SshBackend {
                 port: port_for_handler,
                 known_hosts,
                 verifier: verifier_for_handler,
+                reverse_registry: reverse_registry_for_handler,
             };
 
             let config = Arc::new(client::Config::default());
-            let mut sh = match client::connect(config, &addr, handler).await {
+            let mut sh = match connect_russh(config, &info.proxy, &info.host, info.port, handler).await {
                 Ok(sh) => {
                     on_status2("TCP connection established".into());
                     sh
@@ -484,6 +522,7 @@ impl SshBackend {
             sftp_cwd,
             sftp_session,
             transfer_tasks,
+            reverse_registry,
         }
     }
 
@@ -562,5 +601,34 @@ impl SshBackend {
         let join = TOKIO.spawn(future);
         let abort = join.abort_handle();
         self.transfer_tasks.lock().push(abort);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CrabPortTunnel — borrow this tab's existing SSH session for tunneling
+// ---------------------------------------------------------------------------
+//
+// `SshBackend` already owns a live, authenticated `russh` `Handle` (shared
+// with the terminal / SFTP / monitor subsystems via `Arc<TokioMutex<...>>`),
+// so the tunnel implementation is just: hand out a clone of that `Arc`, report
+// the shared monitor status, and expose the reverse-forward registry. Tunnels
+// started this way share the tab's lifecycle — closing the tab should call
+// `TunnelManager::stop_all`.
+
+#[async_trait::async_trait]
+impl CrabPortTunnel for SshBackend {
+    async fn handle(&self) -> Option<Arc<TokioMutex<client::Handle<SshHandler>>>> {
+        self.handle.lock().await.clone()
+    }
+
+    fn status(&self) -> RemoteStatus {
+        self.monitor.read().status
+    }
+
+    fn reverse_registry(&self) -> Arc<ReverseForwardRegistry> {
+        // `ReverseForwardRegistry` is `Default + Clone` over an inner `Arc`,
+        // so `Arc::new(self.reverse_registry.clone())` produces a cheap
+        // shared handle to the same underlying map.
+        Arc::new(self.reverse_registry.clone())
     }
 }

@@ -1,0 +1,423 @@
+//! Snippet form dialog (create / edit).
+//!
+//! Mirrors the overlay-dialog pattern used by `TunnelFormState` /
+//! `TunnelFormView` in `crabport-ui/src/views/tunnels/form.rs`:
+//! - `SnippetFormState` is owned by `CrabportApp` and holds `Entity<InputState>`
+//!   fields plus open/close animation state.
+//! - `SnippetFormView` is a pure `RenderOnce` renderer that reads a snapshot of
+//!   the state and emits an absolute overlay + centered dialog.
+//!
+//! The view does NOT persist anything itself — it reads its inputs, packages
+//! them into a `SnippetFormOutput`, and invokes the `on_save` callback. The
+//! caller (`CrabportApp`) is responsible for store CRUD.
+
+use std::rc::Rc;
+use std::time::Duration;
+
+use gpui::prelude::FluentBuilder;
+use gpui::*;
+use gpui_animation::{animation::TransitionExt, transition::general::Linear};
+use gpui_component::input::InputState;
+use rust_i18n::t;
+
+use crate::app::CrabportApp;
+use crate::color::*;
+use crate::components::button::Button;
+use crate::components::input::StyledInput;
+
+// ---------------------------------------------------------------------------
+// Output passed to the save callback
+// ---------------------------------------------------------------------------
+
+/// Parsed form values handed to the `on_save` callback. The caller resolves
+/// `editing_id` against the store (UPDATE if `Some`, INSERT if `None`).
+#[derive(Clone, Debug)]
+pub struct SnippetFormOutput {
+    pub editing_id: Option<i64>,
+    pub name: String,
+    pub command: String,
+}
+
+// ---------------------------------------------------------------------------
+// SnippetValidationErrors — per-field error strings shown via StyledInput.error()
+// ---------------------------------------------------------------------------
+
+/// Per-field validation errors for the snippet form. A field is `Some` when it
+/// has an error to display; `None` means it passed validation.
+#[derive(Clone, Default)]
+pub struct SnippetValidationErrors {
+    pub name: Option<SharedString>,
+    pub command: Option<SharedString>,
+}
+
+impl SnippetValidationErrors {
+    pub fn is_empty(&self) -> bool {
+        self.name.is_none() && self.command.is_none()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SnippetFormState — owned by CrabportApp
+// ---------------------------------------------------------------------------
+
+/// Holds all mutable state for the snippet form overlay so that
+/// `SnippetFormView` can be a pure `RenderOnce` renderer.
+#[derive(Clone)]
+pub struct SnippetFormState {
+    /// `Some(id)` when editing an existing snippet; `None` when creating.
+    pub editing_id: Option<i64>,
+    pub name_input: Entity<InputState>,
+    /// Created with `.multi_line(true)` so the underlying InputState is a
+    /// textarea. The `StyledInput` also receives `.multi_line(true).rows(5)`
+    /// at render time to size the shell.
+    pub command_input: Entity<InputState>,
+    // Focus states (mirrors TunnelFormState)
+    pub name_focused: bool,
+    pub command_focused: bool,
+    /// Open/close animation state. `true` while the overlay is visible
+    /// (drives the backdrop fade + dialog slide-in transition).
+    pub open: bool,
+    /// Per-field validation errors. Populated by `validate()` and rendered
+    /// via `StyledInput.error(...)` on the relevant fields. Cleared on open.
+    pub errors: SnippetValidationErrors,
+    pub on_close: Option<Rc<dyn Fn(&mut Window, &mut App) + 'static>>,
+    pub on_save: Option<Rc<dyn Fn(SnippetFormOutput, &mut Window, &mut App) + 'static>>,
+}
+
+impl SnippetFormState {
+    pub fn new(window: &mut Window, cx: &mut App) -> Self {
+        let name_input = cx.new(|cx| InputState::new(window, cx));
+        let command_input = cx.new(|cx| InputState::new(window, cx).multi_line(true));
+
+        Self {
+            editing_id: None,
+            name_input,
+            command_input,
+            name_focused: false,
+            command_focused: false,
+            open: false,
+            errors: SnippetValidationErrors::default(),
+            on_close: None,
+            on_save: None,
+        }
+    }
+
+    pub fn open(&mut self, window: &mut Window, cx: &mut App) {
+        self.open = true;
+        self.errors = SnippetValidationErrors::default();
+        self.name_input.update(cx, |state, cx| {
+            state.focus(window, cx);
+        });
+    }
+
+    pub fn close(&mut self) {
+        self.open = false;
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.open
+    }
+
+    /// Reset all fields to blank defaults and open the dialog in create mode.
+    pub fn open_for_create(&mut self, window: &mut Window, cx: &mut App) {
+        self.editing_id = None;
+        self.name_input
+            .update(cx, |state, cx| state.set_value("", window, cx));
+        self.command_input
+            .update(cx, |state, cx| state.set_value("", window, cx));
+        self.open(window, cx);
+    }
+
+    /// Populate the fields from an existing snippet, set `editing_id`,
+    /// and open the dialog in edit mode.
+    pub fn open_for_edit(
+        &mut self,
+        id: i64,
+        name: &str,
+        command: &str,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let name = name.to_string();
+        let command = command.to_string();
+        self.editing_id = Some(id);
+        self.name_input
+            .update(cx, |state, cx| state.set_value(&name, window, cx));
+        self.command_input
+            .update(cx, |state, cx| state.set_value(&command, window, cx));
+        self.open(window, cx);
+    }
+
+    pub fn name_text(&self, cx: &App) -> String {
+        self.name_input.read(cx).text().to_string()
+    }
+
+    pub fn command_text(&self, cx: &App) -> String {
+        self.command_input.read(cx).text().to_string()
+    }
+
+    /// Build a `SnippetFormOutput` from the current form state.
+    pub fn output(&self, cx: &App) -> SnippetFormOutput {
+        SnippetFormOutput {
+            editing_id: self.editing_id,
+            name: self.name_text(cx),
+            command: self.command_text(cx),
+        }
+    }
+
+    /// Validate the form against the required-field rules. Populates
+    /// `self.errors` and returns `true` if the form is valid (no errors).
+    ///
+    /// Rules:
+    /// - Name is required (non-empty after trim).
+    /// - Command is required (non-empty after trim).
+    pub fn validate(&mut self, cx: &App) -> bool {
+        let mut errors = SnippetValidationErrors::default();
+
+        if self.name_text(cx).trim().is_empty() {
+            errors.name = Some(t!("snippets.error_name_required").into());
+        }
+
+        if self.command_text(cx).trim().is_empty() {
+            errors.command = Some(t!("snippets.error_command_required").into());
+        }
+
+        let ok = errors.is_empty();
+        self.errors = errors;
+        ok
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SnippetFormView — pure RenderOnce renderer
+// ---------------------------------------------------------------------------
+
+#[derive(IntoElement)]
+pub struct SnippetFormView {
+    open: bool,
+    editing: bool,
+    name_input: Entity<InputState>,
+    command_input: Entity<InputState>,
+    name_focused: bool,
+    command_focused: bool,
+    errors: SnippetValidationErrors,
+    app: Entity<CrabportApp>,
+    on_close: Option<Rc<dyn Fn(&mut Window, &mut App) + 'static>>,
+    on_save: Option<Rc<dyn Fn(SnippetFormOutput, &mut Window, &mut App) + 'static>>,
+}
+
+impl SnippetFormView {
+    pub fn new(state: &SnippetFormState, app: Entity<CrabportApp>) -> Self {
+        Self {
+            open: state.open,
+            editing: state.editing_id.is_some(),
+            name_input: state.name_input.clone(),
+            command_input: state.command_input.clone(),
+            name_focused: state.name_focused,
+            command_focused: state.command_focused,
+            errors: state.errors.clone(),
+            app,
+            on_close: state.on_close.clone(),
+            on_save: state.on_save.clone(),
+        }
+    }
+}
+
+impl RenderOnce for SnippetFormView {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let on_close_for_dialog = self.on_close.clone();
+
+        render_overlay(
+            self.open,
+            self.on_close,
+            render_dialog(
+                self.open,
+                self.editing,
+                self.name_input,
+                self.command_input,
+                self.name_focused,
+                self.command_focused,
+                self.errors,
+                self.app,
+                on_close_for_dialog,
+                self.on_save,
+            ),
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Render helpers
+// ---------------------------------------------------------------------------
+
+fn render_overlay(
+    open: bool,
+    on_close: Option<Rc<dyn Fn(&mut Window, &mut App) + 'static>>,
+    child: impl IntoElement,
+) -> impl IntoElement {
+    let overlay_id = ElementId::Name("snippet-edit-overlay".into());
+
+    div()
+        .id(overlay_id.clone())
+        .absolute()
+        .size_full()
+        .top_0()
+        .left_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(rgba(0x00000000))
+        .when(open, |el| {
+            el.occlude().on_click(move |_e, w, cx| {
+                if let Some(ref cb) = on_close {
+                    cb(w, cx);
+                }
+            })
+        })
+        .with_transition(overlay_id)
+        .transition_when_else(
+            open,
+            Duration::from_millis(150),
+            Linear,
+            |el| el.bg(rgba(0x00000080)),
+            |el| el.bg(rgba(0x00000000)),
+        )
+        .child(child)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_dialog(
+    open: bool,
+    editing: bool,
+    name_input: Entity<InputState>,
+    command_input: Entity<InputState>,
+    name_focused: bool,
+    command_focused: bool,
+    errors: SnippetValidationErrors,
+    app: Entity<CrabportApp>,
+    on_close: Option<Rc<dyn Fn(&mut Window, &mut App) + 'static>>,
+    on_save: Option<Rc<dyn Fn(SnippetFormOutput, &mut Window, &mut App) + 'static>>,
+) -> impl IntoElement {
+    let dialog_id = ElementId::Name("snippet-edit-dialog".into());
+
+    let title = if editing {
+        t!("snippets.edit_title").to_string()
+    } else {
+        t!("snippets.new_button").to_string()
+    };
+
+    div()
+        .id(dialog_id.clone())
+        .w(px(420.0))
+        .bg(rgb(bg_base()))
+        .border_1()
+        .border_color(rgb(border()))
+        .rounded_lg()
+        .shadow_lg()
+        .flex()
+        .flex_col()
+        .p_6()
+        .gap_4()
+        .opacity(0.0)
+        .mt(px(-16.0))
+        .when(open, |el| {
+            el.on_click(|_, _, cx| {
+                cx.stop_propagation();
+            })
+        })
+        .with_transition(dialog_id)
+        .transition_when_else(
+            open,
+            Duration::from_millis(150),
+            Linear,
+            |el| el.opacity(1.0).mt_0(),
+            |el| el.opacity(0.0).mt(px(-16.0)),
+        )
+        // Title
+        .child(
+            div()
+                .text_lg()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(text_primary()))
+                .child(title),
+        )
+        // Name
+        .child(
+            div().child(
+                StyledInput::new("snippet-edit-name", name_input)
+                    .label(t!("snippets.name").to_string())
+                    .focused(name_focused)
+                    .when_some(errors.name.clone(), |el, e| el.error(e)),
+            ),
+        )
+        // Command (multi-line)
+        .child(
+            div().child(
+                StyledInput::new("snippet-edit-command", command_input)
+                    .label(t!("snippets.command").to_string())
+                    .multi_line(true)
+                    .rows(5)
+                    .focused(command_focused)
+                    .when_some(errors.command.clone(), |el, e| el.error(e)),
+            ),
+        )
+        // Buttons
+        .child(render_buttons(app, on_close, on_save))
+}
+
+fn render_buttons(
+    app: Entity<CrabportApp>,
+    on_close: Option<Rc<dyn Fn(&mut Window, &mut App) + 'static>>,
+    on_save: Option<Rc<dyn Fn(SnippetFormOutput, &mut Window, &mut App) + 'static>>,
+) -> impl IntoElement {
+    let overlay_id = ElementId::Name("snippet-edit-overlay".into());
+    let dialog_id = ElementId::Name("snippet-edit-dialog".into());
+
+    div()
+        .flex()
+        .flex_row()
+        .gap_3()
+        .justify_end()
+        .child(
+            Button::new("snippet-edit-cancel")
+                .centered(true)
+                .child(t!("snippets.cancel").to_string())
+                .on_click(move |_e, w, cx| {
+                    if let Some(ref cb) = on_close {
+                        cb(w, cx);
+                    }
+                }),
+        )
+        .child(
+            Button::new("snippet-edit-save")
+                .primary()
+                .centered(true)
+                .child(t!("snippets.save").to_string())
+                .on_click(move |_e, w, cx| {
+                    // Reset the overlay/dialog transitions so the next open
+                    // starts fresh (mirrors tunnel form's save button).
+                    gpui_animation::reset_transition(&overlay_id);
+                    gpui_animation::reset_transition(&dialog_id);
+                    // Validate required fields before building the output. If
+                    // invalid, per-field errors are shown and the save flow is
+                    // aborted (no toast — per-field errors are sufficient).
+                    let output: Option<SnippetFormOutput> = app.update(cx, |app, cx| {
+                        let valid = app
+                            .snippet_form
+                            .as_mut()
+                            .map(|form| form.validate(cx))
+                            .unwrap_or(true);
+                        if !valid {
+                            cx.notify();
+                            return None;
+                        }
+                        app.snippet_form.as_ref().map(|form| form.output(cx))
+                    });
+                    if let Some(out) = output {
+                        if let Some(ref cb) = on_save {
+                            cb(out, w, cx);
+                        }
+                    }
+                }),
+        )
+}

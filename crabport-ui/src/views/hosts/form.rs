@@ -1,0 +1,965 @@
+use gpui::{prelude::FluentBuilder, *};
+use gpui_animation::{animation::TransitionExt, transition::general::Linear};
+use gpui_component::input::InputState;
+use rust_i18n::t;
+use std::rc::Rc;
+use std::time::Duration;
+
+use super::with_certificate::WithCertificateForm;
+use super::with_proxy::{ProxyKind, WithProxyForm};
+use crate::app::CrabportApp;
+use crate::color::*;
+use crate::components::button::Button;
+use crate::components::input::{StyledInput, StyledPasswordInput};
+use crate::components::tabs::{TabPane, Tabs};
+use crabport_core::credential::PrivateKeyKind;
+
+// ---------------------------------------------------------------------------
+// Connection type
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ConnectionKind {
+    SSH,
+    Telnet,
+    Serial,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AuthKind {
+    Password,
+    Certificate,
+}
+
+// ---------------------------------------------------------------------------
+// ValidationErrors — per-field error strings shown via StyledInput.error()
+// ---------------------------------------------------------------------------
+
+/// Per-field validation errors for the connection form. A field is `Some`
+/// when it has an error to display; `None` means it passed validation.
+/// Cloning is cheap (just `SharedString`s).
+#[derive(Clone, Default)]
+pub struct ValidationErrors {
+    pub host: Option<SharedString>,
+    pub user: Option<SharedString>,
+    pub pass: Option<SharedString>,
+    pub private_key: Option<SharedString>,
+    pub proxy_url: Option<SharedString>,
+}
+
+impl ValidationErrors {
+    pub fn is_empty(&self) -> bool {
+        self.host.is_none()
+            && self.user.is_none()
+            && self.pass.is_none()
+            && self.private_key.is_none()
+            && self.proxy_url.is_none()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ConnectionFormState — owned by CrabportApp
+// ---------------------------------------------------------------------------
+
+/// Holds all mutable state for the connection form overlay so that
+/// `ConnectionFormView` can be a pure `RenderOnce` renderer.
+#[derive(Clone)]
+pub struct ConnectionFormState {
+    pub active: bool,
+    pub kind: ConnectionKind,
+    pub auth_kind: AuthKind,
+    // Basic fields
+    pub name_input: Entity<InputState>,
+    pub host_input: Entity<InputState>,
+    pub port_input: Entity<InputState>,
+    pub user_input: Entity<InputState>,
+    pub pass_input: Entity<InputState>,
+    // Certificate-mode: passphrase + private key
+    pub passphrase_input: Entity<InputState>,
+    pub private_key_input: Entity<InputState>,
+    /// Read-only file path picked by the "Browse…" button. Either this or
+    /// `private_key_input` (pasted key content) must be filled to pass
+    /// certificate validation. The path is stored verbatim and resolved by
+    /// `crabport_ssh::keys::decode_private_key` at connect time.
+    pub private_key_path_input: Entity<InputState>,
+    // Proxy mode + custom proxy URL
+    pub proxy_kind: ProxyKind,
+    pub proxy_url_input: Entity<InputState>,
+    /// When editing an existing host, this is the row id of the proxy currently
+    /// linked to it (so we can UPDATE instead of INSERT). `None` for new hosts.
+    pub proxy_id: Option<i64>,
+    // Focus states
+    pub name_focused: bool,
+    pub host_focused: bool,
+    pub port_focused: bool,
+    pub user_focused: bool,
+    pub pass_focused: bool,
+    pub passphrase_focused: bool,
+    pub private_key_focused: bool,
+    pub private_key_path_focused: bool,
+    pub proxy_url_focused: bool,
+    pub editing: bool,
+    /// Per-field validation errors. Populated by `validate()` and rendered
+    /// via `StyledInput.error(...)` on the relevant fields. Cleared on open.
+    pub errors: ValidationErrors,
+    pub on_close: Option<Rc<dyn Fn(&mut Window, &mut App) + 'static>>,
+    pub on_connect: Option<Rc<dyn Fn(ConnectionKind, &mut Window, &mut App) + 'static>>,
+}
+
+impl ConnectionFormState {
+    pub fn new(window: &mut Window, cx: &mut App) -> Self {
+        let name_input = cx.new(|cx| InputState::new(window, cx));
+        let host_input = cx.new(|cx| InputState::new(window, cx));
+        let port_input = cx.new(|cx| InputState::new(window, cx));
+        let user_input = cx.new(|cx| InputState::new(window, cx));
+        let pass_input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx);
+            state.set_masked(true, window, cx);
+            state
+        });
+        let passphrase_input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx);
+            state.set_masked(true, window, cx);
+            state
+        });
+        let private_key_input = cx.new(|cx| InputState::new(window, cx).multi_line(true).rows(5));
+        // Read-only path field — never focused for typing, only filled via
+        // the "Browse…" button. Kept as an `InputState` so the existing
+        // `StyledInput` chrome (label / error / disabled styling) applies.
+        let private_key_path_input = cx.new(|cx| InputState::new(window, cx));
+        let proxy_url_input = cx.new(|cx| InputState::new(window, cx));
+
+        Self {
+            active: false,
+            kind: ConnectionKind::SSH,
+            auth_kind: AuthKind::Password,
+            name_input,
+            host_input,
+            port_input,
+            user_input,
+            pass_input,
+            passphrase_input,
+            private_key_input,
+            private_key_path_input,
+            proxy_kind: ProxyKind::None,
+            proxy_url_input,
+            proxy_id: None,
+            name_focused: false,
+            host_focused: false,
+            port_focused: false,
+            user_focused: false,
+            pass_focused: false,
+            passphrase_focused: false,
+            private_key_focused: false,
+            private_key_path_focused: false,
+            proxy_url_focused: false,
+            editing: false,
+            errors: ValidationErrors::default(),
+            on_close: None,
+            on_connect: None,
+        }
+    }
+
+    pub fn open(&mut self, window: &mut Window, cx: &mut App) {
+        self.active = true;
+        self.errors = ValidationErrors::default();
+        self.name_input.update(cx, |state, cx| {
+            state.focus(window, cx);
+        });
+        // Only set default port for new connections, not when editing an
+        // existing host (where the port was already loaded from the store).
+        if !self.editing {
+            let default_port = match self.kind {
+                ConnectionKind::SSH => "22",
+                ConnectionKind::Telnet => "23",
+                ConnectionKind::Serial => "22",
+            };
+            self.port_input.update(cx, |state, cx| {
+                state.set_value(default_port, window, cx);
+            });
+        }
+    }
+
+    pub fn close(&mut self) {
+        self.active = false;
+    }
+
+    pub fn name_text(&self, cx: &App) -> String {
+        self.name_input.read(cx).text().to_string()
+    }
+
+    pub fn host_text(&self, cx: &App) -> String {
+        self.host_input.read(cx).text().to_string()
+    }
+
+    pub fn port_text(&self, cx: &App) -> String {
+        self.port_input.read(cx).text().to_string()
+    }
+
+    pub fn user_text(&self, cx: &App) -> String {
+        self.user_input.read(cx).text().to_string()
+    }
+
+    pub fn pass_text(&self, cx: &App) -> String {
+        self.pass_input.read(cx).text().to_string()
+    }
+
+    pub fn passphrase_text(&self, cx: &App) -> String {
+        self.passphrase_input.read(cx).text().to_string()
+    }
+
+    pub fn private_key_text(&self, cx: &App) -> String {
+        self.private_key_input.read(cx).text().to_string()
+    }
+
+    /// The private-key value to persist into `CredentialEntry.private_key`,
+    /// paired with the [`PrivateKeyKind`] that tells the store / SSH layer
+    /// how to interpret it.
+    ///
+    /// Preference order: pasted content (`private_key_input`) first, then the
+    /// file path picked via "Browse…". Either satisfies certificate auth —
+    /// `crabport_ssh::keys::decode_private_key` resolves both PEM content and
+    /// a filesystem path — but we record which one was used so the edit-host
+    /// flow can restore the value into the correct field. Returns an empty
+    /// string + `Content` when neither is set.
+    pub fn private_key_value(&self, cx: &App) -> (String, PrivateKeyKind) {
+        let pasted = self.private_key_text(cx);
+        if !pasted.trim().is_empty() {
+            return (pasted, PrivateKeyKind::Content);
+        }
+        let path = self.private_key_path_text(cx);
+        if !path.trim().is_empty() {
+            return (path, PrivateKeyKind::Path);
+        }
+        (String::new(), PrivateKeyKind::Content)
+    }
+
+    pub fn private_key_path_text(&self, cx: &App) -> String {
+        self.private_key_path_input.read(cx).text().to_string()
+    }
+
+    pub fn proxy_url_text(&self, cx: &App) -> String {
+        self.proxy_url_input.read(cx).text().to_string()
+    }
+
+    /// Validate the form against the required-field rules. Populates
+    /// `self.errors` and returns `true` if the form is valid (no errors).
+    ///
+    /// Rules:
+    /// - SSH / Telnet: host and username are required.
+    /// - SSH + Password auth: password is required.
+    /// - Telnet: password is required (credentials are sent via the terminal
+    ///   prompt in v1, but we still require one so saved hosts reconnect).
+    /// - SSH + Certificate auth: a private key is required — either pasted
+    ///   key content OR a key file path picked via "Browse…" (passphrase
+    ///   is optional).
+    /// - Proxy = Custom: proxy URL is required.
+    /// - Name is optional in all modes.
+    /// - Serial has no required fields yet (placeholder backend).
+    pub fn validate(&mut self, cx: &App) -> bool {
+        let mut errors = ValidationErrors::default();
+
+        let needs_host_user = matches!(self.kind, ConnectionKind::SSH | ConnectionKind::Telnet);
+        if needs_host_user {
+            if self.host_text(cx).trim().is_empty() {
+                errors.host = Some(t!("connection_form.error_host_required").into());
+            }
+            if self.user_text(cx).trim().is_empty() {
+                errors.user = Some(t!("connection_form.error_user_required").into());
+            }
+        }
+
+        if self.kind == ConnectionKind::SSH {
+            match self.auth_kind {
+                AuthKind::Password => {
+                    if self.pass_text(cx).trim().is_empty() {
+                        errors.pass = Some(t!("connection_form.error_password_required").into());
+                    }
+                }
+                AuthKind::Certificate => {
+                    // Either pasted key content or a picked file path satisfies
+                    // the requirement; `decode_private_key` resolves both.
+                    let (pk_value, _pk_kind) = self.private_key_value(cx);
+                    if pk_value.trim().is_empty() {
+                        errors.private_key =
+                            Some(t!("connection_form.error_private_key_required").into());
+                    }
+                    // passphrase is optional — no check.
+                }
+            }
+        }
+
+        if self.kind == ConnectionKind::Telnet && self.pass_text(cx).trim().is_empty() {
+            errors.pass = Some(t!("connection_form.error_password_required").into());
+        }
+
+        if self.proxy_kind == ProxyKind::Custom && self.proxy_url_text(cx).trim().is_empty() {
+            errors.proxy_url = Some(t!("connection_form.error_proxy_url_required").into());
+        }
+
+        let ok = errors.is_empty();
+        self.errors = errors;
+        ok
+    }
+
+    /// Build a `ProxyConfig` from the current form state.
+    ///
+    /// - `None`    → no proxy (direct connection).
+    /// - `System`  → resolved from `ALL_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY`
+    ///   env vars (returns `None` if none are set / parseable).
+    /// - `Custom`  → parsed from the proxy URL field. Accepted formats:
+    ///   `socks5://host:port`, `socks5://user:pass@host:port`,
+    ///   `http://host:port`, `https://user:pass@host:port`.
+    pub fn proxy_config(&self, cx: &App) -> Option<crabport_core::credential::ProxyConfig> {
+        let cfg = match self.proxy_kind {
+            ProxyKind::None => None,
+            ProxyKind::System => crabport_core::credential::ProxyConfig::from_system(),
+            ProxyKind::Custom => {
+                let url = self.proxy_url_text(cx);
+                crabport_core::credential::parse_proxy_url(&url)
+            }
+        };
+        #[cfg(debug_assertions)]
+        tracing::info!(
+            "connection_form: proxy_config — kind={:?}, editing_proxy_id={:?}, resolved={:?}",
+            self.proxy_kind,
+            self.proxy_id,
+            cfg.as_ref().map(|c| (c.kind, c.host.clone(), c.port))
+        );
+        cfg
+    }
+
+    /// Populate the proxy fields from a previously-saved `ProxyConfig`
+    /// (loaded when editing a host). Selects the `Custom` tab and fills the
+    /// URL input via `ProxyConfig::to_url`.
+    pub fn load_proxy(
+        &mut self,
+        proxy_id: Option<i64>,
+        config: Option<&crabport_core::credential::ProxyConfig>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        #[cfg(debug_assertions)]
+        tracing::info!(
+            "connection_form: load_proxy — proxy_id={:?}, has_config={}",
+            proxy_id,
+            config.is_some()
+        );
+        self.proxy_id = proxy_id;
+        match config {
+            Some(cfg) if cfg.is_enabled() => {
+                self.proxy_kind = ProxyKind::Custom;
+                let url = cfg.to_url();
+                #[cfg(debug_assertions)]
+                tracing::info!(
+                    "connection_form: load_proxy — restoring Custom url={:?}",
+                    url
+                );
+                self.proxy_url_input.update(cx, |state, cx| {
+                    state.set_value(&url, window, cx);
+                });
+            }
+            _ => {
+                #[cfg(debug_assertions)]
+                tracing::info!("connection_form: load_proxy — no proxy, selecting None");
+                self.proxy_kind = ProxyKind::None;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ConnectionFormView — pure RenderOnce renderer
+// ---------------------------------------------------------------------------
+
+#[derive(IntoElement)]
+pub struct ConnectionFormView {
+    active: bool,
+    kind: ConnectionKind,
+    auth_kind: AuthKind,
+    name_input: Entity<InputState>,
+    host_input: Entity<InputState>,
+    port_input: Entity<InputState>,
+    user_input: Entity<InputState>,
+    pass_input: Entity<InputState>,
+    passphrase_input: Entity<InputState>,
+    private_key_input: Entity<InputState>,
+    private_key_path_input: Entity<InputState>,
+    proxy_kind: ProxyKind,
+    proxy_url_input: Entity<InputState>,
+    name_focused: bool,
+    host_focused: bool,
+    port_focused: bool,
+    user_focused: bool,
+    pass_focused: bool,
+    passphrase_focused: bool,
+    private_key_focused: bool,
+    private_key_path_focused: bool,
+    proxy_url_focused: bool,
+    editing: bool,
+    errors: ValidationErrors,
+    app: Entity<CrabportApp>,
+    on_close: Option<Rc<dyn Fn(&mut Window, &mut App) + 'static>>,
+    on_connect: Option<Rc<dyn Fn(ConnectionKind, &mut Window, &mut App) + 'static>>,
+}
+
+impl ConnectionFormView {
+    pub fn new(state: &ConnectionFormState, app: Entity<CrabportApp>) -> Self {
+        Self {
+            active: state.active,
+            kind: state.kind,
+            auth_kind: state.auth_kind,
+            name_input: state.name_input.clone(),
+            host_input: state.host_input.clone(),
+            port_input: state.port_input.clone(),
+            user_input: state.user_input.clone(),
+            pass_input: state.pass_input.clone(),
+            passphrase_input: state.passphrase_input.clone(),
+            private_key_input: state.private_key_input.clone(),
+            private_key_path_input: state.private_key_path_input.clone(),
+            proxy_kind: state.proxy_kind,
+            proxy_url_input: state.proxy_url_input.clone(),
+            name_focused: state.name_focused,
+            host_focused: state.host_focused,
+            port_focused: state.port_focused,
+            user_focused: state.user_focused,
+            pass_focused: state.pass_focused,
+            passphrase_focused: state.passphrase_focused,
+            private_key_focused: state.private_key_focused,
+            private_key_path_focused: state.private_key_path_focused,
+            proxy_url_focused: state.proxy_url_focused,
+            editing: state.editing,
+            errors: state.errors.clone(),
+            app,
+            on_close: state.on_close.clone(),
+            on_connect: state.on_connect.clone(),
+        }
+    }
+}
+
+impl RenderOnce for ConnectionFormView {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let on_close_for_dialog = self.on_close.clone();
+
+        render_overlay(
+            self.active,
+            self.on_close,
+            render_dialog(
+                self.active,
+                self.editing,
+                self.kind,
+                self.auth_kind,
+                self.name_input,
+                self.host_input,
+                self.port_input,
+                self.user_input,
+                self.pass_input,
+                self.passphrase_input,
+                self.private_key_input,
+                self.private_key_path_input,
+                self.proxy_kind,
+                self.proxy_url_input,
+                self.name_focused,
+                self.host_focused,
+                self.port_focused,
+                self.user_focused,
+                self.pass_focused,
+                self.passphrase_focused,
+                self.private_key_focused,
+                self.private_key_path_focused,
+                self.proxy_url_focused,
+                self.errors,
+                self.app,
+                on_close_for_dialog,
+                self.on_connect,
+            ),
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Render helpers
+// ---------------------------------------------------------------------------
+
+fn render_overlay(
+    active: bool,
+    on_close: Option<Rc<dyn Fn(&mut Window, &mut App) + 'static>>,
+    child: impl IntoElement,
+) -> impl IntoElement {
+    let overlay_id = ElementId::Name("conn-form-overlay".into());
+
+    div()
+        .id(overlay_id.clone())
+        .absolute()
+        .size_full()
+        .top_0()
+        .left_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(rgba(0x00000000))
+        .when(active, |el| {
+            el.occlude().on_click(move |_e, w, cx| {
+                if let Some(ref cb) = on_close {
+                    cb(w, cx);
+                }
+            })
+        })
+        .with_transition(overlay_id)
+        .transition_when_else(
+            active,
+            Duration::from_millis(150),
+            Linear,
+            |el| el.bg(rgba(0x00000080)),
+            |el| el.bg(rgba(0x00000000)),
+        )
+        .child(child)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_dialog(
+    active: bool,
+    editing: bool,
+    kind: ConnectionKind,
+    auth_kind: AuthKind,
+    name_input: Entity<InputState>,
+    host_input: Entity<InputState>,
+    port_input: Entity<InputState>,
+    user_input: Entity<InputState>,
+    pass_input: Entity<InputState>,
+    passphrase_input: Entity<InputState>,
+    private_key_input: Entity<InputState>,
+    private_key_path_input: Entity<InputState>,
+    proxy_kind: ProxyKind,
+    proxy_url_input: Entity<InputState>,
+    name_focused: bool,
+    host_focused: bool,
+    port_focused: bool,
+    user_focused: bool,
+    pass_focused: bool,
+    passphrase_focused: bool,
+    private_key_focused: bool,
+    private_key_path_focused: bool,
+    proxy_url_focused: bool,
+    errors: ValidationErrors,
+    app: Entity<CrabportApp>,
+    on_close: Option<Rc<dyn Fn(&mut Window, &mut App) + 'static>>,
+    on_connect: Option<Rc<dyn Fn(ConnectionKind, &mut Window, &mut App) + 'static>>,
+) -> impl IntoElement {
+    let dialog_id = ElementId::Name("conn-form-dialog".into());
+
+    let auth_active_index = match auth_kind {
+        AuthKind::Password => 0,
+        AuthKind::Certificate => 1,
+    };
+
+    let active_type_index = match kind {
+        ConnectionKind::SSH => 0,
+        ConnectionKind::Telnet => 1,
+        ConnectionKind::Serial => 2,
+    };
+
+    div()
+        .id(dialog_id.clone())
+        .w(px(420.0))
+        .bg(rgb(bg_base()))
+        .border_1()
+        .border_color(rgb(border()))
+        .rounded_lg()
+        .shadow_lg()
+        .flex()
+        .flex_col()
+        .p_6()
+        .gap_4()
+        .opacity(0.0)
+        .mt(px(-16.0))
+        .when(active, |el| {
+            el.on_click(|_, _, cx| {
+                cx.stop_propagation();
+            })
+        })
+        .with_transition(dialog_id)
+        .transition_when_else(
+            active,
+            Duration::from_millis(150),
+            Linear,
+            |el| el.opacity(1.0).mt_0(),
+            |el| el.opacity(0.0).mt(px(-16.0)),
+        )
+        // Title
+        .child(
+            div()
+                .text_lg()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(text_primary()))
+                .child(t!("connection_form.title").to_string()),
+        )
+        // Name
+        .child(
+            div().child(
+                StyledInput::new("name", name_input)
+                    .label(t!("connection_form.name").to_string())
+                    .focused(name_focused),
+            ),
+        )
+        // Connection-type tabs: SSH has the full form, Telnet/Serial are
+        // placeholders until their backends land. The tab's `on_change`
+        // writes `form.kind` so the connect button / save flow know which
+        // kind to create.
+        .child(
+            Tabs::new("conn-type-tabs")
+                .active(active_type_index)
+                .pane(
+                    TabPane::new(
+                        t!("new_connection.ssh").to_string(),
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_4()
+                            // Host + Port row
+                            .child(render_host_port_row(
+                                host_input.clone(),
+                                port_input.clone(),
+                                host_focused,
+                                port_focused,
+                                errors.host.clone(),
+                            ))
+                            // Username (shared across auth types)
+                            .child(
+                                div().child(
+                                    StyledInput::new("username", user_input.clone())
+                                        .label(t!("connection_form.username").to_string())
+                                        .focused(user_focused)
+                                        .when_some(errors.user.clone(), |el, e| el.error(e)),
+                                ),
+                            )
+                            .child(
+                                Tabs::new("conn-auth-tabs")
+                                    .active(auth_active_index)
+                                    .pane(
+                                        TabPane::new(
+                                            t!("connection_form.auth_password").to_string(),
+                                            div().flex().flex_col().gap_4().child(
+                                                StyledPasswordInput::new(
+                                                    "password",
+                                                    pass_input.clone(),
+                                                )
+                                                .label(t!("connection_form.password").to_string())
+                                                .focused(pass_focused)
+                                                .when_some(errors.pass.clone(), |el, e| el.error(e))
+                                                .on_toggle(|_, _| {}),
+                                            ),
+                                        )
+                                        .height(px({
+                                            // Password StyledInput single-line + 2px rounding.
+                                            if errors.pass.is_some() { 80.0 } else { 57.0 }
+                                        })),
+                                    )
+                                    .pane(
+                                        TabPane::new(
+                                            t!("connection_form.auth_certificate").to_string(),
+                                            WithCertificateForm {
+                                                passphrase_input,
+                                                private_key_input,
+                                                private_key_path_input,
+                                                passphrase_focused,
+                                                private_key_focused,
+                                                private_key_path_focused,
+                                                private_key_error: errors.private_key.clone(),
+                                                app: app.clone(),
+                                            },
+                                        )
+                                        .height(px({
+                                            // Certificate pane height =
+                                            //   passphrase field (57 / 80 w/ error)
+                                            // + gap_4 (16)
+                                            // + private-key path field (57 / 80 w/ error)
+                                            // + gap_4 (16)
+                                            // + private-key content textarea (125 / 148 w/ error)
+                                            let has_err = errors.private_key.is_some();
+                                            let pass_h = if has_err { 80.0 } else { 57.0 };
+                                            let path_h = if has_err { 80.0 } else { 57.0 };
+                                            let pk_h = if has_err { 148.0 } else { 125.0 };
+                                            pass_h + 16.0 + path_h + 16.0 + pk_h
+                                        })),
+                                    )
+                                    .on_change({
+                                        let app = app.clone();
+                                        move |index, _w, cx| {
+                                            app.update(cx, |app, cx| {
+                                                if let Some(ref mut form) = app.connection_form {
+                                                    form.auth_kind = match index {
+                                                        0 => AuthKind::Password,
+                                                        _ => AuthKind::Certificate,
+                                                    };
+                                                    cx.notify();
+                                                }
+                                            });
+                                        }
+                                    }),
+                            )
+                            // Proxy tabs (None / System / Custom). Only
+                            // Custom has content (a proxy URL input).
+                            .child(WithProxyForm {
+                                proxy_url_input: proxy_url_input.clone(),
+                                proxy_url_focused,
+                                proxy_kind,
+                                proxy_url_error: errors.proxy_url.clone(),
+                                app: app.clone(),
+                            }),
+                    )
+                    .height(px({
+                        // --- Component heights (measured + empirically adjusted) ---
+                        //
+                        // rem_size = 16px. line_height = phi() = 1.618x font.
+                        // text_xs: 12px font → line_height 19px (rounded)
+                        //
+                        // StyledInput outer column: gap_1(4px) between children.
+                        //   Single-line no error:  label(19) + gap(4) + shell(32) = 55px
+                        //   Single-line w/ error:  55 + gap(4) + error_row(19) = 78px
+                        //   Multi 5-row no error:  label(19) + gap(4) + shell(100) = 123px
+                        //   Multi 5-row w/ error:  123 + gap(4) + error_row(19) = 146px
+                        //
+                        // SegmentedControl tab bar:
+                        //   root p_0p5(4) + tab py_1(8) + text_sm(23) = 35px
+                        // gap_2 = 8px, gap_4 = 16px, gap_1 = 4px
+                        //
+                        // +2px per field for font metric rounding.
+
+                        let field_h = |err: bool| if err { 80.0 } else { 57.0 };
+
+                        // Auth pane content height.
+                        let auth_pane = match auth_kind {
+                            AuthKind::Password => field_h(errors.pass.is_some()),
+                            AuthKind::Certificate => {
+                                // passphrase (57 / 80 w/ error) + gap_4 (16) +
+                                // private-key file path field (57 / 80 w/ error)
+                                // + gap_4 (16) + private-key content textarea
+                                // (125 / 148 w/ error). MUST match the height
+                                // assigned to the cert `TabPane` above, otherwise
+                                // the parent SSH pane under-sizes and the proxy
+                                // section below gets clipped/pushed off.
+                                let has_err = errors.private_key.is_some();
+                                let pass_h = field_h(has_err);
+                                let path_h = field_h(has_err);
+                                let pk_h = if has_err { 148.0 } else { 125.0 };
+                                pass_h + 16.0 + path_h + 16.0 + pk_h
+                            }
+                        };
+
+                        // SSH pane: host+port row + gap_4 + username + gap_4 +
+                        // auth tabs (bar + gap_2 + pane) + gap_4 + proxy section.
+                        let auth_h = field_h(errors.host.is_some())  // host+port row
+                            + 16.0                                    // gap_4
+                            + field_h(errors.user.is_some())          // username
+                            + 16.0                                    // gap_4
+                            + 35.0                                    // auth tab bar (SegmentedControl)
+                            + 8.0                                     // gap_2
+                            + auth_pane;
+
+                        // Proxy section: label(19) + gap_1(4) + tab bar(35) +
+                        // gap_2(8) + pane content.
+                        let proxy_pane = if proxy_kind == ProxyKind::Custom {
+                            field_h(errors.proxy_url.is_some())
+                        } else {
+                            0.0
+                        };
+                        let proxy_h = 16.0   // gap_4 above proxy section
+                            + 21.0           // "Proxy" label (text_xs, line_height 19 + 2 rounding)
+                            + 4.0            // gap_1
+                            + 35.0           // proxy tab bar (SegmentedControl)
+                            + 8.0            // gap_2
+                            + proxy_pane;
+                        auth_h + proxy_h
+                    })),
+                )
+                .pane(
+                    TabPane::new(
+                        t!("new_connection.telnet").to_string(),
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_4()
+                            // Host + Port row
+                            .child(render_host_port_row(
+                                host_input.clone(),
+                                port_input.clone(),
+                                host_focused,
+                                port_focused,
+                                errors.host.clone(),
+                            ))
+                            // Username
+                            .child(
+                                div().child(
+                                    StyledInput::new("telnet-username", user_input.clone())
+                                        .label(t!("connection_form.username").to_string())
+                                        .focused(user_focused)
+                                        .when_some(errors.user.clone(), |el, e| el.error(e)),
+                                ),
+                            )
+                            // Password (telnet sends credentials via the
+                            // terminal prompt in v1, but we still capture +
+                            // persist it so saved hosts can reconnect without
+                            // re-typing.)
+                            .child(
+                                div().child(
+                                    StyledPasswordInput::new("telnet-password", pass_input.clone())
+                                        .label(t!("connection_form.password").to_string())
+                                        .focused(pass_focused)
+                                        .when_some(errors.pass.clone(), |el, e| el.error(e))
+                                        .on_toggle(|_, _| {}),
+                                ),
+                            )
+                            // Proxy tabs
+                            .child(WithProxyForm {
+                                proxy_url_input: proxy_url_input.clone(),
+                                proxy_url_focused,
+                                proxy_kind,
+                                proxy_url_error: errors.proxy_url.clone(),
+                                app: app.clone(),
+                            }),
+                    )
+                    .height(px({
+                        let field_h = |err: bool| if err { 80.0 } else { 57.0 };
+                        let proxy_pane = if proxy_kind == ProxyKind::Custom {
+                            field_h(errors.proxy_url.is_some())
+                        } else {
+                            0.0
+                        };
+                        // host+port row + gap_4 + username + gap_4 +
+                        // password + gap_4 + proxy section
+                        field_h(errors.host.is_some())
+                            + 16.0
+                            + field_h(errors.user.is_some())
+                            + 16.0
+                            + field_h(errors.pass.is_some())
+                            + 16.0
+                            + 21.0   // "Proxy" label (text_xs + 2px rounding)
+                            + 4.0    // gap_1
+                            + 35.0   // proxy tab bar (SegmentedControl)
+                            + 8.0    // gap_2
+                            + proxy_pane
+                    })),
+                )
+                .pane(
+                    TabPane::new(
+                        t!("new_connection.serial").to_string(),
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_sm()
+                            .text_color(rgb(text_muted()))
+                            .child(t!("connection_form.coming_soon").to_string()),
+                    )
+                    .height(px(80.0)),
+                )
+                .on_change({
+                    let app = app.clone();
+                    move |index, w, cx| {
+                        app.update(cx, |app, cx| {
+                            if let Some(ref mut form) = app.connection_form {
+                                form.kind = match index {
+                                    0 => ConnectionKind::SSH,
+                                    1 => ConnectionKind::Telnet,
+                                    _ => ConnectionKind::Serial,
+                                };
+                                // Adjust the default port to match the new
+                                // connection type (SSH 22 / Telnet 23) — but
+                                // only when the user hasn't overridden it.
+                                // We treat the current value as default if it
+                                // matches either standard port.
+                                let cur = form.port_text(cx);
+                                let new_port = match form.kind {
+                                    ConnectionKind::SSH => "22",
+                                    ConnectionKind::Telnet => "23",
+                                    ConnectionKind::Serial => "22",
+                                };
+                                if cur == "22" || cur == "23" || cur.is_empty() {
+                                    form.port_input.update(cx, |state, cx| {
+                                        state.set_value(new_port, w, cx);
+                                    });
+                                }
+                                cx.notify();
+                            }
+                        });
+                    }
+                }),
+        )
+        // Buttons
+        .child(render_buttons(editing, kind, on_close, on_connect))
+}
+
+fn render_host_port_row(
+    host_input: Entity<InputState>,
+    port_input: Entity<InputState>,
+    host_focused: bool,
+    port_focused: bool,
+    host_error: Option<SharedString>,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_start()
+        .gap_3()
+        .child(
+            div().flex_1().min_w_0().child(
+                StyledInput::new("host", host_input)
+                    .label(t!("connection_form.host").to_string())
+                    .focused(host_focused)
+                    .when_some(host_error, |el, e| el.error(e)),
+            ),
+        )
+        .child(
+            div().w(px(96.0)).flex_none().child(
+                StyledInput::new("port", port_input)
+                    .label(t!("connection_form.port").to_string())
+                    .focused(port_focused),
+            ),
+        )
+}
+
+fn render_buttons(
+    editing: bool,
+    kind: ConnectionKind,
+    on_close: Option<Rc<dyn Fn(&mut Window, &mut App) + 'static>>,
+    on_connect: Option<Rc<dyn Fn(ConnectionKind, &mut Window, &mut App) + 'static>>,
+) -> impl IntoElement {
+    let overlay_id = ElementId::Name("conn-form-overlay".into());
+    let dialog_id = ElementId::Name("conn-form-dialog".into());
+    let confirm_label = if editing {
+        t!("connection_form.save").to_string()
+    } else {
+        t!("connection_form.connect").to_string()
+    };
+    div()
+        .flex()
+        .flex_row()
+        .gap_3()
+        .justify_end()
+        .child(
+            Button::new("conn-cancel")
+                .centered(true)
+                .child(t!("connection_form.cancel").to_string())
+                .on_click(move |_e, w, cx| {
+                    if let Some(ref cb) = on_close {
+                        cb(w, cx);
+                    }
+                }),
+        )
+        .child(
+            Button::new("conn-connect")
+                .primary()
+                .centered(true)
+                .child(confirm_label)
+                .on_click(move |_e, w, cx| {
+                    if !editing {
+                        gpui_animation::reset_transition(&overlay_id);
+                        gpui_animation::reset_transition(&dialog_id);
+                    }
+                    if let Some(ref cb) = on_connect {
+                        cb(kind, w, cx);
+                    }
+                }),
+        )
+}

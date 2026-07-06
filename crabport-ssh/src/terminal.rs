@@ -35,6 +35,10 @@ impl CrabPortTerminal for SshBackend {
         true
     }
 
+    fn allow_tunnels(&self) -> bool {
+        true
+    }
+
     fn sftp_entries(&self) -> Option<Arc<Vec<(String, bool)>>> {
         self.sftp_entries.read().clone()
     }

@@ -97,9 +97,8 @@ impl HistoryCommandPanel {
         // Window). Subsequent calls just refresh the history + callback.
         let history_changed = !Arc::ptr_eq(&self.history, &history);
         if self.search_input.is_none() {
-            let entity = cx.new(|cx| {
-                InputState::new(window, cx).placeholder(t!("command.placeholder").to_string())
-            });
+            let entity = cx
+                .new(|cx| InputState::new(window, cx).placeholder(t!("panel.search").to_string()));
             // Re-filter on every keystroke.
             cx.subscribe(
                 &entity,
@@ -204,7 +203,7 @@ impl Render for HistoryCommandPanel {
                             .size(px(20.0))
                             .rounded(px(4.0))
                             .cursor_pointer()
-                            .hover(|s| s.bg(rgb(SURFACE_HOVER)))
+                            .hover(|s| s.bg(rgb(surface_hover())))
                             .on_click(move |_e, _w, cx| {
                                 let store = crate::app_state::AppState::store(cx);
                                 let _ = store.lock().add_snippet("", &cmd_for_save);
@@ -213,7 +212,7 @@ impl Render for HistoryCommandPanel {
                                 svg()
                                     .path("icons/save.svg")
                                     .size(px(13.0))
-                                    .text_color(rgb(TEXT_MUTED)),
+                                    .text_color(rgb(text_muted())),
                             );
 
                         // Paste button: writes the command into the active
@@ -229,7 +228,7 @@ impl Render for HistoryCommandPanel {
                             .size(px(20.0))
                             .rounded(px(4.0))
                             .cursor_pointer()
-                            .hover(|s| s.bg(rgb(SURFACE_HOVER)))
+                            .hover(|s| s.bg(rgb(surface_hover())))
                             .on_click(move |_e, _w, cx| {
                                 if let Some(cb) = on_paste_for_btn.as_ref() {
                                     cb(cmd_for_paste.clone(), cx);
@@ -239,7 +238,7 @@ impl Render for HistoryCommandPanel {
                                 svg()
                                     .path("icons/clipboard-copy.svg")
                                     .size(px(13.0))
-                                    .text_color(rgb(TEXT_MUTED)),
+                                    .text_color(rgb(text_muted())),
                             );
 
                         div()
@@ -281,8 +280,8 @@ impl Render for HistoryCommandPanel {
                                 is_hovered,
                                 std::time::Duration::from_millis(120),
                                 Linear,
-                                |el| el.bg(rgba((SURFACE_HOVER << 8) | 0x60)),
-                                |el| el.bg(rgba((SURFACE_HOVER << 8) | 0x00)),
+                                |el| el.bg(rgba((surface_hover() << 8) | 0x60)),
+                                |el| el.bg(rgba((surface_hover() << 8) | 0x00)),
                             )
                             // Command text (flex-1 so buttons sit on the right).
                             .child(
@@ -290,7 +289,7 @@ impl Render for HistoryCommandPanel {
                                     .flex_1()
                                     .min_w_0()
                                     .text_xs()
-                                    .text_color(rgb(TEXT_PRIMARY))
+                                    .text_color(rgb(text_primary()))
                                     .whitespace_nowrap()
                                     .overflow_hidden()
                                     .text_ellipsis()
@@ -345,7 +344,7 @@ impl Render for HistoryCommandPanel {
                             svg()
                                 .path("icons/search.svg")
                                 .size(px(12.0))
-                                .text_color(rgb(TEXT_MUTED)),
+                                .text_color(rgb(text_muted())),
                         ),
                     ),
                 )
@@ -361,7 +360,7 @@ impl Render for HistoryCommandPanel {
                         .justify_center()
                         .child(
                             div()
-                                .text_color(rgb(TEXT_MUTED))
+                                .text_color(rgb(text_muted()))
                                 .text_sm()
                                 .child(t!("sidebar.history").to_string()),
                         ),
@@ -374,8 +373,8 @@ impl Render for HistoryCommandPanel {
                         .flex_1()
                         .min_h_0()
                         .border_1()
-                        .border_color(rgb(BORDER))
-                        .bg(rgb(BG_TAB_BAR))
+                        .border_color(rgb(border()))
+                        .bg(rgb(bg_tab_bar()))
                         .rounded_md()
                         .overflow_hidden()
                         .child(list)

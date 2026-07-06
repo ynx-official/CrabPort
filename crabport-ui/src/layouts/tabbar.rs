@@ -19,9 +19,9 @@ pub fn render_tab_bar(
         .id("tabbar")
         .w_full()
         .h_11()
-        .bg(rgb(BG_TAB_BAR))
+        .bg(rgb(bg_tab_bar()))
         .border_b_1()
-        .border_color(rgb(BORDER))
+        .border_color(rgb(border()))
         .flex()
         .items_center()
         .py_1()
@@ -92,7 +92,7 @@ pub fn render_tab_bar(
                     svg()
                         .path("icons/plus.svg")
                         .size_4()
-                        .text_color(rgb(TEXT_MUTED)),
+                        .text_color(rgb(text_muted())),
                 )
                 .h_9()
                 .w_9()
@@ -101,7 +101,7 @@ pub fn render_tab_bar(
                 .text_sm()
                 .on_click(move |_e, w, cx| {
                     h.update(cx, |app, cx| {
-                        let cmd = app.command_palette.clone();
+                        let cmd = app.app_ctx.command_palette.clone();
                         cmd.update(cx, |cmd, cx| {
                             cmd.open(w, cx);
                         });

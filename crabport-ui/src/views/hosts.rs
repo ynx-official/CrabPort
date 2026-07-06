@@ -13,7 +13,20 @@ use crate::color::*;
 use crate::components::button::Button;
 use crate::components::context_menu::{ContextMenuController, ContextMenuItem, ContextMenuState};
 use crate::components::dialog::{AlertController, AlertSeverity, AlertState};
-use crate::layouts::connection_form::{ConnectionFormState, ConnectionFormView};
+
+// ---------------------------------------------------------------------------
+// Submodules & re-exports
+// ---------------------------------------------------------------------------
+//
+// The connection form (state + view + render helpers) lives in `form.rs`,
+// mirroring `views/tunnels/form.rs`. `with_proxy` and `with_certificate` are
+// the proxy / certificate sub-form components used by the SSH pane.
+
+pub mod form;
+pub mod with_certificate;
+pub mod with_proxy;
+
+pub use form::{AuthKind, ConnectionFormState, ConnectionFormView, ConnectionKind};
 
 /// A saved connection host entry.
 #[derive(Clone)]
@@ -23,10 +36,12 @@ pub struct ConnectionHost {
     pub host: String,
     pub port: u16,
     pub username: String,
-    pub kind: crate::layouts::connection_form::ConnectionKind,
+    pub kind: crate::views::hosts::ConnectionKind,
     pub credential_id: Option<i64>,
     pub last_login: Option<i64>,
     pub favorite: bool,
+    /// FK into the `proxies` table. `None` means no proxy.
+    pub proxy_id: Option<i64>,
 }
 
 /// Hosts sidebar view.
@@ -154,7 +169,7 @@ impl Render for HostsView {
                         div()
                             .text_lg()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(TEXT_PRIMARY))
+                            .text_color(rgb(text_primary()))
                             .child(t!("sidebar.sessions").to_string()),
                     )
                     .child(
@@ -172,7 +187,7 @@ impl Render for HostsView {
                     ),
             )
             // --- Separator ---
-            .child(div().h_px().bg(rgb(BORDER)).mx_4())
+            .child(div().h_px().bg(rgb(border())).mx_4())
             // --- Hosts list (or empty state) ---
             .child(
                 div()
@@ -185,7 +200,7 @@ impl Render for HostsView {
                         |el| {
                             el.flex().items_center().justify_center().child(
                                 div()
-                                    .text_color(rgb(TEXT_MUTED))
+                                    .text_color(rgb(text_muted()))
                                     .text_sm()
                                     .child(t!("sessions.empty").to_string()),
                             )
@@ -269,7 +284,7 @@ fn host_row(
         .px_3()
         .py_2()
         .rounded_md()
-        .bg(rgb(BG_BASE))
+        .bg(rgb(bg_base()))
         .on_double_click(move |_, w, cx| {
             gpui_animation::reset_transition(&row_id_clone);
             on_click(w, cx);
@@ -373,8 +388,8 @@ fn host_row(
             is_highlighted,
             Duration::from_millis(120),
             Linear,
-            |el| el.bg(rgb(SURFACE_ACTIVE)),
-            |el| el.bg(rgb(BG_BASE)),
+            |el| el.bg(rgb(surface_active())),
+            |el| el.bg(rgb(bg_base())),
         )
         // Host info (name + address)
         .child(
@@ -386,13 +401,13 @@ fn host_row(
                 .child(
                     div()
                         .text_sm()
-                        .text_color(rgb(TEXT_PRIMARY))
+                        .text_color(rgb(text_primary()))
                         .child(host.name.clone()),
                 )
                 .child(
                     div()
                         .text_xs()
-                        .text_color(rgb(TEXT_MUTED))
+                        .text_color(rgb(text_muted()))
                         .child(format!("{}@{}:{}", host.username, host.host, host.port)),
                 ),
         )

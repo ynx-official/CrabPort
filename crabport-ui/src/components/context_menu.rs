@@ -269,9 +269,9 @@ fn render_context_menu(
                 .left(position.x)
                 // Constrain width so long labels wrap nicely.
                 .w(px(200.0))
-                .bg(rgb(BG_BASE))
+                .bg(rgb(bg_base()))
                 .border_1()
-                .border_color(rgb(BORDER))
+                .border_color(rgb(border()))
                 .rounded_md()
                 .shadow_lg()
                 .flex()
@@ -306,10 +306,10 @@ fn render_context_menu(
                             .px_2()
                             .py_1()
                             .text_xs()
-                            .text_color(rgb(TEXT_MUTED))
+                            .text_color(rgb(text_muted()))
                             .child(h.to_string()),
                     )
-                    .child(div().mx_1().my_0p5().h(px(1.0)).bg(rgb(BORDER)))
+                    .child(div().mx_1().my_0p5().h(px(1.0)).bg(rgb(border())))
                 })
                 .children(
                     items
@@ -329,11 +329,11 @@ fn render_menu_item(idx: usize, item: ContextMenuItem) -> impl IntoElement {
     let on_click = item.on_click.clone();
 
     let label_color = if disabled {
-        TEXT_MUTED
+        text_muted()
     } else if danger {
-        0xf38ba8 // TERM_RED
+        term_red()
     } else {
-        TEXT_PRIMARY
+        text_primary()
     };
 
     let row = div()
@@ -348,7 +348,7 @@ fn render_menu_item(idx: usize, item: ContextMenuItem) -> impl IntoElement {
         .text_xs()
         .text_color(rgb(label_color))
         .when(!disabled, |el| {
-            el.hover(|s| s.bg(rgb(SURFACE_HOVER)))
+            el.hover(|s| s.bg(rgb(surface_hover())))
                 .when_some(on_click, |el, cb| {
                     el.on_click(move |_e, w, cx| {
                         cb(w, cx);
@@ -370,7 +370,7 @@ fn render_menu_item(idx: usize, item: ContextMenuItem) -> impl IntoElement {
     if divider_after {
         div()
             .child(row)
-            .child(div().mx_1().my_0p5().h(px(1.0)).bg(rgb(BORDER)))
+            .child(div().mx_1().my_0p5().h(px(1.0)).bg(rgb(border())))
             .into_any_element()
     } else {
         row.into_any_element()

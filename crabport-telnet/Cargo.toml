@@ -1,0 +1,14 @@
+[package]
+name = "crabport-telnet"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+crabport-terminal = { path = "../crabport-terminal" }
+crabport-core = { path = "../crabport-core" }
+crabport-proxy = { path = "../crabport-proxy" }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", "macros"] }
+async-broadcast = "0.7"
+async-channel = "2.5"
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+parking_lot = "0.12"

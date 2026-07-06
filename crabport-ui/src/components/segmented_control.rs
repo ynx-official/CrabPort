@@ -33,8 +33,8 @@ impl Segment {
     }
 
     /// Attach an icon to this segment. The svg's `text_color` is driven by
-    /// the SegmentedControl (animated between `TEXT_PRIMARY` when active /
-    /// hovered and `TEXT_MUTED` otherwise), so pass an empty label if you
+    /// the SegmentedControl (animated between `text_primary()` when active /
+    /// hovered and `text_muted()` otherwise), so pass an empty label if you
     /// want an icon-only tab.
     pub fn icon(mut self, path: impl Into<SharedString>) -> Self {
         self.icon = Some(path.into());
@@ -143,7 +143,7 @@ impl RenderOnce for SegmentedControl {
             .w(DefiniteLength::Fraction(seg_width))
             .h_full()
             .rounded_sm()
-            .bg(rgb(BG_BASE));
+            .bg(rgb(bg_base()));
 
         // The track is absolute and fills the inner container via inset_0.
         // Children use h_full to match the track height explicitly.
@@ -171,9 +171,18 @@ impl RenderOnce for SegmentedControl {
 
                 // Background-hover easing: default bg is fully transparent so
                 // the tab blends with the SegmentedControl's own bg. On hover
-                // we ease into a semi-transparent SURFACE_HOVER (alpha ~0.5)
+                // we ease into a semi-transparent surface_hover() (alpha ~0.5)
                 // for a subtle wash rather than a solid block. Active state is
                 // signalled by the sliding indicator, not bg.
+                //
+                // text_color is also driven through `transition_when_else`
+                // (active → text_primary, inactive → text_muted) because
+                // `with_transition` caches the element's style state and
+                // replays `state.cur` on each render — a statically-set
+                // `.text_color(...)` would be overwritten by the cached value
+                // and never follow `is_active` changes after the first render.
+                let active_color = text_primary();
+                let inactive_color = text_muted();
                 let mut tab = div()
                     .id(tab_id.clone())
                     .flex_1()
@@ -185,7 +194,11 @@ impl RenderOnce for SegmentedControl {
                     .py_1()
                     .rounded_sm()
                     .text_sm()
-                    .text_color(rgb(if is_active { TEXT_PRIMARY } else { TEXT_MUTED }))
+                    .text_color(rgb(if is_active {
+                        active_color
+                    } else {
+                        inactive_color
+                    }))
                     .bg(rgba(0x24273a00))
                     .with_transition(tab_id)
                     .transition_on_hover(
@@ -198,14 +211,24 @@ impl RenderOnce for SegmentedControl {
                                 state.bg(rgba(0x24273a00))
                             }
                         },
+                    )
+                    .transition_when_else(
+                        is_active,
+                        Duration::from_millis(150),
+                        EaseInOutQuad,
+                        move |state| state.text_color(rgb(active_color)),
+                        move |state| state.text_color(rgb(inactive_color)),
                     );
 
-                // Optional icon. Color is static (GPUI svg can't animate
-                // text_color via gpui-animation — `TransitionExt` requires
-                // `ParentElement`). The hover background above provides the
-                // visual feedback instead.
+                // Optional icon. Color is static — svg doesn't implement
+                // `ParentElement` so it can't use gpui-animation's
+                // `with_transition` / `transition_when_else` yet.
                 if let Some(path) = icon_path {
-                    let icon_color = if is_active { TEXT_PRIMARY } else { TEXT_MUTED };
+                    let icon_color = if is_active {
+                        text_primary()
+                    } else {
+                        text_muted()
+                    };
                     tab = tab.child(
                         svg()
                             .path(path)
@@ -243,7 +266,7 @@ impl RenderOnce for SegmentedControl {
 
         let mut root = div()
             .id(self.id)
-            .bg(rgb(SURFACE_ACTIVE))
+            .bg(rgb(surface_active()))
             .rounded_md()
             .p_0p5()
             .child(inner);

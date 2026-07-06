@@ -1,26 +1,6 @@
 use alacritty_terminal::vte::ansi::{Color, NamedColor};
 
-pub(crate) const TERM_FG: u32 = 0xcdd6f4;
-pub(crate) const TERM_BG: u32 = 0x1e1e2e;
-pub(crate) const TERM_CURSOR: u32 = 0xf5e0dc;
-pub(crate) const TERM_BLACK: u32 = 0x45475a;
-pub(crate) const TERM_RED: u32 = 0xf38ba8;
-pub(crate) const TERM_GREEN: u32 = 0xa6e3a1;
-pub(crate) const TERM_YELLOW: u32 = 0xf9e2af;
-pub(crate) const TERM_BLUE: u32 = 0x89b4fa;
-pub(crate) const TERM_MAGENTA: u32 = 0xf5c2e7;
-pub(crate) const TERM_CYAN: u32 = 0x94e2d5;
-pub(crate) const TERM_WHITE: u32 = 0xbac2de;
-pub(crate) const TERM_BRIGHT_BLACK: u32 = 0x585b70;
-pub(crate) const TERM_BRIGHT_RED: u32 = 0xf38ba8;
-pub(crate) const TERM_BRIGHT_GREEN: u32 = 0xa6e3a1;
-pub(crate) const TERM_BRIGHT_YELLOW: u32 = 0xf9e2af;
-pub(crate) const TERM_BRIGHT_BLUE: u32 = 0x89b4fa;
-pub(crate) const TERM_BRIGHT_MAGENTA: u32 = 0xf5c2e7;
-pub(crate) const TERM_BRIGHT_CYAN: u32 = 0x94e2d5;
-pub(crate) const TERM_BRIGHT_WHITE: u32 = 0xa6adc8;
-
-pub(crate) const SELECTION_BG: u32 = 0x585b70;
+use crate::color::theme;
 
 pub(crate) fn ansi_color_to_rgb(
     color: &Color,
@@ -37,36 +17,39 @@ pub(crate) fn named_color_to_rgb(
     named: NamedColor,
     _term_colors: &alacritty_terminal::term::color::Colors,
 ) -> u32 {
+    // Snapshot the theme once per call so every branch sees the same palette
+    // (a `refresh_theme()` mid-render can't tear a single color lookup).
+    let t = theme();
     match named {
-        NamedColor::Foreground => TERM_FG,
-        NamedColor::Background => TERM_BG,
-        NamedColor::Cursor => TERM_CURSOR,
-        NamedColor::Black => TERM_BLACK,
-        NamedColor::Red => TERM_RED,
-        NamedColor::Green => TERM_GREEN,
-        NamedColor::Yellow => TERM_YELLOW,
-        NamedColor::Blue => TERM_BLUE,
-        NamedColor::Magenta => TERM_MAGENTA,
-        NamedColor::Cyan => TERM_CYAN,
-        NamedColor::White => TERM_WHITE,
-        NamedColor::BrightBlack => TERM_BRIGHT_BLACK,
-        NamedColor::BrightRed => TERM_BRIGHT_RED,
-        NamedColor::BrightGreen => TERM_BRIGHT_GREEN,
-        NamedColor::BrightYellow => TERM_BRIGHT_YELLOW,
-        NamedColor::BrightBlue => TERM_BRIGHT_BLUE,
-        NamedColor::BrightMagenta => TERM_BRIGHT_MAGENTA,
-        NamedColor::BrightCyan => TERM_BRIGHT_CYAN,
-        NamedColor::BrightWhite => TERM_BRIGHT_WHITE,
-        NamedColor::DimBlack => TERM_BLACK,
-        NamedColor::DimRed => TERM_RED,
-        NamedColor::DimGreen => TERM_GREEN,
-        NamedColor::DimYellow => TERM_YELLOW,
-        NamedColor::DimBlue => TERM_BLUE,
-        NamedColor::DimMagenta => TERM_MAGENTA,
-        NamedColor::DimCyan => TERM_CYAN,
-        NamedColor::DimWhite => TERM_WHITE,
-        NamedColor::BrightForeground => TERM_FG,
-        NamedColor::DimForeground => TERM_FG,
+        NamedColor::Foreground => t.term_fg,
+        NamedColor::Background => t.term_bg,
+        NamedColor::Cursor => t.term_cursor,
+        NamedColor::Black => t.term_black,
+        NamedColor::Red => t.term_red,
+        NamedColor::Green => t.term_green,
+        NamedColor::Yellow => t.term_yellow,
+        NamedColor::Blue => t.term_blue,
+        NamedColor::Magenta => t.term_magenta,
+        NamedColor::Cyan => t.term_cyan,
+        NamedColor::White => t.term_white,
+        NamedColor::BrightBlack => t.term_bright_black,
+        NamedColor::BrightRed => t.term_bright_red,
+        NamedColor::BrightGreen => t.term_bright_green,
+        NamedColor::BrightYellow => t.term_bright_yellow,
+        NamedColor::BrightBlue => t.term_bright_blue,
+        NamedColor::BrightMagenta => t.term_bright_magenta,
+        NamedColor::BrightCyan => t.term_bright_cyan,
+        NamedColor::BrightWhite => t.term_bright_white,
+        NamedColor::DimBlack => t.term_black,
+        NamedColor::DimRed => t.term_red,
+        NamedColor::DimGreen => t.term_green,
+        NamedColor::DimYellow => t.term_yellow,
+        NamedColor::DimBlue => t.term_blue,
+        NamedColor::DimMagenta => t.term_magenta,
+        NamedColor::DimCyan => t.term_cyan,
+        NamedColor::DimWhite => t.term_white,
+        NamedColor::BrightForeground => t.term_fg,
+        NamedColor::DimForeground => t.term_fg,
     }
 }
 
@@ -74,23 +57,24 @@ pub(crate) fn indexed_color_to_rgb(
     idx: u8,
     _term_colors: &alacritty_terminal::term::color::Colors,
 ) -> u32 {
+    let t = theme();
     match idx {
-        0 => TERM_BLACK,
-        1 => TERM_RED,
-        2 => TERM_GREEN,
-        3 => TERM_YELLOW,
-        4 => TERM_BLUE,
-        5 => TERM_MAGENTA,
-        6 => TERM_CYAN,
-        7 => TERM_WHITE,
-        8 => TERM_BRIGHT_BLACK,
-        9 => TERM_BRIGHT_RED,
-        10 => TERM_BRIGHT_GREEN,
-        11 => TERM_BRIGHT_YELLOW,
-        12 => TERM_BRIGHT_BLUE,
-        13 => TERM_BRIGHT_MAGENTA,
-        14 => TERM_BRIGHT_CYAN,
-        15 => TERM_BRIGHT_WHITE,
+        0 => t.term_black,
+        1 => t.term_red,
+        2 => t.term_green,
+        3 => t.term_yellow,
+        4 => t.term_blue,
+        5 => t.term_magenta,
+        6 => t.term_cyan,
+        7 => t.term_white,
+        8 => t.term_bright_black,
+        9 => t.term_bright_red,
+        10 => t.term_bright_green,
+        11 => t.term_bright_yellow,
+        12 => t.term_bright_blue,
+        13 => t.term_bright_magenta,
+        14 => t.term_bright_cyan,
+        15 => t.term_bright_white,
         16..=231 => {
             let idx = idx - 16;
             let r = if idx / 36 > 0 {
