@@ -6,11 +6,11 @@
 //! ## Visual states
 //!
 //! ```text
-//!  rest     ── INPUT_BG bg · INPUT_BORDER border
-//!  hover    ── INPUT_BORDER_HOVER border           (120 ms Linear)
-//!  focus    ── INPUT_BG_FOCUSED bg · INPUT_BORDER_FOCUSED border
-//!  error    ── INPUT_BORDER_ERROR border            (hover suppressed)
-//!  disabled ── INPUT_BG_DISABLED bg, muted text, no pointer events
+//!  rest     ── input_bg() bg · input_border() border
+//!  hover    ── input_border_hover() border           (120 ms Linear)
+//!  focus    ── input_bg_focused() bg · input_border_focused() border
+//!  error    ── input_border_error() border            (hover suppressed)
+//!  disabled ── input_bg_disabled() bg, muted text, no pointer events
 //! ```
 //!
 //! ## Focus detection
@@ -66,6 +66,12 @@ pub struct StyledInput {
     /// Read from your view state; updated via InputState's on_focus/on_blur.
     focused: bool,
     disabled: bool,
+    /// When `true`, the underlying `Input` widget refuses keyboard edits but
+    /// the shell keeps its normal (non-dimmed) appearance. Used by read-only
+    /// fields that are filled programmatically (e.g. the private-key file
+    /// path, which is set only via the Browse button) so an interactive
+    /// suffix button inside the shell doesn't look disabled.
+    input_disabled: bool,
     height: Pixels,
     multi_line: bool,
     /// Optional override for the input text size (default inherits from
@@ -84,6 +90,7 @@ impl StyledInput {
             error: None,
             focused: false,
             disabled: false,
+            input_disabled: false,
             height: px(32.0),
             multi_line: false,
             input_size: None,
@@ -121,6 +128,15 @@ impl StyledInput {
 
     pub fn disabled(mut self, v: bool) -> Self {
         self.disabled = v;
+        self
+    }
+
+    /// Disable keyboard editing of the underlying `Input` widget but leave
+    /// the shell visually enabled. See [`Self::input_disabled`] field docs.
+    /// Implies the same effect as `disabled(true)` on the `Input` component
+    /// without the `opacity(0.5)` / `cursor_not_allowed()` dimming.
+    pub fn input_disabled(mut self, v: bool) -> Self {
+        self.input_disabled = v;
         self
     }
 
@@ -167,24 +183,27 @@ impl RenderOnce for StyledInput {
         let focused = self.focused;
         let height = self.height;
         let disabled = self.disabled;
+        // The underlying Input widget is disabled when either flag is set —
+        // `disabled` dims the whole shell, `input_disabled` only blocks edits.
+        let input_disabled = self.disabled || self.input_disabled;
         let multi_line = self.multi_line;
 
         // Background priority: disabled > focus > rest.
         let base_bg: u32 = if disabled {
-            INPUT_BG_DISABLED
+            input_bg_disabled()
         } else if focused {
-            INPUT_BG_FOCUSED
+            input_bg_focused()
         } else {
-            INPUT_BG
+            input_bg()
         };
 
         // Border priority: error > focus > rest.
         let base_border: u32 = if has_error {
-            INPUT_BORDER_ERROR
+            input_border_error()
         } else if focused {
-            INPUT_BORDER_FOCUSED
+            input_border_focused()
         } else {
-            INPUT_BORDER
+            input_border()
         };
 
         let col_id = ElementId::Name(format!("{}-col", self.id).into());
@@ -207,7 +226,7 @@ impl RenderOnce for StyledInput {
                 .pl(prefix_pl)
                 .pr(prefix_pr)
                 .flex_shrink_0()
-                .text_color(rgb(TEXT_MUTED))
+                .text_color(rgb(text_muted()))
                 .child(p)
         });
 
@@ -218,7 +237,7 @@ impl RenderOnce for StyledInput {
                 .pl(suffix_pl)
                 .pr(suffix_pr)
                 .flex_shrink_0()
-                .text_color(rgb(TEXT_MUTED))
+                .text_color(rgb(text_muted()))
                 .child(s)
         });
 
@@ -250,9 +269,9 @@ impl RenderOnce for StyledInput {
                 if has_error || focused {
                     el // don't override error / focus border on hover
                 } else if *hovered {
-                    el.border_color(rgb(INPUT_BORDER_HOVER))
+                    el.border_color(rgb(input_border_hover()))
                 } else {
-                    el.border_color(rgb(INPUT_BORDER))
+                    el.border_color(rgb(input_border()))
                 }
             })
             .when_some(prefix_el, |el, p| el.child(p))
@@ -267,6 +286,7 @@ impl RenderOnce for StyledInput {
                         Input::new(&state)
                             .appearance(false)
                             .bordered(false)
+                            .disabled(input_disabled)
                             .when_some(input_size, |input, size| input.with_size(size))
                             .when(multi_line, |input| input.h_full()),
                     ),
@@ -288,7 +308,7 @@ impl RenderOnce for StyledInput {
                     div()
                         .text_xs()
                         .font_weight(FontWeight::MEDIUM)
-                        .text_color(rgb(TEXT_MUTED))
+                        .text_color(rgb(text_muted()))
                         .child(label),
                 )
             })
@@ -303,12 +323,12 @@ impl RenderOnce for StyledInput {
                             svg()
                                 .path("icons/circle-alert.svg")
                                 .size_3()
-                                .text_color(rgb(INPUT_BORDER_ERROR)),
+                                .text_color(rgb(input_border_error())),
                         )
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(INPUT_BORDER_ERROR))
+                                .text_color(rgb(input_border_error()))
                                 .child(msg),
                         ),
                 )

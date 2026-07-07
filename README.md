@@ -19,18 +19,18 @@
 
 ## 简介
 
-CrabPort 旨在实现一个简单易用的跨平台 SSH 客户端，集终端与 SFTP 文件管理于一体。使用 Rust 编写，UI 基于 [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui)（Zed 编辑器的 GPU 渲染框架）。
+CrabPort 旨在实现一个简单易用的跨平台 SSH / Telnet 客户端，集终端与 SFTP 文件管理于一体。使用 Rust 编写，UI 基于 [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui)（Zed 编辑器的 GPU 渲染框架）。
 
 ### 核心特性
 
-- **多标签 SSH 终端** — 基于 `russh` + `alacritty_terminal`，支持多会话、多标签切换、ANSI 全彩渲染
-- **SFTP 文件管理** — 可视化目录浏览、文件/目录上传下载、多选批量操作
-- **凭据安全存储** — 密钥与密码使用 AES-256-GCM 加密，密钥文件本地随机生成
-- **历史命令记录** — 自动捕获终端命令历史，支持搜索、保存为代码片段、一键粘贴/执行
-- **代码片段管理** — 全局保存常用命令，支持实时搜索与快速执行
-- **主机管理** — 连接信息持久化，支持收藏与按最近登录排序
-- **SSH 主机密钥验证** — 首次连接提示确认，后续自动校验
-- **跨平台** — 原生支持 macOS / Linux / Windows 的 x64 与 arm64 架构
+- **多标签终端** — SSH / Telnet / 串口 / 本地终端，多会话切换
+- **SFTP 文件管理** — 可视化目录浏览与批量上传下载
+- **SSH 隧道** — Local / Remote / Dynamic（SOCKS）端口转发
+- **代理连接** — SOCKS5 / HTTP(S) 代理，按主机独立配置
+- **凭据加密存储** — AES-256-GCM 本地加密
+- **命令历史与代码片段** — 自动捕获、搜索、快速执行
+- **可配置主题色彩** — 多套预设主题，`config.toml` 驱动
+- **跨平台** — macOS / Linux / Windows，x64 与 arm64
 
 ## 截图
 
@@ -46,12 +46,14 @@ CrabPort 旨在实现一个简单易用的跨平台 SSH 客户端，集终端与
 
 | 平台 | 下载文件 | 说明 |
 |------|----------|------|
-| macOS (Apple Silicon) | `CrabPort-v*-macos-aarch64.dmg` | 打开后拖入 `/Applications` |
-| macOS (Intel) | `CrabPort-v*-macos-x86_64.dmg` | 打开后拖入 `/Applications` |
-| Linux (x64) | `CrabPort-v*-linux-x86_64.AppImage` | `chmod +x` 后双击运行，无需安装依赖 |
-| Linux (arm64) | `CrabPort-v*-linux-aarch64.AppImage` | `chmod +x` 后双击运行，无需安装依赖 |
-| Windows (x64) | `CrabPort-v*-windows-x86_64.msi` | 双击安装 |
-| Windows (arm64) | `CrabPort-v*-windows-aarch64.msi` | 双击安装 |
+| macOS (Apple Silicon) | `CrabPort-v*-macos-aarch64.dmg` | 打开 `.dmg` 后将 CrabPort 拖入 `/Applications` |
+| macOS (Intel) | `CrabPort-v*-macos-x86_64.dmg` | 打开 `.dmg` 后将 CrabPort 拖入 `/Applications` |
+| Linux (x64) | `CrabPort-v*-linux-x86_64.AppImage` | 赋予执行权限后双击运行，内置运行时依赖 |
+| Linux (arm64) | `CrabPort-v*-linux-aarch64.AppImage` | 赋予执行权限后双击运行，内置运行时依赖 |
+| Windows (x64) | `CrabPort-v*-windows-x86_64.zip` | 解压后双击 `CrabPort.exe` 运行 |
+| Windows (arm64) | `CrabPort-v*-windows-aarch64.zip` | 解压后双击 `CrabPort.exe` 运行 |
+
+> macOS 版本以 `.dmg` 磁盘镜像分发，Linux 版本以 `.AppImage` 分发（内置 X11 / Wayland / Vulkan / fontconfig 等运行时库，无需手动安装系统依赖），Windows 版本以 `.zip` 分发（受 cargo-bundle v0.11.0 的 MSI 打包 bug 影响，暂未提供 `.msi` 安装包）。
 
 **macOS 提示**：首次打开可能会提示"无法验证开发者"。右键点击应用 → 选择"打开"即可绕过限制，或在终端执行：
 ```bash
@@ -83,7 +85,8 @@ sudo apt-get install -y \
   libgl1-mesa-dev libegl1-mesa-dev libvulkan-dev \
   libfontconfig1-dev libfreetype6-dev \
   libasound2-dev libpulse-dev libdbus-1-dev \
-  libssl-dev pkg-config
+  libssl-dev pkg-config \
+  squashfs-tools   # 打包 .AppImage 所需的 mksquashfs
 ```
 
 **Windows**：MSVC 工具链（随 Visual Studio Build Tools 安装）
@@ -100,56 +103,23 @@ cargo run
 
 # Release 模式编译
 cargo build --release
-
-# macOS 打包为 .dmg
-cargo install cargo-bundle
-cargo bundle --release --format dmg
 ```
 
-## 项目结构
+#### 打包为各平台安装包
 
-CrabPort 采用 Cargo workspace 组织，各 crate 职责清晰：
+需先安装 [cargo-bundle](https://github.com/burtonageo/cargo-bundle)：
 
+```bash
+cargo install cargo-bundle --locked
 ```
-CrabPort/
-├── src/                    # 二进制入口
-│   └── main.rs             # 启动 GPUI Application
-├── crabport-core/          # 核心基础设施
-│   ├── credential.rs       # 主机与凭据数据模型
-│   ├── crypto.rs           # AES-256-GCM 加解密
-│   ├── store.rs            # SQLite 持久化层
-│   ├── profile.rs          # 用户配置目录
-│   └── log.rs              # 日志初始化
-├── crabport-ssh/           # SSH 后端
-│   ├── backend.rs          # russh 会话管理
-│   ├── handler.rs          # 连接回调与主机密钥验证
-│   ├── keys.rs             # 私钥解析（OpenSSH/PEM）
-│   ├── known_hosts.rs      # known_hosts 持久化
-│   ├── monitor.rs          # PTY 数据桥接
-│   └── transfer/           # SFTP 传输调度
-├── crabport-sftp/          # SFTP 后端
-│   ├── api.rs              # SFTP 操作抽象 trait
-│   ├── backend.rs          # russh-sftp 实现
-│   ├── archive.rs          # 目录打包/解包（tar+gz）
-│   └── transfer.rs         # 分块传输
-├── crabport-terminal/      # 终端抽象
-│   └── terminal.rs         # alacritty_terminal 封装
-├── crabport-tunnel/        # 隧道（开发中）
-└── crabport-ui/            # GPUI 界面层
-    ├── src/
-    │   ├── app.rs          # 主窗口与标签页管理
-    │   ├── views/
-    │   │   ├── terminal/   # 终端视图（渲染、选区、字体、配色）
-    │   │   ├── panel/      # 右侧面板（SFTP/历史/片段）
-    │   │   ├── hosts.rs    # 主机列表
-    │   │   ├── snippets.rs # 片段管理
-    │   │   └── tunnels.rs  # 隧道管理
-    │   ├── windows/        # 设置、关于等辅助窗口
-    │   ├── layouts/        # 布局组件（侧边栏、命令面板、连接表单）
-    │   └── components/     # 可复用 UI 组件
-    ├── assets/             # 图标等静态资源
-    └── i18n/               # 多语言翻译（zh-CN / en）
-```
+
+| 平台 | 命令 | 产物 |
+|------|------|------|
+| macOS | `cargo bundle --release --format dmg` | `target/release/bundle/dmg/CrabPort_*.dmg` |
+| Linux | `cargo bundle --release --format appimage` | `target/release/bundle/appimage/CrabPort_*.AppImage` |
+| Windows | `cargo build --release` 后手动压缩 `.exe` | `CrabPort.exe`（`.zip`） |
+
+> Windows 暂不使用 cargo-bundle 打包：其 v0.11.0 的 MSI 打包器存在一个将字符串写入二进制列的 bug，因此 CI 与本地均直接压缩 `.exe` 分发。
 
 ## 数据存储位置
 
@@ -162,8 +132,9 @@ CrabPort/
 | Windows | `%APPDATA%\crabport\` |
 
 包含以下文件：
-- `crabport.db` — SQLite 数据库（主机、凭据、片段）
+- `crabport.db` — SQLite 数据库（主机、凭据、片段、隧道、代理）
 - `.key` — AES-256 加密密钥（随机生成，请勿删除，否则无法解密已存凭据）
+- `config.toml` — 应用配置（语言等外观设置，原子写入）
 
 ## 技术栈
 
@@ -183,10 +154,14 @@ CrabPort/
 
 ## 路线图
 
-- [ ] 设置面板（主题、字体、快捷键自定义）
-- [ ] 端口转发 / SSH 隧道管理
+- [x] 设置面板（语言）
+- [x] 端口转发 / SSH 隧道管理（Local / Remote / Dynamic）
+- [x] 代理连接（SOCKS5 / HTTP CONNECT / HTTPS CONNECT）
+- [x] Telnet 连接类型
+- [x] 可配置主题色彩
+- [ ] 设置面板（字体、快捷键自定义）
 - [ ] 终端会话同步（多窗口共享）
-- [ ] 自定义配色方案
+- [ ] 串口连接类型
 - [ ] 插件系统
 
 ## 许可证

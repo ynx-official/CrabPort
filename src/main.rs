@@ -19,9 +19,11 @@ fn main() {
             gpui_component::theme::Theme::change(gpui_component::theme::ThemeMode::Dark, None, cx);
 
             // Set the active locale early so the menu bar (built below) and
-            // every window picks up the right translations. Hard-coded to
-            // zh-CN for now; will follow a user setting once Settings exists.
-            crabport_ui::set_locale("zh-CN");
+            // every window picks up the right translations. Read from the
+            // persisted config.toml so the user's language choice survives
+            // app restarts.
+            let locale = crabport_core::config::snapshot().appearance.locale;
+            crabport_ui::set_locale(&locale);
 
             cx.bind_keys([
                 KeyBinding::new("tab", TerminalTab, Some("CrabPortTerminal")),
@@ -71,11 +73,5 @@ fn main() {
             cx.set_menus(crabport_ui::menus::app_menus());
 
             open_main_window(cx);
-
-            // NOTE: Previously the app called `std::process::exit(0)` on any
-            // window close. That is incompatible with multi-window support
-            // (closing a secondary window would kill the whole app). GPUI's
-            // default behavior is to exit the process once the last window is
-            // closed, which is what we want now.
         });
 }

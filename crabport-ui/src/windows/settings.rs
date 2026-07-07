@@ -1,16 +1,55 @@
 //! Settings window.
 //!
-//! Currently a skeleton — renders a placeholder layout. Real settings panels
-//! (appearance, terminal defaults, SSH defaults, data export) will be added
-//! incrementally in follow-up commits.
+//! Renders a sidebar (General / Appearance) on the left and a scrollable
+//! content pane on the right. Every control reads from and writes to the
+//! process-wide [`crabport_core::config::CONFIG`] `LazyLock`, so changes are
+//! persisted to `config.toml` immediately and visible to every other window
+//! in the process.
 
 use gpui::*;
+use gpui_component::label::Label;
 use rust_i18n::t;
 
+use crabport_core::config;
+
 use crate::color::*;
+use crate::components::button::Button;
+use crate::components::dropdown::Dropdown;
+
+// ---------------------------------------------------------------------------
+// Tab enum
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SettingsTab {
+    General,
+    Appearance,
+}
+
+impl SettingsTab {
+    fn all() -> [SettingsTab; 2] {
+        [SettingsTab::General, SettingsTab::Appearance]
+    }
+
+    fn label(self) -> SharedString {
+        match self {
+            SettingsTab::General => t!("window.settings.tab.general").into(),
+            SettingsTab::Appearance => t!("window.settings.tab.appearance").into(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Root view
+// ---------------------------------------------------------------------------
 
 /// Root view for the Settings window.
-pub struct SettingsWindow;
+pub struct SettingsWindow {
+    tab: SettingsTab,
+    // Dropdown open states (Dropdown is uncontrolled — caller manages it).
+    locale_dropdown_open: bool,
+    theme_dropdown_open: bool,
+}
 
 impl SettingsWindow {
     /// Open the Settings window (or no-op if one already exists — callers
@@ -18,7 +57,7 @@ impl SettingsWindow {
     /// singleton check).
     pub fn open(cx: &mut App) -> WindowHandle<gpui_component::Root> {
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::centered(size(px(720.0), px(560.0)), cx)),
+            window_bounds: Some(WindowBounds::centered(size(px(820.0), px(600.0)), cx)),
             titlebar: Some(TitlebarOptions {
                 title: Some(t!("window.settings.title").to_string().into()),
                 appears_transparent: true,
@@ -26,42 +65,343 @@ impl SettingsWindow {
                 ..Default::default()
             }),
             window_min_size: Some(Size {
-                width: px(480.0),
-                height: px(400.0),
+                width: px(560.0),
+                height: px(440.0),
             }),
             ..Default::default()
         };
 
         cx.open_window(options, |window, cx| {
             cx.new(|cx| {
-                let view = cx.new(|_cx| SettingsWindow);
+                let view = cx.new(|cx| SettingsWindow::new(window, cx));
                 gpui_component::Root::new(view, window, cx)
             })
         })
         .expect("Failed to open Settings window")
     }
-}
 
-impl Render for SettingsWindow {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn new(_window: &mut Window, _cx: &mut Context<Self>) -> Self {
+        Self {
+            tab: SettingsTab::General,
+            locale_dropdown_open: false,
+            theme_dropdown_open: false,
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Sidebar
+    // -------------------------------------------------------------------
+
+    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let handle = cx.entity().clone();
+        div()
+            .h_full()
+            .w(px(180.0))
+            .flex_shrink_0()
+            .border_r_1()
+            .border_color(rgb(border()))
+            .bg(rgb(bg_sidebar()))
+            .flex()
+            .flex_col()
+            .pt_11()
+            .px_2()
+            .gap_2()
+            .children(SettingsTab::all().map(|item| {
+                let is_selected = item == self.tab;
+                let h = handle.clone();
+                Button::new(ElementId::Name(format!("settings-tab-{:?}", item).into()))
+                    .tab()
+                    .selected(is_selected)
+                    .child(item.label())
+                    .on_click(move |_e, _w, cx| {
+                        h.update(cx, |view, _| {
+                            view.tab = item;
+                        });
+                    })
+                    .h_9()
+                    .border_0()
+                    .px_2()
+                    .text_sm()
+                    .justify_start()
+            }))
+    }
+
+    // -------------------------------------------------------------------
+    // Section helpers
+    // -------------------------------------------------------------------
+
+    fn section_header(text: impl Into<SharedString>) -> impl IntoElement {
+        div()
+            .text_sm()
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(rgb(text_primary()))
+            .child(text.into())
+    }
+
+    fn section_desc(text: impl Into<SharedString>) -> impl IntoElement {
+        div()
+            .text_xs()
+            .text_color(rgb(text_muted()))
+            .child(text.into())
+    }
+
+    // -------------------------------------------------------------------
+    // General pane
+    // -------------------------------------------------------------------
+
+    fn render_general_pane(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let store_path = crabport_core::store::default_data_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "(unknown)".to_string());
+        let handle = cx.entity().clone();
+
         div()
             .size_full()
-            .bg(rgb(BG_BASE))
             .flex()
             .flex_col()
             .p_6()
-            .gap_4()
+            .gap_6()
             .child(
                 div()
-                    .text_xl()
-                    .text_color(rgb(TEXT_PRIMARY))
-                    .child(t!("window.settings.title").to_string()),
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(Self::section_header(t!(
+                        "window.settings.general.section_data"
+                    )))
+                    .child(Self::section_desc(t!(
+                        "window.settings.general.open_data_dir_desc"
+                    )))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(text_muted()))
+                            .child(Label::new(store_path)),
+                    )
+                    .child(
+                        Button::new("settings-open-data-dir")
+                            .child(t!("window.settings.general.open_data_dir").to_string())
+                            .w_auto()
+                            .centered(true)
+                            .on_click(move |_e, _w, cx| {
+                                let _ = crabport_core::store::default_data_dir().map(|p| {
+                                    let _ = open_path(&p, cx);
+                                });
+                            }),
+                    ),
             )
             .child(
                 div()
-                    .text_sm()
-                    .text_color(rgb(TEXT_MUTED))
-                    .child(t!("window.settings.placeholder").to_string()),
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(Self::section_header(t!(
+                        "window.settings.general.reset_config"
+                    )))
+                    .child(Self::section_desc(t!(
+                        "window.settings.general.reset_config_desc"
+                    )))
+                    .child({
+                        let h = handle.clone();
+                        Button::new("settings-reset-config")
+                            .child(t!("window.settings.general.reset_config").to_string())
+                            .w_auto()
+                            .centered(true)
+                            .on_click(move |_e, _w, cx| {
+                                let _ = config::update(|cfg| {
+                                    cfg.appearance = Default::default();
+                                });
+                                // Resetting appearance also resets the theme,
+                                // so repaint every window with the default
+                                // palette.
+                                crate::refresh_theme_with(cx);
+                                h.update(cx, |_, cx| {
+                                    cx.notify();
+                                });
+                            })
+                    }),
             )
     }
+
+    // -------------------------------------------------------------------
+    // Appearance pane
+    // -------------------------------------------------------------------
+
+    fn render_appearance_pane(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let handle = cx.entity().clone();
+        let locale_idx = if config::snapshot().appearance.locale == "zh-CN" {
+            1
+        } else {
+            0
+        };
+
+        // Map the persisted theme preset name to a dropdown index. Unknown
+        // names (e.g. a hand-edited config.toml) fall back to the default.
+        let presets = crabport_core::config::ThemeConfig::PRESETS;
+        let current_name = config::snapshot().appearance.theme.name;
+        let theme_idx = presets
+            .iter()
+            .position(|p| *p == current_name.as_str())
+            .unwrap_or(0);
+
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .p_6()
+            .gap_6()
+            // --- Language ---
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(Self::section_header(t!(
+                        "window.settings.appearance.section_language"
+                    )))
+                    .child(
+                        div().w(px(240.0)).child(
+                            Dropdown::new("settings-locale")
+                                .item(t!("window.settings.appearance.language_en"))
+                                .item(t!("window.settings.appearance.language_zh_cn"))
+                                .selected(locale_idx)
+                                .is_open(self.locale_dropdown_open)
+                                .on_toggle({
+                                    let h = handle.clone();
+                                    move |_w, cx| {
+                                        h.update(cx, |view, cx| {
+                                            view.locale_dropdown_open = !view.locale_dropdown_open;
+                                            cx.notify();
+                                        });
+                                    }
+                                })
+                                .on_change({
+                                    let h = handle.clone();
+                                    move |idx, _w, cx| {
+                                        let locale = if idx == 1 { "zh-CN" } else { "en" };
+                                        let _ = config::update(|cfg| {
+                                            cfg.appearance.locale = locale.to_string();
+                                        });
+                                        crate::set_locale(locale);
+                                        h.update(cx, |view, cx| {
+                                            view.locale_dropdown_open = false;
+                                            cx.notify();
+                                        });
+                                    }
+                                }),
+                        ),
+                    ),
+            )
+            // --- Theme ---
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(Self::section_header(t!(
+                        "window.settings.appearance.section_theme"
+                    )))
+                    .child(Self::section_desc(t!(
+                        "window.settings.appearance.theme_desc"
+                    )))
+                    .child(
+                        div().w(px(240.0)).child(
+                            Dropdown::new("settings-theme")
+                                .item(t!("window.settings.appearance.theme_modern_dark"))
+                                .item(t!("window.settings.appearance.theme_mocha"))
+                                .item(t!("window.settings.appearance.theme_tokyo_night"))
+                                .selected(theme_idx)
+                                .is_open(self.theme_dropdown_open)
+                                .on_toggle({
+                                    let h = handle.clone();
+                                    move |_w, cx| {
+                                        h.update(cx, |view, cx| {
+                                            view.theme_dropdown_open = !view.theme_dropdown_open;
+                                            cx.notify();
+                                        });
+                                    }
+                                })
+                                .on_change({
+                                    let h = handle.clone();
+                                    move |idx, _w, cx| {
+                                        let id = presets.get(idx).copied().unwrap_or("modern-dark");
+                                        let _ = config::update(|cfg| {
+                                            cfg.appearance.theme =
+                                                crabport_core::config::ThemeConfig::preset(id);
+                                        });
+                                        // Reload the cached theme and repaint every
+                                        // open window so the new palette shows up
+                                        // everywhere, not just in Settings.
+                                        crate::refresh_theme_with(cx);
+                                        h.update(cx, |view, cx| {
+                                            view.theme_dropdown_open = false;
+                                            cx.notify();
+                                        });
+                                    }
+                                }),
+                        ),
+                    ),
+            )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Render
+// ---------------------------------------------------------------------------
+
+impl Render for SettingsWindow {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let content: AnyElement = match self.tab {
+            SettingsTab::General => self.render_general_pane(cx).into_any_element(),
+            SettingsTab::Appearance => self.render_appearance_pane(cx).into_any_element(),
+        };
+
+        div()
+            .size_full()
+            .bg(rgb(bg_base()))
+            .flex()
+            .flex_row()
+            .child(self.render_sidebar(cx))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .overflow_hidden()
+                    .child(content),
+            )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// open_path helper — best-effort cross-platform "reveal in Finder/Explorer"
+// ---------------------------------------------------------------------------
+
+fn open_path(path: &std::path::Path, _cx: &mut App) -> Result<(), ()> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(path)
+            .spawn()
+            .map_err(|_| ())?;
+        return Ok(());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(path)
+            .spawn()
+            .map_err(|_| ())?;
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(path)
+            .spawn()
+            .map_err(|_| ())?;
+        return Ok(());
+    }
+    #[allow(unreachable_code)]
+    Err(())
 }

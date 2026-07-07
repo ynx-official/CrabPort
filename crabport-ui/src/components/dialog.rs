@@ -67,9 +67,9 @@ impl AlertSeverity {
     /// button border highlight.
     fn accent(self) -> u32 {
         match self {
-            Self::Info => 0x89b4fa,    // TERM_BLUE-ish
-            Self::Warning => 0xf9e2af, // TERM_YELLOW
-            Self::Danger => 0xf38ba8,  // TERM_RED
+            Self::Info => term_blue(),
+            Self::Warning => term_yellow(),
+            Self::Danger => term_red(),
         }
     }
 
@@ -369,9 +369,9 @@ fn render_dialog(
     div()
         .id(dialog_id.clone())
         .w(px(420.0))
-        .bg(rgb(BG_BASE))
+        .bg(rgb(bg_base()))
         .border_1()
-        .border_color(rgb(BORDER))
+        .border_color(rgb(border()))
         .rounded_lg()
         .shadow_lg()
         .flex()
@@ -414,7 +414,7 @@ fn render_dialog(
                     div()
                         .text_lg()
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(TEXT_PRIMARY))
+                        .text_color(rgb(text_primary()))
                         .child(title.to_string()),
                 ),
         )
@@ -423,7 +423,7 @@ fn render_dialog(
             el.child(
                 div()
                     .text_sm()
-                    .text_color(rgb(TEXT_MUTED))
+                    .text_color(rgb(text_muted()))
                     .child(desc.to_string()),
             )
         })
@@ -437,7 +437,7 @@ fn render_dialog(
                     .gap_1()
                     .p_3()
                     .rounded(px(6.0))
-                    .bg(rgb(BG_SIDEBAR))
+                    .bg(rgb(bg_sidebar()))
                     .children(
                         details
                             .iter()
@@ -487,7 +487,7 @@ fn render_detail_row(idx: usize, label: &SharedString, value: &SharedString) -> 
                 .w(px(96.0))
                 .flex_shrink_0()
                 .text_xs()
-                .text_color(rgb(TEXT_MUTED))
+                .text_color(rgb(text_muted()))
                 .child(label.to_string()),
         )
         .child(
@@ -498,7 +498,7 @@ fn render_detail_row(idx: usize, label: &SharedString, value: &SharedString) -> 
                 // they don't blow out the dialog width.
                 .text_xs()
                 .whitespace_normal()
-                .text_color(rgb(TEXT_PRIMARY))
+                .text_color(rgb(text_primary()))
                 .child(value.to_string()),
         )
 }

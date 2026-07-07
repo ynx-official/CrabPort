@@ -5,6 +5,10 @@ use gpui_component::scroll::ScrollableElement;
 use std::f32::consts::PI;
 use std::{rc::Rc, time::Duration};
 
+/// Rotation (in radians) of the trigger chevron when the menu is open.
+/// PI = 180°, so the down-chevron points up when open.
+const CHEVRON_OPEN_ROTATION: f32 = PI;
+
 // ---------------------------------------------------------------------------
 // Dropdown
 // ---------------------------------------------------------------------------
@@ -64,6 +68,7 @@ pub struct Dropdown {
     selected: Option<usize>,
     placeholder: SharedString,
     is_open: bool,
+    disabled: bool,
     on_change: Option<Rc<dyn Fn(usize, &mut Window, &mut App) + 'static>>,
     on_toggle: Option<Rc<dyn Fn(&mut Window, &mut App) + 'static>>,
 }
@@ -86,6 +91,7 @@ impl Dropdown {
             selected: None,
             placeholder: "Select…".into(),
             is_open: false,
+            disabled: false,
             on_change: None,
             on_toggle: None,
         }
@@ -120,6 +126,13 @@ impl Dropdown {
         self
     }
 
+    /// Disable interaction and visually mute the dropdown. A disabled
+    /// dropdown never opens its menu, even if `is_open` is left `true`.
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
     pub fn on_change(mut self, f: impl Fn(usize, &mut Window, &mut App) + 'static) -> Self {
         self.on_change = Some(Rc::new(f));
         self
@@ -141,9 +154,13 @@ impl RenderOnce for Dropdown {
             selected,
             placeholder,
             is_open,
+            disabled,
             on_change,
             on_toggle,
         } = self;
+
+        // A disabled dropdown never shows its menu, regardless of `is_open`.
+        let is_open = is_open && !disabled;
 
         let item_count = items.len();
         let selected_label = selected
@@ -156,21 +173,37 @@ impl RenderOnce for Dropdown {
         // ------------------------------------------------------------------
         let trigger_id = ElementId::Name(format!("{id_str}-trigger").into());
 
-        let chevron_anim_id = ElementId::Name(format!("{id_str}-chevron-{is_open}").into());
+        // Chevron: rotate 180° when open. We animate via GPUI's built-in
+        // `with_animation` rather than `gpui-animation`'s `transition_when_else`,
+        // because the latter only interpolates `StyleRefinement` fields (bg,
+        // opacity, size…) and SVG `Transformation` is not part of the style.
+        //
+        // The animation ID encodes `is_open` so that flipping the toggle
+        // creates a fresh `AnimationState` (start = `Instant::now()`) and the
+        // rotation re-runs from the opposite end. Without this, the cached
+        // state would report `delta > 1` (animation already finished) and the
+        // chevron would snap instead of rotating.
+        //
+        // For the close animation we must animate *back* from PI to 0, so the
+        // rotation is `(1 - delta) * PI` (start = PI, end = 0). Computing it as
+        // `delta * 0` would leave the chevron at 0 the whole time — no visible
+        // reverse motion.
+        let chevron_anim_id = ElementId::Name(format!("{id_str}-chevron-{}", is_open).into());
+
         let chevron = svg()
             .path("icons/chevron-down.svg")
             .size_4()
-            .text_color(rgb(TEXT_MUTED))
+            .text_color(rgb(text_muted()))
             .with_animation(
                 chevron_anim_id,
-                Animation::new(Duration::from_millis(150)).with_easing(ease_in_out),
-                move |svg, delta| {
+                Animation::new(Duration::from_millis(200)).with_easing(ease_in_out),
+                move |this, delta| {
                     let angle = if is_open {
-                        PI * delta
+                        delta * CHEVRON_OPEN_ROTATION
                     } else {
-                        PI * (1.0 - delta)
+                        (1.0 - delta) * CHEVRON_OPEN_ROTATION
                     };
-                    svg.with_transformation(Transformation::rotate(radians(angle)))
+                    this.with_transformation(Transformation::rotate(radians(angle)))
                 },
             );
 
@@ -184,20 +217,34 @@ impl RenderOnce for Dropdown {
             .h_9()
             .px_3()
             .rounded_md()
-            .bg(rgb(BG_BASE))
+            .bg(rgb(if disabled {
+                input_bg_disabled()
+            } else {
+                bg_base()
+            }))
             .border_1()
-            .border_color(rgb(BORDER))
-            .cursor_pointer()
+            .border_color(rgb(border()))
+            .when_else(
+                disabled,
+                |el| el.cursor_not_allowed().opacity(0.5),
+                |el| el.cursor_pointer(),
+            )
             .child(
                 div()
                     .text_sm()
-                    .text_color(rgb(TEXT_PRIMARY))
+                    .text_color(rgb(if disabled {
+                        input_text_disabled()
+                    } else {
+                        text_primary()
+                    }))
                     .child(selected_label),
             )
             .child(chevron)
             .when_some(on_toggle, |this, cb| {
-                this.on_click(move |_e, w, cx| {
-                    cb(w, cx);
+                this.when(!disabled, |this| {
+                    this.on_click(move |_e, w, cx| {
+                        cb(w, cx);
+                    })
                 })
             });
 
@@ -205,11 +252,19 @@ impl RenderOnce for Dropdown {
         // Menu
         // ------------------------------------------------------------------
         let menu_id = ElementId::Name(format!("{id_str}-menu").into());
-        let natural_height = ITEM_HEIGHT * item_count as f32;
-        let menu_h = if natural_height > MAX_MENU_HEIGHT {
+        // Menu height = items + gap_1 between them. The inner p_1 padding
+        // is accounted for by NOT adding it — empirically the rendered
+        // padding is smaller than the theoretical 8px.
+        let gap_total = if item_count > 1 {
+            (item_count - 1) as f32 * 4.0
+        } else {
+            0.0
+        };
+        let natural_height = f32::from(ITEM_HEIGHT) * item_count as f32 + gap_total;
+        let menu_h = if natural_height > f32::from(MAX_MENU_HEIGHT) {
             MAX_MENU_HEIGHT
         } else {
-            natural_height
+            px(natural_height)
         };
 
         let item_els: Vec<AnyElement> = items
@@ -220,8 +275,15 @@ impl RenderOnce for Dropdown {
                 let cb = on_change.clone();
                 let item_id = ElementId::Name(format!("{id_str}-item-{i}").into());
 
+                // Use GPUI's native `hover()` style instead of gpui-animation's
+                // `transition_on_hover`. The animation variant caches the
+                // initial element state (including text_color) and fails to
+                // pick up `selected` changes on re-render, so the highlight
+                // never follows the new selection. Native hover applies the
+                // bg purely from the current render's style, with no cached
+                // state, so text_color updates take effect immediately.
                 div()
-                    .id(item_id.clone())
+                    .id(item_id)
                     .flex()
                     .items_center()
                     .h(ITEM_HEIGHT)
@@ -230,25 +292,14 @@ impl RenderOnce for Dropdown {
                     .rounded_sm()
                     .cursor_pointer()
                     .text_sm()
-                    .text_color(if is_selected {
-                        rgb(TEXT_PRIMARY)
+                    .text_color(rgb(if is_selected {
+                        text_primary()
                     } else {
-                        rgb(TEXT_MUTED)
-                    })
-                    .bg(rgb(BG_BASE))
+                        text_muted()
+                    }))
+                    .bg(rgb(bg_base()))
+                    .hover(|s| s.bg(rgb(surface_active())))
                     .child(item.label)
-                    .with_transition(item_id)
-                    .transition_on_hover(
-                        Duration::from_millis(150),
-                        EaseInOutQuad,
-                        move |hovered, state| {
-                            if *hovered {
-                                state.bg(rgb(SURFACE_ACTIVE))
-                            } else {
-                                state.bg(rgb(BG_BASE))
-                            }
-                        },
-                    )
                     .on_click(move |_e, w, cx| {
                         if let Some(ref f) = cb {
                             f(i, w, cx);
@@ -268,10 +319,11 @@ impl RenderOnce for Dropdown {
             .overflow_hidden()
             .rounded_md()
             .border_1()
-            .border_color(rgb(BORDER))
-            .bg(rgb(BG_BASE))
+            .border_color(rgb(border()))
+            .bg(rgb(bg_base()))
             .opacity(0.)
             .h(px(0.))
+            .when(is_open, |el| el.occlude())
             .with_transition(menu_id)
             .transition_when_else(
                 is_open,
@@ -300,7 +352,11 @@ impl RenderOnce for Dropdown {
             .w_full()
             .cursor_default()
             .child(trigger)
-            .child(menu);
+            // `deferred` delays the menu's paint until after all ancestors
+            // and siblings, so the open menu renders on top of form elements
+            // that follow the dropdown in the layout. `occlude` (applied on
+            // the menu above when open) ensures it also captures clicks.
+            .child(deferred(menu));
 
         root.style().refine(&style);
         root

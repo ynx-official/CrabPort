@@ -12,8 +12,11 @@ use alacritty_terminal::{
     vte::ansi::{Color, CursorShape, NamedColor},
 };
 use crabport_core::keybind::{self, KeyAction, TerminalAction};
+use crabport_ssh::CrabPortTunnel;
 use crabport_ssh::backend::HostKeyInfo;
 use crabport_ssh::session::SshConnectionInfo;
+use crabport_telnet::backend::TelnetBackend;
+use crabport_telnet::session::TelnetConnectionInfo;
 use crabport_terminal::pty::PtyBackend;
 use crabport_terminal::terminal::{
     CrabPortMonitor, RemoteStatus, SftpTransferBytes, SftpTransferKind, SftpTransferStage,
@@ -25,6 +28,7 @@ use gpui::*;
 use parking_lot::Mutex;
 
 use crate::app::{CrabPortTab, TerminalShiftTab, TerminalTab};
+use crate::color::{selection_bg, term_bg, term_cursor, term_fg};
 use crate::views::terminal::color::*;
 use crate::views::terminal::connection_overlay::*;
 use crate::views::terminal::fonts::palette;
@@ -108,6 +112,7 @@ pub struct TerminalView {
     host_id: Option<i64>,
     count: u64,
     ssh_info: Option<SshConnectionInfo>,
+    telnet_info: Option<TelnetConnectionInfo>,
     on_backend_closed: Option<Rc<dyn Fn(&mut App)>>,
     /// Latest SFTP transfer progress pushed by the backend, or `None` when
     /// no transfer is in flight. Updated by the backend-event subscriber;
@@ -117,6 +122,15 @@ pub struct TerminalView {
     /// the toolbar) can re-render without observing every terminal repaint.
     /// Mirrors the `on_backend_closed` callback pattern.
     on_sftp_progress_changed: Option<Rc<dyn Fn(&mut App)>>,
+    /// Invoked when an SFTP transfer finishes (success or failure), so the
+    /// app can surface a toast notification. Mirrors the
+    /// `on_sftp_progress_changed` / `on_backend_closed` callback pattern.
+    on_sftp_transfer_finished: Option<Rc<dyn Fn(SftpTransferKind, bool, String, &mut App)>>,
+    /// A `CrabPortTunnel` view of the backend, when the backend is an SSH
+    /// session. Used by the Tunnels panel to start "borrowed" tunnels that
+    /// reuse this tab's SSH connection instead of opening a dedicated owned
+    /// session. `None` for local PTY backends.
+    tunnel_source: Option<Arc<dyn crabport_ssh::CrabPortTunnel>>,
 }
 
 impl TerminalView {
@@ -127,7 +141,7 @@ impl TerminalView {
             PtyBackend::new(cols as u16, rows as u16)
                 .expect("failed to create pty backend (local PTY is not supported on Windows)"),
         );
-        Self::with_backend(backend, cols, rows, None, count, cx)
+        Self::with_backend(backend, cols, rows, None, None, count, cx)
     }
 
     pub fn with_backend(
@@ -135,10 +149,20 @@ impl TerminalView {
         cols: usize,
         rows: usize,
         ssh_info: Option<SshConnectionInfo>,
+        telnet_info: Option<TelnetConnectionInfo>,
         count: u64,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::with_backend_and_host(backend, cols, rows, String::new(), ssh_info, count, cx)
+        Self::with_backend_and_host(
+            backend,
+            cols,
+            rows,
+            String::new(),
+            ssh_info,
+            telnet_info,
+            count,
+            cx,
+        )
     }
 
     pub fn with_backend_and_host(
@@ -147,12 +171,22 @@ impl TerminalView {
         rows: usize,
         host: String,
         ssh_info: Option<SshConnectionInfo>,
+        telnet_info: Option<TelnetConnectionInfo>,
         count: u64,
         cx: &mut Context<Self>,
     ) -> Self {
         let overlay = Arc::new(Mutex::new(ConnectionOverlayState::new()));
         Self::with_backend_and_host_and_overlay(
-            backend, cols, rows, host, None, overlay, ssh_info, count, cx,
+            backend,
+            cols,
+            rows,
+            host,
+            None,
+            overlay,
+            ssh_info,
+            telnet_info,
+            count,
+            cx,
         )
     }
 
@@ -164,13 +198,21 @@ impl TerminalView {
         host_id: Option<i64>,
         overlay: SharedOverlayState,
         ssh_info: Option<SshConnectionInfo>,
+        telnet_info: Option<TelnetConnectionInfo>,
         count: u64,
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
         let font_size = px(13.0);
         let line_height = px(20.0);
-        let cell_width = px(7.8);
+        // Consolas (Windows) has slightly narrower glyphs than Menlo (macOS);
+        // a mismatch here causes character gaps and clipping, so pick the
+        // advance width that matches the platform's monospace font.
+        let cell_width = if cfg!(target_os = "windows") {
+            px(7.2)
+        } else {
+            px(7.8)
+        };
 
         let session = Arc::new(TerminalSession::new(backend, cols, rows));
         session.start();
@@ -264,9 +306,16 @@ impl TerminalView {
                                 }
                             }
                             let cb = this.on_sftp_progress_changed.clone();
+                            let cb_kind = kind;
+                            let cb_success = success;
+                            let cb_message = message.clone();
+                            let finished_cb = this.on_sftp_transfer_finished.clone();
                             cx.notify();
                             if let Some(cb) = cb {
                                 cx.defer(move |cx| cb(cx));
+                            }
+                            if let Some(cb) = finished_cb {
+                                cx.defer(move |cx| cb(cb_kind, cb_success, cb_message, cx));
                             }
                         });
                     }
@@ -429,9 +478,12 @@ impl TerminalView {
             host_id,
             count,
             ssh_info,
+            telnet_info,
             on_backend_closed: None,
             sftp_progress: None,
             on_sftp_progress_changed: None,
+            on_sftp_transfer_finished: None,
+            tunnel_source: None,
         }
     }
 
@@ -441,6 +493,18 @@ impl TerminalView {
 
     pub fn allow_sftp(&self) -> bool {
         self.session.allow_sftp()
+    }
+
+    pub fn allow_history(&self) -> bool {
+        self.session.allow_history()
+    }
+
+    pub fn allow_snippets(&self) -> bool {
+        self.session.allow_snippets()
+    }
+
+    pub fn allow_tunnels(&self) -> bool {
+        self.session.allow_tunnels()
     }
 
     pub fn sftp_entries(&self) -> Option<std::sync::Arc<Vec<(String, bool)>>> {
@@ -500,6 +564,28 @@ impl TerminalView {
         self.on_sftp_progress_changed = Some(Rc::new(f));
     }
 
+    /// Sets the callback invoked when an SFTP transfer finishes. The app uses
+    /// this to show a success/failure toast notification.
+    pub fn set_on_sftp_transfer_finished(
+        &mut self,
+        f: impl Fn(SftpTransferKind, bool, String, &mut App) + 'static,
+    ) {
+        self.on_sftp_transfer_finished = Some(Rc::new(f));
+    }
+
+    /// Attach a `CrabPortTunnel` view of this tab's backend, so the Tunnels
+    /// panel can start "borrowed" tunnels reusing this SSH connection.
+    /// Only set for SSH tabs (local PTY backends have no tunnel source).
+    pub fn set_tunnel_source(&mut self, source: Arc<dyn CrabPortTunnel>) {
+        self.tunnel_source = Some(source);
+    }
+
+    /// The tunnel source backing this tab, if it's an SSH session. Used by
+    /// the Tunnels panel to start borrowed tunnels.
+    pub fn tunnel_source(&self) -> Option<&Arc<dyn CrabPortTunnel>> {
+        self.tunnel_source.as_ref()
+    }
+
     /// Returns the host-key info for a currently-pending host-key prompt,
     /// if any. The prompt stays pending in the overlay until resolved via
     /// [`resolve_pending_host_key`]. Used by the global alert controller
@@ -532,10 +618,35 @@ impl TerminalView {
     }
 
     pub fn reconnect(&mut self, cx: &mut Context<Self>) {
-        let info = match self.ssh_info.clone() {
-            Some(i) => i,
-            None => return,
-        };
+        // Try SSH first, then telnet.
+        let backend: Arc<dyn crabport_terminal::terminal::CrabPortTerminal> =
+            if let Some(info) = self.ssh_info.clone() {
+                let verifier = crate::views::terminal::connection_overlay::make_host_key_verifier(
+                    self.overlay.clone(),
+                );
+                let overlay_cb = self.overlay.clone();
+                Arc::new(crabport_ssh::backend::SshBackend::new(
+                    info,
+                    80,
+                    24,
+                    Arc::new(move |msg: String| {
+                        overlay_cb.lock().log(ConnectionLogLevel::Info, msg);
+                    }),
+                    Some(verifier),
+                ))
+            } else if let Some(info) = self.telnet_info.clone() {
+                let overlay_cb = self.overlay.clone();
+                Arc::new(TelnetBackend::new(
+                    info,
+                    80,
+                    24,
+                    Arc::new(move |msg: String| {
+                        overlay_cb.lock().log(ConnectionLogLevel::Info, msg);
+                    }),
+                ))
+            } else {
+                return;
+            };
 
         self.session.close();
 
@@ -550,20 +661,6 @@ impl TerminalView {
 
         let cols: usize = 80;
         let rows: usize = 24;
-
-        let overlay_cb = self.overlay.clone();
-        let verifier = crate::views::terminal::connection_overlay::make_host_key_verifier(
-            self.overlay.clone(),
-        );
-        let backend = Arc::new(crabport_ssh::backend::SshBackend::new(
-            info,
-            cols as u16,
-            rows as u16,
-            Arc::new(move |msg: String| {
-                overlay_cb.lock().log(ConnectionLogLevel::Info, msg);
-            }),
-            Some(verifier),
-        ));
 
         let session = Arc::new(TerminalSession::new(backend, cols, rows));
         session.start();
@@ -622,9 +719,16 @@ impl TerminalView {
                                 }
                             }
                             let cb = this.on_sftp_progress_changed.clone();
+                            let cb_kind = kind;
+                            let cb_success = success;
+                            let cb_message = message.clone();
+                            let finished_cb = this.on_sftp_transfer_finished.clone();
                             cx.notify();
                             if let Some(cb) = cb {
                                 cx.defer(move |cx| cb(cx));
+                            }
+                            if let Some(cb) = finished_cb {
+                                cx.defer(move |cx| cb(cb_kind, cb_success, cb_message, cx));
                             }
                         });
                     }
@@ -865,7 +969,7 @@ impl Render for TerminalView {
             .size_full()
             .overflow_hidden()
             .cursor_text()
-            .bg(rgb(TERM_BG))
+            .bg(rgb(term_bg()))
             .track_focus(&focus_handle)
             .key_context("CrabPortTerminal")
             .on_action(cx.listener(|this, _: &TerminalTab, _window, cx| {
@@ -1113,7 +1217,7 @@ impl Render for TerminalView {
                         // Single viewport-wide background fill.
                         window.paint_quad(fill(
                             Bounds::new(bounds.origin, bounds.size),
-                            rgb(TERM_BG),
+                            rgb(term_bg()),
                         ));
 
                         let row_count = cache.rows_count;
@@ -1170,7 +1274,7 @@ impl Render for TerminalView {
                                     let wide = cell.flags.contains(Flags::WIDE_CHAR);
 
                                     let bg_color: Option<Hsla> = if is_sel {
-                                        Some(rgb(SELECTION_BG).into())
+                                        Some(rgb(selection_bg()).into())
                                     } else if is_inv {
                                         Some(rgb(cell.fg).into())
                                     } else if cell.custom_bg {
@@ -1289,7 +1393,7 @@ impl Render for TerminalView {
                                 text.len(),
                                 false,
                                 false,
-                                TERM_FG,
+                                term_fg(),
                                 false,
                                 0,
                                 true,
@@ -1720,7 +1824,7 @@ fn paint_cursor(
 ) {
     match shape {
         CursorShape::Block => {
-            let c: Hsla = rgb(TERM_CURSOR).into();
+            let c: Hsla = rgb(term_cursor()).into();
             window.paint_quad(fill(
                 Bounds::new(point(cx_x, cx_y), size(cell_width, line_height)),
                 c.opacity(0.5),
@@ -1729,7 +1833,7 @@ fn paint_cursor(
         CursorShape::HollowBlock => {
             window.paint_quad(outline(
                 Bounds::new(point(cx_x, cx_y), size(cell_width, line_height)),
-                rgb(TERM_CURSOR),
+                rgb(term_cursor()),
                 BorderStyle::Solid,
             ));
         }
@@ -1739,13 +1843,13 @@ fn paint_cursor(
                     point(cx_x, cx_y + line_height - px(2.0)),
                     size(cell_width, px(2.0)),
                 ),
-                rgb(TERM_CURSOR),
+                rgb(term_cursor()),
             ));
         }
         CursorShape::Beam => {
             window.paint_quad(fill(
                 Bounds::new(point(cx_x, cx_y), size(px(1.5), line_height)),
-                rgb(TERM_CURSOR),
+                rgb(term_cursor()),
             ));
         }
         CursorShape::Hidden => {}

@@ -12,8 +12,8 @@ use tokio::sync::oneshot;
 use crabport_ssh::backend::{HostKeyInfo, HostKeyVerifier};
 use crabport_terminal::terminal::RemoteStatus;
 
+use crate::color::{term_bg, term_fg, term_green, term_red, term_yellow};
 use crate::components::button::Button;
-use crate::views::terminal::color::*;
 
 /// A single log entry shown on the connection overlay.
 #[derive(Debug, Clone)]
@@ -38,10 +38,10 @@ pub enum ConnectionLogLevel {
 impl ConnectionLogLevel {
     pub fn color(&self) -> u32 {
         match self {
-            Self::Info => TERM_FG,
-            Self::Success => 0xa6e3a1, // TERM_GREEN
-            Self::Warning => 0xf9e2af, // TERM_YELLOW
-            Self::Error => 0xf38ba8,   // TERM_RED
+            Self::Info => term_fg(),
+            Self::Success => term_green(),
+            Self::Warning => term_yellow(),
+            Self::Error => term_red(),
         }
     }
 
@@ -290,7 +290,7 @@ pub(crate) fn render_connection_overlay(
         .cursor_default()
         .items_center()
         .justify_center()
-        .bg(rgb(TERM_BG))
+        .bg(rgb(term_bg()))
         .opacity(1.0)
         .with_transition(("connection-overlay-opacity", count))
         .transition_when(
@@ -315,14 +315,14 @@ pub(crate) fn render_connection_overlay(
                         .child(match status {
                             RemoteStatus::Connecting => render_spinner(spinner_rotation_mrad),
                             RemoteStatus::Disconnected => {
-                                div().size(px(12.0)).rounded_full().bg(rgb(0xf38ba8))
+                                div().size(px(12.0)).rounded_full().bg(rgb(term_red()))
                             }
-                            _ => div().size(px(12.0)).rounded_full().bg(rgb(0xa6e3a1)),
+                            _ => div().size(px(12.0)).rounded_full().bg(rgb(term_green())),
                         })
                         .child(
                             div()
                                 .text_sm()
-                                .text_color(rgb(TERM_FG))
+                                .text_color(rgb(term_fg()))
                                 .child(match status {
                                     RemoteStatus::Connecting => "Connecting…",
                                     RemoteStatus::Disconnected => "Connection failed",
@@ -372,8 +372,8 @@ pub(crate) fn render_connection_overlay(
                                 .h(px(20.0))
                                 .bg(linear_gradient(
                                     0.0,
-                                    linear_color_stop(rgb(TERM_BG), 0.0).opacity(1.0),
-                                    linear_color_stop(rgb(TERM_BG), 1.0).opacity(0.0),
+                                    linear_color_stop(rgb(term_bg()), 0.0).opacity(1.0),
+                                    linear_color_stop(rgb(term_bg()), 1.0).opacity(0.0),
                                 )),
                         ),
                 )
@@ -399,7 +399,7 @@ fn render_spinner(rotation_mrad: u32) -> Div {
         svg()
             .path("icons/loader-circle.svg")
             .size(px(14.0))
-            .text_color(rgb(TERM_FG))
+            .text_color(rgb(term_fg()))
             .with_transformation(gpui::Transformation::rotate(gpui::radians(rad))),
     )
 }

@@ -4,17 +4,15 @@ use std::rc::Rc;
 use gpui::*;
 use rust_i18n::t;
 
+use crate::app::AppCtx;
 use crate::app::{CrabportApp, SidebarItem, Tab, TabKind};
 use crate::color::*;
-use crate::components::context_menu::ContextMenuController;
-use crate::components::dialog::{AlertController, AlertSeverity, AlertState};
-use crate::layouts::connection_form::ConnectionFormState;
-use crate::layouts::panel::render_panel;
+use crate::components::dialog::{AlertSeverity, AlertState};
+use crate::layouts::panel::{PanelCaps, render_panel};
 use crate::layouts::tabbar::render_tab_bar;
 use crate::layouts::terminal_toolbar::render_terminal_toolbar;
-use crate::views;
-use crate::views::hosts::{ConnectionHost, HostsView};
-use crate::views::panel::sftp::SftpPanel;
+use crate::views::hosts::{ConnectionFormState, ConnectionHost};
+use crate::views::panel::PanelKind;
 use crate::views::terminal::TerminalView;
 
 pub fn render_content(
@@ -25,21 +23,35 @@ pub fn render_content(
     terminal_views: &HashMap<u64, Entity<TerminalView>>,
     hosts: &[ConnectionHost],
     form_entity: Option<&ConnectionFormState>,
-    sftp_panel: &Entity<SftpPanel>,
-    snippets_panel: &Entity<crate::views::panel::snippets_panel::SnippetsPanel>,
-    history_panel: &Entity<crate::views::panel::history_command_panel::HistoryCommandPanel>,
-    // Active index of the right-hand panel tab strip (SFTP / History /
-    // Snippets). Read by the caller (which owns the `CrabportApp` borrow)
-    // and passed in to avoid a nested `handle.read_with` during render.
-    panel_active_tab: usize,
-    hosts_view: &Entity<HostsView>,
-    snippets_view: &Entity<crate::views::snippets::SnippetsView>,
-    alert_controller: &Entity<AlertController>,
-    context_menu: &Entity<ContextMenuController>,
+    // Active panel pane the user last selected (semantic identity, not a
+    // positional index — see `PanelKind`). Read by the caller (which owns
+    // the `CrabportApp` borrow) and passed in to avoid a nested
+    // `handle.read_with` during render.
+    panel_active_tab: PanelKind,
+    // Pre-read by the caller (which owns the `CrabportApp` borrow) to avoid
+    // a nested `handle.read_with` during render — same reason as
+    // `panel_active_tab`.
+    tunnel_list: Vec<crate::views::tunnels::TunnelView>,
+    tunnel_form_state: Option<crate::views::tunnels::TunnelFormState>,
+    snippet_form_state: Option<crate::views::snippets::SnippetFormState>,
+    ctx: &AppCtx,
     window: &mut Window,
     cx: &mut App,
 ) -> Div {
+    // Unpack the shared context once — every field is a cheap handle/Arc.
+    let sftp_panel = &ctx.sftp_panel;
+    let snippets_panel = &ctx.snippets_panel;
+    let history_panel = &ctx.history_panel;
+    let tunnels_panel = &ctx.tunnels_panel;
+    let hosts_view = &ctx.hosts_view;
+    let snippets_view = &ctx.snippets_view;
+    let tunnels_view = &ctx.tunnels_view;
+    let context_menu = &ctx.context_menu;
+    let alert_controller = &ctx.alert;
     let active_tab = tabs.iter().find(|t| t.id == active_tab_id);
+    // Clone the tunnel list for the panel — the full-page TunnelsView
+    // (SidebarItem::Tunnels arm below) consumes the original `tunnel_list`.
+    let tunnel_list_for_panel = tunnel_list.clone();
     let handle_c = handle.clone();
     let on_close: Rc<dyn Fn(u64, &mut Window, &mut App)> = Rc::new(move |id, _w, cx| {
         handle_c.update(cx, |app, cx| {
@@ -55,83 +67,162 @@ pub fn render_content(
     };
 
     let view: AnyElement = match active_tab.map(|t| t.kind) {
-        Some(TabKind::Home) => match selected {
-            SidebarItem::Sessions => {
-                let app_handle = handle.clone();
-                let on_connect = move |host_id: i64, _w: &mut Window, cx: &mut App| {
-                    app_handle.update(cx, |app, cx| {
-                        app.connect_to_host(host_id, cx);
-                    });
-                };
-                let app_handle_edit = handle.clone();
-                let on_edit = move |host_id: i64, w: &mut Window, cx: &mut App| {
-                    app_handle_edit.update(cx, |app, cx| {
-                        app.edit_host(host_id, w, cx);
-                    });
-                };
-                let app_handle_remove = handle.clone();
-                let on_remove = move |host_id: i64, _w: &mut Window, cx: &mut App| {
-                    app_handle_remove.update(cx, |app, cx| {
-                        app.remove_host(host_id, cx);
-                    });
-                };
+        Some(TabKind::Home) => {
+            match selected {
+                SidebarItem::Sessions => {
+                    let app_handle = handle.clone();
+                    let on_connect = move |host_id: i64, _w: &mut Window, cx: &mut App| {
+                        app_handle.update(cx, |app, cx| {
+                            app.connect_to_host(host_id, cx);
+                        });
+                    };
+                    let app_handle_edit = handle.clone();
+                    let on_edit = move |host_id: i64, w: &mut Window, cx: &mut App| {
+                        app_handle_edit.update(cx, |app, cx| {
+                            app.edit_host(host_id, w, cx);
+                        });
+                    };
+                    let app_handle_remove = handle.clone();
+                    let on_remove = move |host_id: i64, _w: &mut Window, cx: &mut App| {
+                        app_handle_remove.update(cx, |app, cx| {
+                            app.remove_host(host_id, cx);
+                        });
+                    };
 
-                let on_new_rc: Rc<dyn Fn(&mut Window, &mut App)> = Rc::new(on_new);
-                let on_connect_rc: Rc<dyn Fn(i64, &mut Window, &mut App)> = Rc::new(on_connect);
-                let on_edit_rc: Rc<dyn Fn(i64, &mut Window, &mut App)> = Rc::new(on_edit);
-                let on_remove_rc: Rc<dyn Fn(i64, &mut Window, &mut App)> = Rc::new(on_remove);
+                    let on_new_rc: Rc<dyn Fn(&mut Window, &mut App)> = Rc::new(on_new);
+                    let on_connect_rc: Rc<dyn Fn(i64, &mut Window, &mut App)> = Rc::new(on_connect);
+                    let on_edit_rc: Rc<dyn Fn(i64, &mut Window, &mut App)> = Rc::new(on_edit);
+                    let on_remove_rc: Rc<dyn Fn(i64, &mut Window, &mut App)> = Rc::new(on_remove);
 
-                hosts_view.update(cx, |view, cx| {
-                    view.set_state(
-                        hosts.to_vec(),
-                        form_entity.cloned(),
-                        Some(on_new_rc),
-                        Some(on_connect_rc),
-                        Some(on_edit_rc),
-                        Some(on_remove_rc),
-                        context_menu.clone(),
-                        alert_controller.clone(),
-                        cx,
-                    );
-                });
+                    hosts_view.update(cx, |view, cx| {
+                        view.set_state(
+                            hosts.to_vec(),
+                            form_entity.cloned(),
+                            Some(on_new_rc),
+                            Some(on_connect_rc),
+                            Some(on_edit_rc),
+                            Some(on_remove_rc),
+                            context_menu.clone(),
+                            alert_controller.clone(),
+                            cx,
+                        );
+                    });
 
-                hosts_view.clone().into_any_element()
+                    hosts_view.clone().into_any_element()
+                }
+                SidebarItem::Tunnels => {
+                    let app_handle = handle.clone();
+                    let on_new = move |w: &mut Window, cx: &mut App| {
+                        app_handle.update(cx, |app, cx| {
+                            app.open_tunnel_form_for_create(w, cx);
+                        });
+                    };
+                    let app_handle_start = handle.clone();
+                    let on_start = move |id: i64, w: &mut Window, cx: &mut App| {
+                        app_handle_start.update(cx, |app, cx| {
+                            app.start_tunnel_owned(id, w, cx);
+                        });
+                    };
+                    let app_handle_stop = handle.clone();
+                    let on_stop = move |id: i64, _w: &mut Window, cx: &mut App| {
+                        app_handle_stop.update(cx, |app, cx| {
+                            app.stop_tunnel(id, cx);
+                        });
+                    };
+                    let app_handle_edit = handle.clone();
+                    let on_edit = move |id: i64, w: &mut Window, cx: &mut App| {
+                        app_handle_edit.update(cx, |app, cx| {
+                            app.open_tunnel_form_for_edit(id, w, cx);
+                        });
+                    };
+                    let app_handle_remove = handle.clone();
+                    let on_remove = move |id: i64, _w: &mut Window, cx: &mut App| {
+                        app_handle_remove.update(cx, |app, cx| {
+                            app.remove_tunnel(id, cx);
+                        });
+                    };
+
+                    let on_new_rc: Rc<dyn Fn(&mut Window, &mut App)> = Rc::new(on_new);
+                    let on_start_rc: Rc<dyn Fn(i64, &mut Window, &mut App)> = Rc::new(on_start);
+                    let on_stop_rc: Rc<dyn Fn(i64, &mut Window, &mut App)> = Rc::new(on_stop);
+                    let on_edit_rc: Rc<dyn Fn(i64, &mut Window, &mut App)> = Rc::new(on_edit);
+                    let on_remove_rc: Rc<dyn Fn(i64, &mut Window, &mut App)> = Rc::new(on_remove);
+
+                    tunnels_view.update(cx, |view, cx| {
+                        view.set_state(
+                            tunnel_list,
+                            hosts.to_vec(),
+                            Some(on_new_rc),
+                            Some(on_start_rc),
+                            Some(on_stop_rc),
+                            Some(on_edit_rc),
+                            Some(on_remove_rc),
+                            context_menu.clone(),
+                            alert_controller.clone(),
+                            tunnel_form_state,
+                            cx,
+                        );
+                    });
+
+                    tunnels_view.clone().into_any_element()
+                }
+                SidebarItem::Snippets => {
+                    // Load snippets from the Store and push into the view.
+                    let store = crate::app_state::AppState::store(cx);
+                    let rows = if let Ok(snippets) = store.lock().snippets() {
+                        snippets
+                            .into_iter()
+                            .map(|s| crate::views::snippets::SnippetRow {
+                                id: s.id,
+                                name: s.name,
+                                command: s.command,
+                            })
+                            .collect::<Vec<_>>()
+                    } else {
+                        Vec::new()
+                    };
+                    // Wire New / Edit callbacks to the app's snippet-form
+                    // methods (mirrors the Tunnels arm).
+                    let app_handle = handle.clone();
+                    let on_new = move |w: &mut Window, cx: &mut App| {
+                        app_handle.update(cx, |app, cx| {
+                            app.open_snippet_form_for_create(w, cx);
+                        });
+                    };
+                    let app_handle_edit = handle.clone();
+                    let on_edit = move |id: i64, w: &mut Window, cx: &mut App| {
+                        app_handle_edit.update(cx, |app, cx| {
+                            app.open_snippet_form_for_edit(id, w, cx);
+                        });
+                    };
+                    let on_new_rc: Rc<dyn Fn(&mut Window, &mut App)> = Rc::new(on_new);
+                    let on_edit_rc: Rc<dyn Fn(i64, &mut Window, &mut App)> = Rc::new(on_edit);
+                    snippets_view.update(cx, |view, cx| {
+                        view.set_state(
+                            rows,
+                            context_menu.clone(),
+                            alert_controller.clone(),
+                            Some(on_new_rc),
+                            Some(on_edit_rc),
+                            snippet_form_state,
+                            cx,
+                        );
+                    });
+                    snippets_view.clone().into_any_element()
+                }
+                SidebarItem::History => div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .text_color(rgb(text_muted()))
+                            .child(selected.label().to_string()),
+                    )
+                    .into_any_element(),
             }
-            SidebarItem::Tunnels => {
-                views::tunnels::render_tunnels_view(|_, _| {}).into_any_element()
-            }
-            SidebarItem::Snippets => {
-                // Load snippets from the Store and push into the view.
-                let store = crate::app_state::AppState::store(cx);
-                let rows = if let Ok(snippets) = store.lock().snippets() {
-                    snippets
-                        .into_iter()
-                        .map(|s| crate::views::snippets::SnippetRow {
-                            id: s.id,
-                            name: s.name,
-                            command: s.command,
-                        })
-                        .collect::<Vec<_>>()
-                } else {
-                    Vec::new()
-                };
-                snippets_view.update(cx, |view, cx| {
-                    view.set_state(rows, context_menu.clone(), alert_controller.clone(), cx);
-                });
-                snippets_view.clone().into_any_element()
-            }
-            SidebarItem::History => div()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    div()
-                        .text_color(rgb(TEXT_MUTED))
-                        .child(selected.label().to_string()),
-                )
-                .into_any_element(),
-        },
+        }
         Some(TabKind::Terminal) => {
             if let Some(terminal_entity) = active_tab.and_then(|tab| terminal_views.get(&tab.id)) {
                 div()
@@ -147,7 +238,7 @@ pub fn render_content(
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(div().text_color(rgb(TEXT_MUTED)).child("Terminal"))
+                    .child(div().text_color(rgb(text_muted())).child("Terminal"))
                     .into_any_element()
             }
         }
@@ -156,7 +247,7 @@ pub fn render_content(
             .flex()
             .items_center()
             .justify_center()
-            .child(div().text_color(rgb(TEXT_MUTED)).child("No tab"))
+            .child(div().text_color(rgb(text_muted())).child("No tab"))
             .into_any_element(),
     };
 
@@ -292,7 +383,36 @@ pub fn render_content(
         None
     };
 
-    let has_sftp = !sftp_entries.is_empty();
+    // ---- Panel capability flags ----
+    //
+    // Each right-hand panel pane is shown only when the active terminal's
+    // backend reports the matching capability. This replaces the old
+    // `has_sftp || is_remote` gate so a Telnet tab shows History + Snippets
+    // (no SFTP / Tunnels) while an SSH tab shows all four, and a local PTY
+    // tab shows History + Snippets.
+    // `is_remote` is retained for the tunnels-panel comment context but no
+    // longer gates panel visibility — `cap_tunnels` (from the backend's
+    // `allow_tunnels()`) is the source of truth now.
+    let _is_remote = active_tab.map(|t| t.is_remote).unwrap_or(false);
+    let (cap_sftp, cap_history, cap_snippets, cap_tunnels) = if is_terminal {
+        active_tab
+            .and_then(|tab| terminal_views.get(&tab.id))
+            .map(|entity| {
+                entity.read_with(cx, |view, _cx| {
+                    (
+                        view.allow_sftp(),
+                        view.allow_history(),
+                        view.allow_snippets(),
+                        view.allow_tunnels(),
+                    )
+                })
+            })
+            .unwrap_or((false, false, false, false))
+    } else {
+        (false, false, false, false)
+    };
+    // SFTP panel visibility follows the backend's capability (`cap_sftp`),
+    // used directly below — no separate `has_sftp` alias needed.
     sftp_panel.update(cx, |panel, cx| {
         panel.set_state(
             sftp_entries,
@@ -304,6 +424,46 @@ pub fn render_content(
             active_tab_id,
             context_menu.clone(),
             alert_controller.clone(),
+            window,
+            cx,
+        );
+    });
+
+    // ---- Tunnels panel ----
+    //
+    // Wire the tunnel list + start/stop callbacks. Start routes to
+    // `app.start_tunnel_borrowed(tunnel_id, tab_id, cx)` so the tunnel
+    // reuses the active tab's SSH connection. Stop routes to
+    // `app.stop_tunnel`. Only wire `on_start` for backends that can lend
+    // their connection (`cap_tunnels`) — a local PTY or Telnet backend
+    // exposes no tunnel source, so borrowed tunnels can't start.
+    let tunnels_on_start: Option<Rc<dyn Fn(i64, &mut App)>> = if is_terminal && cap_tunnels {
+        let handle_for_start = handle.clone();
+        let tab_id = active_tab_id;
+        Some(Rc::new(move |tunnel_id: i64, cx: &mut App| {
+            handle_for_start.update(cx, |app, cx| {
+                app.start_tunnel_borrowed(tunnel_id, tab_id, cx);
+            });
+        }) as Rc<dyn Fn(i64, &mut App)>)
+    } else {
+        None
+    };
+    let tunnels_on_stop: Option<Rc<dyn Fn(i64, &mut App)>> = if is_terminal {
+        let handle_for_stop = handle.clone();
+        Some(Rc::new(move |tunnel_id: i64, cx: &mut App| {
+            handle_for_stop.update(cx, |app, cx| {
+                app.stop_tunnel(tunnel_id, cx);
+            });
+        }) as Rc<dyn Fn(i64, &mut App)>)
+    } else {
+        None
+    };
+    tunnels_panel.update(cx, |panel, cx| {
+        panel.set_state(
+            tunnel_list_for_panel,
+            tunnels_on_start,
+            tunnels_on_stop,
+            context_menu.clone(),
             window,
             cx,
         );
@@ -455,7 +615,7 @@ pub fn render_content(
     div()
         .flex_1()
         .h_full()
-        .bg(rgb(BG_BASE))
+        .bg(rgb(bg_base()))
         .flex()
         .flex_col()
         .child(render_tab_bar(
@@ -474,17 +634,49 @@ pub fn render_content(
                 .child(view)
                 .child({
                     let handle_for_panel = handle.clone();
+                    // Capture the capability flags so the `on_change` closure
+                    // can recompute the visible-pane-kind list and map the
+                    // positional index back to a `PanelKind`. The flags are a
+                    // snapshot from this render — if the active tab changes
+                    // the next render rebuilds the closure with fresh flags.
+                    let c_sftp = cap_sftp;
+                    let c_history = cap_history;
+                    let c_snippets = cap_snippets;
+                    let c_tunnels = cap_tunnels;
                     render_panel(
                         is_terminal,
                         panel_active_tab,
-                        has_sftp,
+                        PanelCaps {
+                            sftp: c_sftp,
+                            history: c_history,
+                            snippets: c_snippets,
+                            tunnels: c_tunnels,
+                        },
                         sftp_panel.clone(),
                         snippets_panel.clone(),
                         history_panel.clone(),
+                        tunnels_panel.clone(),
                         Some(std::rc::Rc::new(move |idx, _w, cx| {
+                            // Rebuild the visible-kind list in the same fixed
+                            // order as `render_panel` so the index aligns.
+                            let mut kinds: Vec<PanelKind> = Vec::with_capacity(4);
+                            if c_sftp {
+                                kinds.push(PanelKind::Sftp);
+                            }
+                            if c_history {
+                                kinds.push(PanelKind::History);
+                            }
+                            if c_snippets {
+                                kinds.push(PanelKind::Snippets);
+                            }
+                            if c_tunnels {
+                                kinds.push(PanelKind::Tunnels);
+                            }
                             handle_for_panel.update(cx, |app, cx| {
-                                app.panel_active_tab = idx;
-                                cx.notify();
+                                if let Some(k) = kinds.get(idx).copied() {
+                                    app.panel_active_tab = k;
+                                    cx.notify();
+                                }
                             });
                         })),
                     )

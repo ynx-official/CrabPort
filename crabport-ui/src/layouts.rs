@@ -1,5 +1,4 @@
 pub mod command_palette;
-pub mod connection_form;
 pub mod content;
 pub mod panel;
 pub mod sidebar;
